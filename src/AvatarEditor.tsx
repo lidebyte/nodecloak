@@ -2,9 +2,9 @@ import {useEffect,useRef,useState} from 'react';
 import {Check,X} from 'lucide-react';
 import {t} from './i18n';
 import {validateAvatarFile} from './cloud';
-import {avatarInitials,cropRect} from './avatarCrop';
-export function AccountAvatar({src,name}:{src?:string;name?:string}){
- return src?<img className="account-avatar" src={src} alt=""/>:<span className="account-avatar account-initials" aria-hidden="true">{avatarInitials(name||'')}</span>;
+import {cropRect} from './avatarCrop';
+export function AccountAvatar({src}:{src?:string;name?:string}){
+ return src?<img className="account-avatar" src={src} alt=""/>:<span className="account-avatar account-logo" aria-hidden="true"><img className="mark-light" src="/brand/symbol-positive.svg" alt=""/><img className="mark-dark" src="/brand/symbol-primary.svg" alt=""/></span>;
 }
 export function AvatarEditor({file,onSave,onClose,onError}:{file:File;onSave:(png:string)=>void;onClose:()=>void;onError:(error:string)=>void}){
  const dialog=useRef<HTMLDialogElement>(null),canvas=useRef<HTMLCanvasElement>(null),drag=useRef<{x:number;y:number;offsetX:number;offsetY:number}|null>(null);

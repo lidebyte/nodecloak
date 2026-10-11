@@ -20,11 +20,8 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "新增 Google 和邮箱登录，可修改头像与用户名，并设置密码和两步验证。 / Sign in with Google or email, edit your avatar and name, and set up a password and two-factor authentication.",
-  "新增端到端加密云同步，可同步浏览器副本配置和可迁移的网站登录状态，选择自动或手动同步，并处理设备间的冲突。 / Sync browser profiles and transferable website sign-in sessions with end-to-end encryption, automatic or manual sync, and conflict resolution.",
-  "AI 和电商网站菜单使用各站点的对应图标，查找和打开网站更方便。 / Recognize and open sites more easily with individual icons in the AI and shopping menus.",
-  "公告支持关闭和查看历史，向下滚动可继续加载更多内容。 / Dismiss announcements, browse their history, and scroll to load more.",
-  "优化个人资料、偏好设置和下拉菜单，终端工作目录可直接选择文件夹。 / Improved profile and preferences pages and dropdown menus; choose terminal working folders with a folder picker."
+  "Google 登录期间，加载提示持续显示在 Google 按钮上，不再让左下角提示和邮箱按钮反复闪动；登录失败后可重新尝试。 / Google sign-in now shows a steady loading indicator on its button without flashing the footer or email button; retry is available after a failed sign-in.",
+  "默认头像改为 NodeCloak 品牌图标，登录入口和个人资料保持一致。 / The default avatar now uses the NodeCloak brand icon consistently across the sign-in entry and profile."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

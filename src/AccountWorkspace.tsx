@@ -21,8 +21,8 @@ export function useCloudAccount(){
  useEffect(()=>{alive.current=true;void reload();const timer=setInterval(()=>{if(!working.current)void reload();},15000);let stop:(()=>void)|undefined;
   if(native)void listen('cloud-changed',()=>void reload()).then(fn=>{if(!alive.current)fn();else stop=fn;});
   return()=>{alive.current=false;clearInterval(timer);stop?.();};},[]);
- async function act<T=unknown>(action:CloudAction):Promise<T|null>{if(working.current)return null;working.current=true;setBusy(true);setError('');try{const reply=await cloudAction<T>(action);if(alive.current){setStatus(reply.status);if(action.type==='logout'||action.type==='cancelLogin')setGooglePending(false);}return reply.result;}catch(e){if(alive.current){setError(String(e));await reload();}return null;}finally{working.current=false;if(alive.current)setBusy(false);}}
- async function beginGoogle(){const result=await act<{pending:boolean}>({type:'googleStart'});if(alive.current&&result?.pending)setGooglePending(true);return result;}
+ async function act<T=unknown>(action:CloudAction):Promise<T|null>{if(working.current)return null;working.current=true;const foreground=action.type!=='googlePoll';if(foreground)setBusy(true);setError('');try{const reply=await cloudAction<T>(action);if(alive.current){setStatus(reply.status);if(action.type==='logout'||action.type==='cancelLogin')setGooglePending(false);}return reply.result;}catch(e){if(alive.current){setError(String(e));await reload();}return null;}finally{working.current=false;if(alive.current&&foreground)setBusy(false);}}
+ async function beginGoogle(){if(working.current||googlePending)return null;setGooglePending(true);const result=await act<{pending:boolean}>({type:'googleStart'});if(alive.current&&!result?.pending)setGooglePending(false);return result;}
  // OAuth outlives the profile/device view that started it.
  useEffect(()=>{if(!googlePending)return;return startGooglePolling({
   isBusy:()=>working.current,
@@ -115,16 +115,16 @@ export function AccountDialog({cloud,inline=false}:{cloud:Controller;inline?:boo
  const content=<div className="account-dialog-content">
   {!s.account?<div className="account-login">
    {!native&&<p className="notice">{t('请在桌面客户端登录')}</p>}
-   {!twoFactor&&<><button className="button secondary google-login" disabled={!native||cloud.busy||googlePending} onClick={beginGoogle}><GlobeGoogle/> {t(googlePending?'正在等待 Google 登录':'使用 Google 登录')}</button><div className="account-divider">{t('或使用邮箱')}</div></>}
+   {!twoFactor&&<><button className="button secondary google-login" disabled={!native||cloud.busy||googlePending} aria-busy={googlePending} onClick={beginGoogle}>{googlePending?<LoaderCircle size={18} className="spin" aria-hidden="true"/>:<GlobeGoogle/>} {t(googlePending?'正在等待 Google 登录':'使用 Google 登录')}</button><div className="account-divider">{t('或使用邮箱')}</div></>}
    <form onSubmit={event=>{event.preventDefault();void(twoFactor||passwordMode||sent?login():requestCode());}}>
     {twoFactor?<><p className="cloud-hint">{t('输入验证器验证码或一个未使用的恢复码。')}</p><label className="account-field"><span>{t('验证器验证码或恢复码')}</span><input autoComplete="one-time-code" value={code} onChange={event=>setCode(event.target.value)} maxLength={64} required disabled={cloud.busy}/></label></>:
-    <><label className="account-field"><span>{t('邮箱')}</span><input type="email" autoComplete="email" value={email} onChange={event=>{setEmail(event.target.value);setSent(false);}} required disabled={cloud.busy} maxLength={254}/></label>
-     {passwordMode?<label className="account-field"><span>{t('密码')}</span><input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} maxLength={128} required disabled={cloud.busy}/></label>:
-      sent&&<label className="account-field"><span>{t('验证码')}</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={event=>setCode(event.target.value.replace(/\D/g,''))} maxLength={6} minLength={6} required disabled={cloud.busy}/></label>}
+    <><label className="account-field"><span>{t('邮箱')}</span><input type="email" autoComplete="email" value={email} onChange={event=>{setEmail(event.target.value);setSent(false);}} required disabled={cloud.busy||googlePending} maxLength={254}/></label>
+     {passwordMode?<label className="account-field"><span>{t('密码')}</span><input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} maxLength={128} required disabled={cloud.busy||googlePending}/></label>:
+      sent&&<label className="account-field"><span>{t('验证码')}</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={event=>setCode(event.target.value.replace(/\D/g,''))} maxLength={6} minLength={6} required disabled={cloud.busy||googlePending}/></label>}
     </>}
     <div className="account-actions">{twoFactor?<button type="button" className="button secondary" disabled={cloud.busy} onClick={()=>void cloud.act({type:'cancelLogin'}).then(result=>{if(result!==null){setTwoFactor(false);setCode('');setSent(false);}})}>{t('返回登录')}</button>:
-     <><button type="button" className="button secondary" disabled={cloud.busy||googlePending} onClick={()=>{setPasswordMode(!passwordMode);setPassword('');setCode('');setSent(false);}}>{t(passwordMode?'使用邮箱验证码':'使用密码登录')}</button>{sent&&!passwordMode&&<button type="button" className="button secondary" disabled={cloud.busy} onClick={()=>void requestCode()}><Mail size={14}/>{t('重新发送')}</button>}</>}
-     <button className="button primary" type="submit" disabled={!native||cloud.busy||googlePending}>{cloud.busy?<LoaderCircle size={15} className="spin"/>:<LogIn size={15}/>} {t(twoFactor?'验证并登录':passwordMode?'登录':sent?'登录 / 注册':'发送验证码')}</button></div>
+     <><button type="button" className="button secondary" disabled={cloud.busy||googlePending} onClick={()=>{setPasswordMode(!passwordMode);setPassword('');setCode('');setSent(false);}}>{t(passwordMode?'使用邮箱验证码':'使用密码登录')}</button>{sent&&!passwordMode&&<button type="button" className="button secondary" disabled={cloud.busy||googlePending} onClick={()=>void requestCode()}><Mail size={14}/>{t('重新发送')}</button>}</>}
+     <button className="button primary" type="submit" disabled={!native||cloud.busy||googlePending}>{cloud.busy&&!googlePending?<LoaderCircle size={15} className="spin"/>:<LogIn size={15}/>} {t(twoFactor?'验证并登录':passwordMode?'登录':sent?'登录 / 注册':'发送验证码')}</button></div>
    </form>
   </div>:cloud.panel==='account'?<AccountProfile key={s.account.id} cloud={cloud} googlePending={googlePending} onGoogle={beginGoogle}/>
 :cloud.panel==='devices'?<div className="account-devices"><div className="cloud-section-heading"><span>{t('本机校验码')} <code>{verificationCode(s.fingerprint||'')}</code>{s.vaultCode&&<small className="vault-code">{t('加密空间校验码')} <code>{s.vaultCode.toUpperCase().match(/.{4}/g)?.join(' ')}</code></small>}</span><button className="button secondary compact" disabled={cloud.busy} onClick={()=>void loadDevices()}><RefreshCw size={14}/>{t('刷新')}</button></div>
@@ -147,7 +147,7 @@ export function AccountDialog({cloud,inline=false}:{cloud:Controller;inline?:boo
    {!s.setupComplete&&(gate==='unlock'||!s.recoverySaved)&&<div className="account-actions"><button type="button" className="button secondary compact" disabled={cloud.busy} onClick={()=>void cloud.act({type:'setup',mode:'none',localIds:[],cloudIds:[],sessions:false}).then(result=>{if(result!==null)cloud.setPanel(null);})}><Monitor size={14}/>{t('暂不同步')}</button></div>}
   </div>}
   {cloud.error&&<p className="profile-error" role="alert">{t(cloud.error)}</p>}
-  {cloud.busy&&<div className="account-progress" role="status"><LoaderCircle size={14} className="spin"/>{t('正在处理')}</div>}
+  {cloud.busy&&!googlePending&&<div className="account-progress" role="status"><LoaderCircle size={14} className="spin"/>{t('正在处理')}</div>}
   </div>;
  if(inline)return <section className="settings-card account-page" aria-label={t(cloud.panel==='devices'?'设备':'个人资料')}>{content}</section>;
  return <dialog ref={dialog} className={`app-dialog account-dialog${s.account?' account-dialog-signed-in':''}`} aria-labelledby="account-title" onCancel={e=>{e.preventDefault();if(!cloud.busy)cloud.setPanel(null);}}>

@@ -10,10 +10,10 @@ function controller(status:CloudStatus):ComponentProps<typeof CloudSettings>['cl
 }
 const account={id:'test-account',name:'<script>unsafe</script>',email:'test@example.com',avatar:''};
 describe('account and sync screens',()=>{
- it('shows initials and the real Google association below profile and security settings',()=>{
+ it('shows the brand avatar and the real Google association below profile and security settings',()=>{
   setLanguage('en');const cloud={...controller({account:{...account,name:'jamesupereal',googleLinked:true,hasPassword:true}}),panel:'account' as const};
   const html=renderToStaticMarkup(<AccountDialog inline cloud={cloud}/>);
-  expect(html).toContain('>JA</span>');expect(html).toContain('@jamesupereal');
+  expect(html).toContain('account-avatar account-logo');expect(html).toContain('/brand/symbol-primary.svg');expect(html).toContain('@jamesupereal');
   expect(html).toContain('Unlink');expect(html).not.toContain('Link Google');
   expect(html.indexOf('account-profile-hero')).toBeLessThan(html.indexOf('account-oauth'));
   expect(html).toContain('Change password');expect(html).toContain('Set up 2FA');
