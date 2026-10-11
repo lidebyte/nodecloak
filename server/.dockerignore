@@ -1,0 +1,8 @@
+.env
+.env.*
+.qa
+*.log
+*.pem
+*.key
+*.p12
+.git

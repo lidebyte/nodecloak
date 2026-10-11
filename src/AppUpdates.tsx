@@ -101,7 +101,7 @@ export default function AppUpdates({ expanded, busy=false, onBusyChange }: { exp
     </div>}
     {progress && <div className="update-progress" role="status" aria-live="polite"><p>{t(progressText)}</p>{progress.phase==='downloading' && <progress max={100} value={percent ?? undefined} aria-label={t("更新下载进度")} />}</div>}
     {t(error && <p className="update-open-error" role="alert">{t(error)}</p>)}
-    {expanded && <div className="update-controls"><p>{t("点击“立即更新”后，自动下载、校验、安装并重启应用。配置和修复记录保留。")}</p><button className="button secondary" disabled={checking || busy || updating} onClick={() => void check()}><RefreshCw size={14} className={checking ? 'spin' : ''} />{t(checking ? '正在检查' : '检查更新')}</button></div>}
+    {expanded && <div className="update-controls"><p>{t("点击“立即更新”后，自动下载、校验、安装并重启应用。配置和修复记录保留。")}</p><button className="button secondary compact" disabled={checking || busy || updating} onClick={() => void check()}><RefreshCw size={14} className={checking ? 'spin' : ''} />{t(checking ? '正在检查' : '检查更新')}</button></div>}
     <dialog ref={confirmDialog} className="app-dialog" onCancel={()=>setUpdateConfirmation(false)}><h2>{t("关闭副本并更新？")}</h2><p className="modal-subtitle">{t("更新需要重启应用，本地代理也会暂停。请保存浏览器中未完成的输入。")}</p><p>{t("确认后关闭所有运行中的专用副本，再下载、校验并安装更新。副本数据和配置保留。")}</p><div className="modal-actions"><button className="button secondary" onClick={()=>setUpdateConfirmation(false)}>{t("暂不更新")}</button><button className="button primary" onClick={()=>void install(true)}>{t("关闭副本并更新")}</button></div></dialog>
   </section>;
 }

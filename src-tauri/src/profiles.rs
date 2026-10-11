@@ -226,7 +226,7 @@ fn existing_preferences(root: &Path, browser: &str) -> Preferences {
     }
     prefs
 }
-fn guard_tree(root: &Path) -> Result<(), String> {
+pub(crate) fn guard_tree(root: &Path) -> Result<(), String> {
     let mut path = PathBuf::new();
     for part in root.components() {
         path.push(part);
@@ -448,7 +448,7 @@ pub fn draft_upstream(root: &Path, id: Option<&str>, draft: &Draft) -> Result<Up
     up.validate()?;
     Ok(up)
 }
-fn validate(draft: &Draft) -> Result<(), String> {
+pub(crate) fn validate(draft: &Draft) -> Result<(), String> {
     crate::regional::validate(&draft.preferences)?;
     let advanced = &draft.preferences.advanced;
     if draft.browser != "firefox"
@@ -495,14 +495,27 @@ fn validate(draft: &Draft) -> Result<(), String> {
     }
     draft.proxy.validate()
 }
-pub fn create(root: &Path, mut draft: Draft, copy_id: Option<&str>) -> Result<Profile, String> {
+pub fn create(root: &Path, draft: Draft, copy_id: Option<&str>) -> Result<Profile, String> {
+    create_with_id(root, draft, copy_id, identifier())
+}
+pub(crate) fn create_synced(root: &Path, draft: Draft, id: &str) -> Result<Profile, String> {
+    if !valid_id(id) || id.starts_with("legacy-") || load(root)?.iter().any(|p| p.id == id) {
+        return Err("同步副本标识冲突".into());
+    }
+    create_with_id(root, draft, None, id.into())
+}
+fn create_with_id(
+    root: &Path,
+    mut draft: Draft,
+    copy_id: Option<&str>,
+    id: String,
+) -> Result<Profile, String> {
     crate::regional::normalize_sources(&mut draft.preferences);
     validate(&draft)?;
     let mut profiles = load(root)?;
     if profiles.len() >= 500 {
         return Err("副本数量已达 500，请先清理最近删除".into());
     }
-    let id = identifier();
     let mut pending = PendingCredentials {
         id: id.clone(),
         references: vec![],
@@ -1037,15 +1050,27 @@ mod tests {
     fn removes_default_name_prefix_without_renaming_custom_profiles() {
         let root = test_dir();
         let mut profiles = load(root.path()).unwrap();
-        assert_eq!(profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Chrome", "Edge", "Firefox"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["Chrome", "Edge", "Firefox"]
+        );
         profiles[0].name = "默认 Chrome".into();
         profiles[1].name = "My Edge".into();
         save(root.path(), &profiles).unwrap();
         let custom = create(root.path(), draft("默认 Chrome"), None).unwrap();
         let loaded = load(root.path()).unwrap();
-        assert_eq!(loaded.iter().find(|p| p.id == profiles[0].id).unwrap().name, "Chrome");
-        assert_eq!(loaded.iter().find(|p| p.id == profiles[1].id).unwrap().name, "My Edge");
-        assert_eq!(loaded.iter().find(|p| p.id == custom.id).unwrap().name, "默认 Chrome");
+        assert_eq!(
+            loaded.iter().find(|p| p.id == profiles[0].id).unwrap().name,
+            "Chrome"
+        );
+        assert_eq!(
+            loaded.iter().find(|p| p.id == profiles[1].id).unwrap().name,
+            "My Edge"
+        );
+        assert_eq!(
+            loaded.iter().find(|p| p.id == custom.id).unwrap().name,
+            "默认 Chrome"
+        );
     }
     #[test]
     fn removes_generated_legacy_notes_but_keeps_user_notes() {
@@ -1059,9 +1084,24 @@ mod tests {
         custom.notes = "从原专用浏览器接入，原有数据保留".into();
         let custom = create(root.path(), custom, None).unwrap();
         let loaded = load(root.path()).unwrap();
-        assert!(loaded.iter().find(|p| p.id == profiles[0].id).unwrap().notes.is_empty());
-        assert_eq!(loaded.iter().find(|p| p.id == profiles[1].id).unwrap().notes, "Work browser");
-        assert_eq!(loaded.iter().find(|p| p.id == custom.id).unwrap().notes, custom.notes);
+        assert!(loaded
+            .iter()
+            .find(|p| p.id == profiles[0].id)
+            .unwrap()
+            .notes
+            .is_empty());
+        assert_eq!(
+            loaded
+                .iter()
+                .find(|p| p.id == profiles[1].id)
+                .unwrap()
+                .notes,
+            "Work browser"
+        );
+        assert_eq!(
+            loaded.iter().find(|p| p.id == custom.id).unwrap().notes,
+            custom.notes
+        );
     }
     #[test]
     fn legacy_region_sources_are_disabled_on_load_without_changing_proxy_or_language() {

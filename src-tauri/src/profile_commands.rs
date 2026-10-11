@@ -97,6 +97,7 @@ pub async fn match_profile_region(
 pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Result<(), String> {
     let p = profiles::get(root, id, false)?;
     let path = profiles::path(root, &p)?;
+    crate::cloud::browser_session::recover(&path)?;
     if profiles::running(root, &p)? {
         if destination == "startup" || destination == "focus" {
             if crate::regional::needs_control(
@@ -126,6 +127,7 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
             port,
         );
     }
+    crate::cloud::session_sync::before_launch(root, id)?;
     if crate::regional::needs_control(&p.preferences) {
         runtime.1.stop(id);
         let result = (|| -> Result<(), String> {
@@ -195,7 +197,7 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
     Ok(())
 }
 fn destination_url(root: &Path, p: &Profile, destination: &str) -> Result<String, String> {
-    if let Some(url) = crate::browser_sites::destination_url(destination) {
+    if let Some(url) = crate::browser_sites::destination_url(root, destination) {
         return Ok(url.into());
     }
     Ok(match destination {
@@ -237,13 +239,25 @@ mod website_shortcut_tests {
         let draft: Draft = serde_json::from_value(serde_json::json!({
             "name": "Shopping", "browser": "chrome",
             "proxy": {"mode": "system", "host": "", "port": 0, "username": ""}
-        })).unwrap();
+        }))
+        .unwrap();
         let profile = profiles::create(root.path(), draft, None).unwrap();
         let startup = profile.preferences.startup_url.clone();
-        assert_eq!(destination_url(root.path(), &profile, "site:chatgpt").unwrap(), "https://chatgpt.com/");
-        assert_eq!(destination_url(root.path(), &profile, "site:amazon").unwrap(), "https://www.amazon.com/");
-        assert_eq!(destination_url(root.path(), &profile, "startup").unwrap(), startup);
-        assert!(destination_url(root.path(), &profile, "verify").unwrap().contains(&format!("profile={}", profile.id)));
+        assert_eq!(
+            destination_url(root.path(), &profile, "site:chatgpt").unwrap(),
+            "https://chatgpt.com/"
+        );
+        assert_eq!(
+            destination_url(root.path(), &profile, "site:amazon").unwrap(),
+            "https://www.amazon.com/"
+        );
+        assert_eq!(
+            destination_url(root.path(), &profile, "startup").unwrap(),
+            startup
+        );
+        assert!(destination_url(root.path(), &profile, "verify")
+            .unwrap()
+            .contains(&format!("profile={}", profile.id)));
         assert!(destination_url(root.path(), &profile, "site:unknown").is_err());
     }
 }

@@ -5,12 +5,15 @@ import { checkCount, defaultTimezoneTarget, definitions, labels, recommendedChec
 import { parseBrowserReport, withBrowserReport, type BrowserReport } from './browser-report';
 import AppUpdates from './AppUpdates';
 import ThemeControl from './ThemeControl';
+import {useCloudAccount,AccountButton,AccountDialog,CloudSettings} from './AccountWorkspace';
 import WindowControls from './WindowControls';
 import TerminalWorkspace from './TerminalWorkspace';
 import {useLanguage} from './LanguageControl';
 import BrowserProfiles from './BrowserProfiles';
 import BrowserIcon from './BrowserIcon';
 import BrowserSiteShortcuts from './BrowserSiteShortcuts';
+import AnnouncementCenter from './AnnouncementCenter';
+import {openCatalogSupport,useBrowserSiteCatalog} from './browser-site-catalog';
 import SelectMenu from './SelectMenu';
 import {listProfiles,quitApplication,type BrowserProfile} from './browser-profiles';
 import {setActiveProfile} from './bridge';
@@ -21,9 +24,9 @@ import FirefoxSetup from './FirefoxSetup';
 import { FontReview, FontResult } from './FontDialogs';
 import { getFontCatalog, removeUserFonts, type FontCatalog, type FontOutcome } from './bridge';
 import { summarizeOutcomes } from './repair-result';
-import { getTimezoneCatalog, checkRepairReadiness, openTimezoneSettings, openTelegramGroup, openFirefoxDownload, native, type BrowserDestination, scanEnvironment, getHistory, repairEnvironment, undoRepair, launchBrowser } from './bridge';
+import { getTimezoneCatalog, checkRepairReadiness, openTimezoneSettings, openFirefoxDownload, native, type BrowserDestination, scanEnvironment, getHistory, repairEnvironment, undoRepair, launchBrowser } from './bridge';
 
-type Page = 'profiles' | 'computer' | 'overview' | 'code' | 'history' | 'settings';
+type Page = 'profiles' | 'computer' | 'overview' | 'code' | 'history' | 'settings' | 'account' | 'devices';
 type RepairRequest = { browser: BrowserId; ids: CheckId[]; consentTimezone: boolean; consentFonts: boolean; timezoneTarget: TimezoneTarget; customTimezone: string };
 type Modal = {kind:'fonts';catalog:FontCatalog;initialIds:string[]} | {kind:'font-result';outcomes:FontOutcome[]} | { kind: 'repair'; ids: CheckId[] } | { kind: 'detail'; id: CheckId } | { kind: 'undo'; record: RepairRecord } | { kind: 'help' } | { kind: 'result'; outcomes: Outcome[]; request: RepairRequest } | { kind: 'blocked'; request: RepairRequest; reason: string } | { kind: 'report' };
 const icons: Record<CheckId, ElementType> = { connection: Wifi, route: Globe2, webrtc: ShieldCheck, dns: LockKeyhole, language: Languages, timezone: Clock3, offset: Clock3, clock: Clock3, locale: Languages, cli: Terminal, fonts: Type, emoji: Fingerprint, webgl: Monitor, screen: Monitor, networkInfo: Wifi, plugins: Settings2, tracking: ShieldCheck };
@@ -32,7 +35,7 @@ const nav: { id: Page; title: string; icon: ElementType }[] = [
   { id: 'overview', title: '环境概览', icon: LayoutDashboard }, { id: 'code', title: '终端', icon: Terminal }, { id: 'history', title: '修复记录', icon: History },
 ];
 const pageTitles: Record<Page, string> = {
-  profiles: '浏览器副本', computer: '电脑环境', overview: '环境概览', code: '终端', history: '修复记录', settings: '偏好设置',
+  profiles: '浏览器副本', computer: '电脑环境', overview: '环境概览', code: '终端', history: '修复记录', settings: '偏好设置', account:'个人资料',devices:'设备',
 };
 const browserNames = { chrome: 'Google Chrome', edge: 'Microsoft Edge', firefox: 'Firefox' };
 function Mark({ small = false }: { small?: boolean }) { return <span className={small ? 'brand-mark small' : 'brand-mark'}><img className="mark-light" src="/brand/symbol-positive.svg" alt="" /><img className="mark-dark" src="/brand/symbol-primary.svg" alt="" /></span>; }
@@ -47,7 +50,11 @@ function Orbit({ count, total }: { count: number; total: number }) {
 
 export default function App() {
   useLanguage();
+  const {catalog:siteCatalog}=useBrowserSiteCatalog();
+  const [announcementToolbar,setAnnouncementToolbar]=useState<HTMLSpanElement|null>(null);
+  const cloud=useCloudAccount();
   const [page, setPage] = useState<Page>('profiles');
+  useEffect(()=>{if((page==='account'||page==='devices')&&!cloud.status.account)setPage('profiles');},[page,cloud.status.account?.id]);
   const [activeProfile,setActiveProfileState]=useState<BrowserProfile|null>(null);
   const [profileOptions,setProfileOptions]=useState<BrowserProfile[]>([]);
   const [quitting,setQuitting]=useState(false);
@@ -191,15 +198,16 @@ export default function App() {
       <div className="brand" data-tauri-drag-region="deep"><Mark /><span><span className="brand-node">Node</span><b>Cloak</b><small>BROWSER WORKSPACE</small></span></div>
       <span className="sidebar-label">{t("工作空间")}</span>
       <nav aria-label={t("主导航")}>{nav.map(({ id, title, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} disabled={!!busy} onClick={() => void navigate(id)}><Icon size={18} strokeWidth={1.7} /><span>{t(title)}</span>{id === 'overview' && warnings.length > 0 && <span className="nav-count">{warnings.length}</span>}{id === 'history' && history.filter(r => r.status === 'applied').length > 0 && <span className="nav-history-dot" />}</button>)}</nav>
-      <div className="sidebar-separator" /><button className={`nav-item ${page === 'settings' ? 'active' : ''}`} disabled={!!busy} onClick={() => setPage('settings')}><Settings2 size={18} strokeWidth={1.7} /><span>{t("偏好设置")}</span></button>
-      <div className="sidebar-bottom"><div className="sidebar-footer"><span>v{t(version)}</span></div></div>
+      <div className="sidebar-bottom"><div className="sidebar-footer"><AccountButton cloud={cloud} preferencesDisabled={!!busy} onPreferences={()=>{cloud.setPanel(null);setPage('settings');}} onAccountPage={next=>{cloud.setError('');cloud.setPanel(null);setPage(next);}}/><span>v{t(version)}</span></div></div>
     </aside>
     <main>
-      <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}<button className="telegram-group" title={t("加入 Telegram 群")} disabled={!!busy} onClick={() => void perform('正在打开 Telegram 群', openTelegramGroup)}><Send size={14} /><span>Telegram Group</span><ArrowUpRight size={13} /></button><span className="platform-label"><Monitor size={13} />{t(scan?.platform || '桌面环境')}</span><button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
+      <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}{siteCatalog.supportURL&&<button className="telegram-group" title={siteCatalog.supportURL.startsWith('https://t.me/')?t("加入 Telegram 群"):t("帮助与说明")} disabled={!!busy} onClick={() => void perform('正在打开帮助', openCatalogSupport)}>{siteCatalog.supportURL.startsWith('https://t.me/')?<Send size={14}/>:<CircleHelp size={14}/>}<span>{siteCatalog.supportURL.startsWith('https://t.me/')?'Telegram Group':t('帮助与说明')}</span><ArrowUpRight size={13} /></button>}<span className="announcement-toolbar-slot" ref={setAnnouncementToolbar}/><button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
       <div className="main-content">
-        <div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{page!=='settings'&&<button className="button secondary" style={{visibility:page==='profiles'||page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>
+        <AnnouncementCenter announcements={siteCatalog.announcements??[]} toolbarTarget={announcementToolbar}/>
+        {page!=='profiles'&&<div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{!['settings','account','devices'].includes(page)&&<button className="button secondary" style={{visibility:page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>}
 
         <AppUpdates expanded={page === 'settings'} busy={!!busy} onBusyChange={value=>setBusy(value?'正在更新应用':null)} />
+        {(page==='account'||page==='devices')&&cloud.status.account&&<AccountDialog inline cloud={{...cloud,panel:page}}/>}
         {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} busy={!!busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
         {activeProfile&&['overview','history'].includes(page)&&<div className="active-profile-bar"><div className={page==='overview'?'overview-profile-identity':undefined}>{page==='overview'?<label className="overview-profile-picker"><span>{t("当前副本")}</span><SelectMenu menuMinWidth={320} noWrap label={t("切换浏览器副本")} disabled={!!busy} value={activeProfile.id} onOpen={()=>void loadProfileOptions().catch(e=>notify(String(e),true))} onChange={value=>{const p=profileOptions.find(p=>p.id===value);if(p&&p.id!==activeProfile.id)void selectProfile(p);}} options={(!profileOptions.some(p=>p.id===activeProfile.id)?[activeProfile,...profileOptions]:profileOptions).map(p=>({value:p.id,label:`${p.name} · ${browserNames[p.browser]}`,icon:<BrowserIcon browser={p.browser}/>}))} /></label>:<strong>{activeProfile.name}</strong>}<span>{t(browserNames[browser])} · {t(activeProfile.proxy.mode==='system'?'系统代理':activeProfile.proxy.mode==='direct'?'直连':activeProfile.proxy.host+':'+activeProfile.proxy.port)}</span></div><button disabled={!!busy} className={page==='overview'?'selected':''} onClick={()=>setPage('overview')}>{t("环境检测")}</button><button disabled={!!busy} className={page==='history'?'selected':''} onClick={()=>setPage('history')}>{t("修复记录")}</button><button disabled={!!busy} onClick={()=>setPage('profiles')}>{t("返回列表")}</button></div>}
         {page==='computer'&&<div className="computer-sections"><div className="notice"><Info size={18}/><p>{t("这里的修改会影响电脑的所有应用。更改时区或卸载用户字体前，需退出全部专用浏览器副本。")}</p></div><section className="check-table">{checks.map(checkRow)}</section><div className="notice"><Clock3 size={18}/><p>{t("时区只影响本地时间显示，不会校准电脑时钟。若网页提示 Incorrect device time，请在系统日期与时间中启用自动设置时间并立即同步，然后重启副本复检。")}</p></div><section className="settings-card"><h3>{t("用户字体")}</h3><p>{t("查看可卸载的用户字体，修改前备份，支持从电脑级修复记录恢复。")}</p><div className="settings-actions"><button className="button secondary" disabled={!!busy} onClick={()=>void fontDialog()}>{t("管理用户字体")}</button><button className="button secondary" disabled={!!busy} onClick={()=>setPage('history')}>{t("查看电脑级修复记录")}</button></div></section></div>}
@@ -207,7 +215,7 @@ export default function App() {
           onDownload={() => void perform('正在打开 Firefox 官方下载页', openFirefoxDownload)}
           onRefresh={() => void perform('正在重新检测 Firefox', () => refresh())} />}
         {page === 'overview' && <>
-          <div className="workspace-actions overview-browser-actions"><button className="button primary" disabled={!!busy || !scan?.browserAvailable} onClick={() => void openBrowser('verify')}><Globe2 size={16} />{t("打开浏览器")}<ArrowUpRight size={15} /></button><BrowserSiteShortcuts disabled={!!busy || !scan?.browserAvailable} onOpen={id=>void openBrowser(`site:${id}`)} /></div>
+          <div className="workspace-actions overview-browser-actions"><button className="button primary" disabled={!!busy || !scan?.browserAvailable} onClick={() => void openBrowser('verify')}><Globe2 size={16} />{t("打开浏览器")}<ArrowUpRight size={15} /></button><BrowserSiteShortcuts disabled={!!busy || !scan?.browserAvailable} onOpen={(id,revision)=>void openBrowser(`site:${id}@${revision}`)} /></div>
           {!scan?.browserAvailable && scan && browser !== 'firefox' && <div className="notice warning-notice"><Info size={17} /><p>{t("没有找到")}{t(browserNames[browser])}{t("。请先安装，或切换到其他浏览器副本，然后重新检测。")}</p></div>}
           <div className="hero-grid">
             <section className="hero-panel"><div className="hero-copy"><span className="eyebrow"><span />ENVIRONMENT CHECK</span><h2>{t(!scan ? '正在检测' : warnings.length ? `${warnings.length} 项建议调整` : '未发现建议调整项')}</h2><p>{t(!scan ? '读取本地配置并检查网络连接，请稍候。' : '已配置的项目可在专用浏览器中继续复检。')}</p><button className="button primary" disabled={!!busy || !scan || !suggested.length} onClick={bulkRepair}><Sparkles size={16} />{t(suggested.length ? `一键修复 ${suggested.length} 项` : '自动修复项已配置')}<ArrowRight size={15} /></button><span className="hero-note"><History size={12} />{t("自动备份原值，随时可以撤销")}</span></div><Orbit count={warnings.length} total={checks.length||checkCount} /></section>
@@ -234,10 +242,12 @@ export default function App() {
 
         <ThemeControl visible={page==='settings'} />
         {page === 'settings' && <>
+          <CloudSettings cloud={cloud}/>
           <section className="settings-card about-card"><div className="brand"><Mark small /><span>NodeCloak<small>{t("版本")}{t(version)} · Tauri 2</small></span></div><p>{t("管理独立浏览器副本，为每个副本配置代理、语言和隐私设置，并检查网络连接与浏览器环境。")}</p></section>
         </>}
       </div>
     </main>
+    <AccountDialog cloud={cloud}/>
     {t(busy && scan && <div className="operation-indicator" role="status"><LoaderCircle size={14} className="spin" />{t(busy)}</div>)}
     {toast && <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <Info size={18} /> : <Check size={18} />}<span>{t(toast.text)}</span><button aria-label={t("关闭通知")} onClick={() => setToast(null)}><X size={15} /></button></div>}
     <dialog ref={quitDialog} className="app-dialog" onCancel={e=>{e.preventDefault();if(!busy)setQuitting(false);}}><h2>{t("退出 NodeCloak？")}</h2><p className="modal-subtitle">{t("真正退出将先关闭运行中的浏览器副本和本地代理。请保存各窗口中未完成的输入。")}</p>{t(quitError&&<p role="alert" className="profile-error">{t(quitError)}</p>)}<div className="modal-actions"><button className="button secondary" disabled={!!busy} onClick={()=>setQuitting(false)}>{t("继续运行")}</button><button className="button primary" disabled={!!busy} onClick={()=>void quit()}>{busy?<LoaderCircle className="spin" size={15}/>:null}{t("关闭副本并退出")}</button></div></dialog>

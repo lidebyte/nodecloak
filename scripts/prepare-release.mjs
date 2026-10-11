@@ -20,7 +20,11 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // Update notices list only implemented features and bug fixes.
 const releaseNotes=[
-  "修复 Windows 自动更新后缺失的开始菜单入口无法恢复的问题，更新时会补建 NodeCloak 快捷方式。 / Windows updates now restore a missing NodeCloak Start menu shortcut."
+  "新增账号系统：支持 Google 和邮箱登录、头像与用户名编辑、密码设置及两步验证。 / Adds Google and email sign-in, profile editing, passwords and two-factor authentication.",
+  "新增端到端加密云同步：同步浏览器副本配置和可迁移的网站登录状态，支持恢复密钥、设备授权、手动同步及冲突处理。 / Adds end-to-end encrypted profile and transferable website-session sync, recovery keys, device approval and conflict resolution.",
+  "新增管理后台：管理网站分组、站点图标、用户、设备、存储元数据、审计记录和系统设置。 / Adds an administration console for website groups, icons, users, devices, storage metadata and audit events.",
+  "公告支持分页、关闭和历史查看；后台使用带实时预览的 Markdown 编辑器，应用按 Markdown 展示。 / Adds paginated announcement history and Markdown editing, preview and display.",
+  "统一品牌控件与下拉菜单，优化个人资料和偏好设置，终端工作目录支持文件夹选择。 / Refines branded controls, profile and preferences pages, and adds a terminal working-folder picker."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

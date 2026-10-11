@@ -20,6 +20,10 @@ export async function launchTerminal(tool:TerminalTool,workingDirectory:string):
   if(native) return invoke('launch_terminal',{tool,workingDirectory});
   throw new Error('当前是界面演示。请在桌面版中打开终端。');
 }
+export async function selectTerminalDirectory(workingDirectory:string,title:string):Promise<string|null> {
+  if(native) return invoke('select_terminal_directory',{workingDirectory,title});
+  throw new Error('请在桌面版中选择工作目录。');
+}
 export async function openTerminalGuide(tool:TerminalTool):Promise<void> {
   if(native) return invoke('open_terminal_guide',{tool});
   const guide=terminalTools.find(t=>t.id===tool)?.guide;

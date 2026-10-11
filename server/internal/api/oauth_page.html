@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="{{.Language}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>{{.Title}} · NodeCloak</title>
+<style>{{.Style}}</style>
+</head>
+<body>
+<main class="callback-card" aria-labelledby="callback-title">
+  <div class="brand">
+    <svg class="brand-symbol" viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M12 56 L12 30 C12 18 21 8 32 8 C43 8 52 18 52 30 L52 56 Q45.33 46 38.67 56 Q32 46 25.33 56 Q18.67 46 12 56 Z M29.1024 28.1 A4.2 4.2 0 1 0 29.1024 29.9 L34.8976 29.9 A4.2 4.2 0 1 0 34.8976 28.1 Z"/><g fill="#3DDC97"><circle cx="25" cy="29" r="2.2"/><circle cx="39" cy="29" r="2.2"/></g></svg>
+    <div class="brand-name">Node<strong>Cloak</strong><span>BROWSER WORKSPACE</span></div>
+  </div>
+  <div class="status-icon {{if .Success}}success{{else}}warning{{end}}" aria-hidden="true">
+    <svg viewBox="0 0 24 24">{{if .Success}}<path d="m5 12 4 4L19 6"/>{{else}}<path d="M12 7v6m0 4h.01"/>{{end}}</svg>
+  </div>
+  <h1 id="callback-title">{{.Title}}</h1>
+  <p class="description">{{.Description}}</p>
+  <div class="return-hint">{{.Hint}}</div>
+  <footer>NodeCloak</footer>
+</main>
+</body>
+</html>

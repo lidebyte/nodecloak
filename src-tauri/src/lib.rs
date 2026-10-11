@@ -2,6 +2,7 @@ mod browser_control;
 mod browser_sites;
 mod claude_probe;
 mod clock_probe;
+mod cloud;
 mod data_root;
 mod engine;
 mod firefox;
@@ -337,7 +338,9 @@ async fn launch_cli(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn list_terminal_tools() -> Result<terminal::Catalog, String> {
-    tauri::async_runtime::spawn_blocking(terminal::catalog).await.map_err(|e|e.to_string())
+    tauri::async_runtime::spawn_blocking(terminal::catalog)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -349,50 +352,128 @@ fn open_terminal_guide(tool: terminal::Tool) -> Result<(), String> {
 async fn get_system_languages() -> Vec<String> {
     tauri::async_runtime::spawn_blocking(|| {
         #[cfg(windows)]
-        let output = platform::command("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "(Get-UICulture).Name"]).output();
+        let output = platform::command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-UICulture).Name",
+            ])
+            .output();
         #[cfg(target_os = "macos")]
-        let output = platform::command("/usr/bin/defaults").args(["read", "-g", "AppleLanguages"]).output();
+        let output = platform::command("/usr/bin/defaults")
+            .args(["read", "-g", "AppleLanguages"])
+            .output();
         #[cfg(not(any(windows, target_os = "macos")))]
-        let output: Result<std::process::Output, std::io::Error> = Err(std::io::Error::other("Unsupported platform"));
-        output.ok().filter(|result| result.status.success()).map(|result| {
-            String::from_utf8_lossy(&result.stdout).lines().filter_map(|line| {
-                let value = line.trim().trim_matches(|c:char| c=='"'||c==','||c.is_whitespace());
-                (value.len()>=2 && value.len()<=35 && value.bytes().all(|b|b.is_ascii_alphabetic()||b==b'-')).then(||value.to_string())
-            }).collect()
-        }).unwrap_or_default()
-    }).await.unwrap_or_default()
+        let output: Result<std::process::Output, std::io::Error> =
+            Err(std::io::Error::other("Unsupported platform"));
+        output
+            .ok()
+            .filter(|result| result.status.success())
+            .map(|result| {
+                String::from_utf8_lossy(&result.stdout)
+                    .lines()
+                    .filter_map(|line| {
+                        let value = line
+                            .trim()
+                            .trim_matches(|c: char| c == '"' || c == ',' || c.is_whitespace());
+                        (value.len() >= 2
+                            && value.len() <= 35
+                            && value.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-'))
+                        .then(|| value.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
 fn set_interface_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     use tauri::menu::{Menu, MenuItem};
     let (show_text, quit_text, tooltip) = match language.as_str() {
-        "zh" => ("打开 NodeCloak", "退出…", "NodeCloak · 浏览器副本与代理保持运行"),
-        "en" => ("Open NodeCloak", "Quit…", "NodeCloak · Browser profiles and proxies keep running"),
+        "zh" => (
+            "打开 NodeCloak",
+            "退出…",
+            "NodeCloak · 浏览器副本与代理保持运行",
+        ),
+        "en" => (
+            "Open NodeCloak",
+            "Quit…",
+            "NodeCloak · Browser profiles and proxies keep running",
+        ),
         _ => return Err("Unsupported interface language".into()),
     };
-    let show = MenuItem::with_id(&app, "show", show_text, true, None::<&str>).map_err(|e|e.to_string())?;
-    let quit = MenuItem::with_id(&app, "quit", quit_text, true, None::<&str>).map_err(|e|e.to_string())?;
-    let menu = Menu::with_items(&app, &[&show, &quit]).map_err(|e|e.to_string())?;
+    let show = MenuItem::with_id(&app, "show", show_text, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let quit = MenuItem::with_id(&app, "quit", quit_text, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let menu = Menu::with_items(&app, &[&show, &quit]).map_err(|e| e.to_string())?;
     if let Some(tray) = app.tray_by_id("nodecloak-tray") {
-        tray.set_menu(Some(menu)).map_err(|e|e.to_string())?;
-        tray.set_tooltip(Some(tooltip)).map_err(|e|e.to_string())?;
+        tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+        tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 #[tauri::command]
-async fn launch_terminal(app: tauri::AppHandle, tool: terminal::Tool, working_directory: String) -> Result<(), String> {
+async fn launch_terminal(
+    app: tauri::AppHandle,
+    tool: terminal::Tool,
+    working_directory: String,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let guard=app.state::<OperationLock>();
-        let _lock=guard.0.lock().map_err(|_|"操作锁不可用".to_string())?;
-        terminal::launch(&app.state::<data_root::DataRoot>().0,tool,&working_directory)
-    }).await.map_err(|e|e.to_string())?
+        let guard = app.state::<OperationLock>();
+        let _lock = guard.0.lock().map_err(|_| "操作锁不可用".to_string())?;
+        terminal::launch(
+            &app.state::<data_root::DataRoot>().0,
+            tool,
+            &working_directory,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn select_terminal_directory(
+    window: tauri::Window,
+    working_directory: String,
+    title: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = std::path::PathBuf::from(working_directory.trim());
+        let initial = if current.is_absolute() && current.is_dir() {
+            current
+        } else {
+            platform::home_dir()
+        };
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title(title)
+            .set_directory(initial)
+            .blocking_pick_folder()
+            .map(|selected| {
+                selected
+                    .into_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -404,10 +485,12 @@ pub fn run() {
         }))
         .manage(OperationLock::default())
         .manage(profiles::Runtime::default())
+        .manage(cloud::commands::Runtime::default())
         .setup(|app| {
             let root = data_root::resolve(app.path().app_data_dir()?);
             profiles::load(&root)?;
             app.manage(data_root::DataRoot(root.clone()));
+            cloud::scheduler::start(app.handle().clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let guard = handle.state::<OperationLock>();
@@ -460,6 +543,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            browser_sites::get_browser_site_catalog,
+            browser_sites::get_browser_site_icon,
+            browser_sites::open_catalog_support,
+            browser_sites::open_announcement_link,
             scan_environment,
             check_repair_readiness,
             open_timezone_settings,
@@ -476,6 +563,7 @@ pub fn run() {
             launch_browser,
             launch_cli,
             list_terminal_tools,
+            select_terminal_directory,
             launch_terminal,
             open_terminal_guide,
             set_interface_language,
@@ -490,7 +578,9 @@ pub fn run() {
             profile_commands::close_profile,
             profile_commands::restart_profile,
             profile_commands::prepare_application_update,
-            profile_commands::quit_application
+            profile_commands::quit_application,
+            cloud::commands::cloud_status,
+            cloud::commands::cloud_action
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

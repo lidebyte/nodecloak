@@ -166,7 +166,7 @@ impl Protocol {
         Err(format!("浏览器区域设置 {method} 超时"))
     }
 }
-fn endpoint(browser: &str, path: &Path) -> Result<String, String> {
+pub(crate) fn endpoint(browser: &str, path: &Path) -> Result<String, String> {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(15) {
         let endpoint = if browser == "firefox" {

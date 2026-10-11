@@ -1,0 +1,14 @@
+.markdown-content{color:var(--muted);font-size:13px;line-height:1.8;overflow-wrap:anywhere}
+.markdown-content>:first-child{margin-top:0!important}.markdown-content>:last-child{margin-bottom:0!important}
+.markdown-content p,.markdown-content ul,.markdown-content ol,.markdown-content blockquote,.markdown-content pre,.markdown-content .markdown-table{margin:12px 0}
+.markdown-content p{white-space:pre-wrap}.markdown-content h1,.markdown-content h2,.markdown-content h3,.markdown-content h4,.markdown-content h5,.markdown-content h6{color:var(--text,var(--paper));font-weight:600;line-height:1.5;margin:18px 0 10px;font-size:16px;letter-spacing:normal}
+.markdown-content h1{font-size:21px}.markdown-content h2{font-size:18px}.markdown-content strong{color:var(--text,var(--paper));font-weight:600}
+.markdown-content ul,.markdown-content ol{padding-left:24px}.markdown-content li+li{margin-top:4px}.markdown-content li>p{margin:4px 0}
+.markdown-content blockquote{padding:8px 14px;border-left:3px solid var(--green);background:var(--surface-soft,var(--field));border-radius:0 8px 8px 0}
+.markdown-content code{font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--surface-soft,var(--field));padding:2px 5px;border-radius:4px}
+.markdown-content pre{overflow:auto;max-width:100%;padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-soft,var(--field))}.markdown-content pre code{padding:0;background:transparent;white-space:pre;font-size:12px}
+.markdown-content a{color:var(--green);text-decoration:underline;text-underline-offset:3px}.markdown-content a:hover{opacity:.8}
+.markdown-content img{display:block;max-width:100%;max-height:380px;object-fit:contain;border-radius:10px;margin:12px 0}
+.markdown-content hr{border:0;border-top:1px solid var(--border);margin:18px 0}
+.markdown-table{overflow:auto}.markdown-content table{width:100%;border-collapse:collapse;font-size:12px}.markdown-content th,.markdown-content td{border:1px solid var(--border);padding:8px 12px;text-align:left}.markdown-content th{background:var(--surface-soft,var(--field));color:var(--text,var(--paper))}
+.markdown-content .contains-task-list{list-style:none;padding-left:4px}.markdown-content input[type=checkbox]{accent-color:var(--green);margin-right:8px;pointer-events:none}

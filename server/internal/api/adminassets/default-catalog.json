@@ -1,0 +1,22 @@
+{
+  "revision":0,
+  "supportURL":"https://t.me/nodecloak_official",
+  "announcement":"",
+  "groups":[
+    {"id":"ai","name":"AI","nameEn":"AI","icon":"ai","order":0,"enabled":true,"sites":[
+      {"id":"claude","name":"Claude","url":"https://claude.ai","icon":"claude","order":0,"enabled":true},
+      {"id":"chatgpt","name":"ChatGPT","url":"https://chatgpt.com/","icon":"chatgpt","order":1,"enabled":true},
+      {"id":"gemini","name":"Gemini","url":"https://gemini.google.com/","icon":"gemini","order":2,"enabled":true},
+      {"id":"grok","name":"Grok","url":"https://grok.com/","icon":"grok","order":3,"enabled":true},
+      {"id":"muse","name":"Muse","url":"https://muse.ai/","icon":"muse","order":4,"enabled":true}
+    ]},
+    {"id":"commerce","name":"电商网站","nameEn":"Shopping sites","icon":"shopping","order":1,"enabled":true,"sites":[
+      {"id":"amazon","name":"Amazon","url":"https://www.amazon.com/","icon":"amazon","order":0,"enabled":true},
+      {"id":"ebay","name":"eBay","url":"https://www.ebay.com/","icon":"ebay","order":1,"enabled":true},
+      {"id":"etsy","name":"Etsy","url":"https://www.etsy.com/","icon":"etsy","order":2,"enabled":true},
+      {"id":"walmart","name":"Walmart","url":"https://www.walmart.com/","icon":"walmart","order":3,"enabled":true},
+      {"id":"shopee","name":"Shopee","url":"https://shopee.sg/","icon":"shopee","order":4,"enabled":true},
+      {"id":"lazada","name":"Lazada","url":"https://www.lazada.sg/","icon":"lazada","order":5,"enabled":true}
+    ]}
+  ]
+}

@@ -2,7 +2,7 @@ import {t} from './i18n';
 import {useEffect,useState} from 'react';
 import {ArrowUpRight,Check,Clock3,FolderOpen,Info,LoaderCircle,RefreshCw,Terminal,Wifi} from 'lucide-react';
 import {native} from './bridge';
-import {getTerminalCatalog,launchTerminal,openTerminalGuide,terminalTools,type TerminalCatalog,type TerminalTool} from './terminal';
+import {getTerminalCatalog,launchTerminal,openTerminalGuide,selectTerminalDirectory,terminalTools,type TerminalCatalog,type TerminalTool} from './terminal';
 
 export default function TerminalWorkspace({busy,onBusyChange,onNotify}:{busy:boolean;onBusyChange:(message:string|null)=>void;onNotify:(message:string)=>void}) {
   const [selected,setSelected]=useState<TerminalTool>('claude');
@@ -10,6 +10,7 @@ export default function TerminalWorkspace({busy,onBusyChange,onNotify}:{busy:boo
   const [directory,setDirectory]=useState(()=>localStorage.getItem('nodecloak-terminal-directory')||'');
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState('');
+  const [selectingDirectory,setSelectingDirectory]=useState(false);
   useEffect(()=>{let cancelled=false;getTerminalCatalog().then(result=>{if(!cancelled)setCatalog(result);}).catch(error=>{if(!cancelled)setError(String(error));}).finally(()=>{if(!cancelled)setLoading(false);});return()=>{cancelled=true;};},[]);
   const tool=terminalTools.find(t=>t.id===selected)!;
   const installed=catalog?.tools.find(t=>t.id===selected)?.installed;
@@ -19,6 +20,10 @@ export default function TerminalWorkspace({busy,onBusyChange,onNotify}:{busy:boo
     try{await launchTerminal(selected,directory);localStorage.setItem('nodecloak-terminal-directory',directory);onNotify(`已打开 ${tool.name} 终端。`);}catch(error){setError(String(error));}finally{onBusyChange(null);}
   }
   async function guide(){try{await openTerminalGuide(selected);}catch(error){setError(String(error));}}
+  async function chooseDirectory(){
+    setSelectingDirectory(true);setError('');
+    try{const path=await selectTerminalDirectory(directory,t('选择工作目录'));if(path!==null)setDirectory(path);}catch(error){setError(String(error));}finally{setSelectingDirectory(false);}
+  }
   return <div className="terminal-workspace">
     <section className="terminal-tools-section"><div className="section-heading"><h3>{t("终端工具")}</h3><button className="button secondary small-button" disabled={busy||loading} onClick={()=>void refresh()}><RefreshCw size={14} className={loading?'spin':''}/>{t("重新检测")}</button></div>
       <div className="terminal-tools" aria-label={t("选择终端工具")}>{terminalTools.map(item=>{
@@ -27,7 +32,7 @@ export default function TerminalWorkspace({busy,onBusyChange,onNotify}:{busy:boo
       })}</div>
     </section>
     <section className="terminal-launch-panel settings-card"><div className="terminal-launch-heading"><div><h3>{t(tool.name)}</h3></div><span className="tiny-label">LOCAL</span></div>
-      <label className="terminal-directory"><span><FolderOpen size={15}/>{t("工作目录")}</span><input aria-label={t("终端工作目录")} value={directory} onChange={e=>setDirectory(e.target.value)} placeholder={t(catalog?.homeDirectory||'留空使用用户主目录')} disabled={busy}/><small>{t("填写项目文件夹的完整路径；留空使用用户主目录。")}{t(catalog?.homeDirectory&&` 默认：${catalog.homeDirectory}`)}</small></label>
+      <div className="terminal-directory"><label htmlFor="terminal-working-directory"><FolderOpen size={15}/>{t("工作目录")}</label><div className="terminal-directory-controls"><input id="terminal-working-directory" aria-label={t("终端工作目录")} value={directory} onChange={e=>setDirectory(e.target.value)} placeholder={t(catalog?.homeDirectory||'留空使用用户主目录')} disabled={busy||selectingDirectory}/><button type="button" className="button secondary" disabled={busy||selectingDirectory||!native} title={!native?t('请在桌面版中选择工作目录。'):undefined} onClick={()=>void chooseDirectory()}>{selectingDirectory?<LoaderCircle size={15} className="spin"/>:<FolderOpen size={15}/>} {t('选择文件夹')}</button></div><small>{t("填写项目文件夹的完整路径；留空使用用户主目录。")}{t(catalog?.homeDirectory&&` 默认：${catalog.homeDirectory}`)}</small></div>
       {t(error&&<div className="notice warning-notice" role="alert"><Info size={16}/><p>{t(error)}</p></div>)}
       {!loading&&catalog&&!installed&&<div className="notice"><Info size={16}/><p>{t("未找到")}{t(tool.name)}{t("。请先按官方指南安装，再点击“重新检测”。首次运行时，请在终端中完成登录。")}</p></div>}
       <div className="workspace-actions"><button className="button primary" disabled={busy||loading||!installed} onClick={()=>void launch()}>{busy?<LoaderCircle size={15} className="spin"/>:<Terminal size={15}/>}{t("打开")}{t(tool.name)}<ArrowUpRight size={15}/></button>{t(tool.guide&&<button className="button secondary" disabled={busy} onClick={()=>void guide()}>{t("官方安装指南")}<ArrowUpRight size={14}/></button>)}</div>

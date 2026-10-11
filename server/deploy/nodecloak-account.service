@@ -1,0 +1,25 @@
+[Unit]
+Description=NodeCloak account and encrypted synchronization service
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=nodecloak-account
+Group=nodecloak-account
+EnvironmentFile=/etc/nodecloak/account.env
+ExecStart=/opt/nodecloak-account/current/server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

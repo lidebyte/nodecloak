@@ -866,6 +866,7 @@ pub fn remove_user_fonts(
 
 pub fn launch_browser(root: &Path, browser: &str, destination: &str) -> Result<(), String> {
     validate_browser(browser)?;
+    crate::cloud::browser_session::recover(&profile(root, browser)?)?;
     if browser == "firefox" {
         platform::ensure_profile_closed(&profile(root, browser)?)?;
     }
@@ -879,22 +880,21 @@ pub fn launch_browser(root: &Path, browser: &str, destination: &str) -> Result<(
         return platform::spawn_browser(browser, &dir, url.as_str());
     }
     let url = match destination {
-        "privacyDocs" => "https://code.claude.com/docs/en/data-usage",
-        "claude" => "https://claude.ai",
-        "verify" => "http://claudedone.com/",
+        "privacyDocs" => "https://code.claude.com/docs/en/data-usage".to_owned(),
+        "claude" => "https://claude.ai".to_owned(),
+        "verify" => "http://claudedone.com/".to_owned(),
         "dns" => {
             if browser == "firefox" {
-                "about:preferences#privacy"
+                "about:preferences#privacy".to_owned()
             } else {
-                "chrome://settings/security"
+                "chrome://settings/security".to_owned()
             }
         }
-        _ => crate::browser_sites::destination_url(destination)
-            .ok_or("不支持的目标页面")?,
+        _ => crate::browser_sites::destination_url(root, destination).ok_or("不支持的目标页面或目录已更新，请重试")?,
     };
     let dir = profile(root, browser)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    platform::spawn_browser(browser, &dir, url)
+    platform::spawn_browser(browser, &dir, &url)
 }
 
 pub fn launch_cli(root: &Path) -> Result<(), String> {
@@ -913,7 +913,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let scan = scan_local(root.path(), "chrome").unwrap();
         let offset = scan.checks.iter().find(|c| c.id == "offset").unwrap();
-        assert!(!offset.fixable, "An offset is derived from the system timezone");
+        assert!(
+            !offset.fixable,
+            "An offset is derived from the system timezone"
+        );
         assert!(matches!(offset.status.as_str(), "healthy" | "unknown"));
     }
     #[test]
