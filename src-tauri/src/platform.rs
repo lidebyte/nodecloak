@@ -924,6 +924,42 @@ pub fn close_profile(profile: &Path) -> Result<(), String> {
     Err("浏览器仍在运行。请保存输入并处理浏览器的关闭提示，代理保持运行；完成后重试。".into())
 }
 
+/// Grant enforcement: a browser close prompt cannot prolong an expired authorization.
+pub fn force_close_profile(profile: &Path) -> Result<(), String> {
+    let ids = profile_process_ids(profile)?;
+    #[cfg(windows)]
+    {
+        let state = (ids, true);
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows(
+                Some(profile_window),
+                &state as *const _ as isize,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    for pid in ids {
+        let _ = output("/bin/kill", &["-TERM", &pid.to_string()]);
+    }
+    if !profile_process_ids(profile)?.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    for pid in profile_process_ids(profile)? {
+        #[cfg(windows)]
+        if let Err(error) = output("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]) {
+            if profile_process_ids(profile)?.contains(&pid) {
+                return Err(error);
+            }
+        }
+        #[cfg(not(windows))]
+        if let Err(error) = output("/bin/kill", &["-KILL", &pid.to_string()]) {
+            if profile_process_ids(profile)?.contains(&pid) {
+                return Err(error);
+            }
+        }
+    }
+    ensure_profile_closed(profile)
+}
 fn prepare_firefox_profile(profile: &Path) -> Result<PathBuf, String> {
     let failure = |error: std::io::Error| {
         format!(

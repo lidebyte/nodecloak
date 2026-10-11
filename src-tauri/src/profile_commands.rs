@@ -45,13 +45,18 @@ pub async fn save_profile(
 #[tauri::command]
 pub async fn delete_profile(app: tauri::AppHandle, id: String, purge: bool) -> Result<(), String> {
     operation(app, move |root, runtime| {
+        crate::cloud::sharing::editable(root, &id)?;
         profiles::remove(root, &id, purge, runtime)
     })
     .await
 }
 #[tauri::command]
 pub async fn restore_profile(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    operation(app, move |root, _| profiles::restore(root, &id)).await
+    operation(app, move |root, _| {
+        crate::cloud::sharing::editable(root, &id)?;
+        profiles::restore(root, &id)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn test_profile_proxy(
@@ -95,6 +100,7 @@ pub async fn match_profile_region(
     .await
 }
 pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Result<(), String> {
+    crate::cloud::sharing::before_launch(root, id)?;
     let p = profiles::get(root, id, false)?;
     let path = profiles::path(root, &p)?;
     crate::cloud::browser_session::recover(&path)?;
@@ -302,11 +308,14 @@ pub async fn restart_profile(app: tauri::AppHandle, id: String) -> Result<(), St
 #[tauri::command]
 pub async fn prepare_application_update(app: tauri::AppHandle) -> Result<(), String> {
     operation(app, |root, runtime| {
-        for p in profiles::views(root, runtime)?
-            .into_iter()
-            .filter(|p| p.running)
-        {
-            platform::close_profile(&profiles::path(root, &p.profile)?)?;
+        for p in profiles::load(root)? {
+            if profiles::running(root, &p)? {
+                if p.received_share.is_some() {
+                    platform::force_close_profile(&profiles::path(root, &p)?)?;
+                } else {
+                    platform::close_profile(&profiles::path(root, &p)?)?;
+                }
+            }
         }
         runtime.0.lock().map_err(|_| "代理管理器不可用")?.clear();
         runtime.1.clear();
@@ -318,15 +327,19 @@ pub async fn prepare_application_update(app: tauri::AppHandle) -> Result<(), Str
 pub async fn quit_application(app: tauri::AppHandle, close_profiles: bool) -> Result<(), String> {
     let closing = app.clone();
     operation(app, move |root, runtime| {
-        let active = profiles::views(root, runtime)?
+        let active = profiles::load(root)?
             .into_iter()
-            .filter(|p| p.running)
+            .filter(|p| profiles::running(root, p).unwrap_or(true))
             .collect::<Vec<_>>();
         if !active.is_empty() && !close_profiles {
             return Err("仍有浏览器副本运行，请选择关闭副本后退出，或继续后台运行。".into());
         }
         for p in active {
-            platform::close_profile(&profiles::path(root, &p.profile)?)?;
+            if p.received_share.is_some() {
+                platform::force_close_profile(&profiles::path(root, &p)?)?;
+            } else {
+                platform::close_profile(&profiles::path(root, &p)?)?;
+            }
         }
         runtime.0.lock().map_err(|_| "代理管理器不可用")?.clear();
         runtime.1.clear();

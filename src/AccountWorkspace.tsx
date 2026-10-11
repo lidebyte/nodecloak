@@ -115,7 +115,7 @@ export function AccountDialog({cloud,inline=false}:{cloud:Controller;inline?:boo
  const content=<div className="account-dialog-content">
   {!s.account?<div className="account-login">
    {!native&&<p className="notice">{t('请在桌面客户端登录')}</p>}
-   {!twoFactor&&<><button className="button secondary google-login" disabled={!native||cloud.busy||googlePending} aria-busy={googlePending} onClick={beginGoogle}>{googlePending?<LoaderCircle size={18} className="spin" aria-hidden="true"/>:<GlobeGoogle/>} {t(googlePending?'正在等待 Google 登录':'使用 Google 登录')}</button><div className="account-divider">{t('或使用邮箱')}</div></>}
+   {!twoFactor&&<><button className="button secondary google-login" disabled={!native||cloud.busy||googlePending} aria-busy={googlePending} onClick={beginGoogle}>{googlePending?<LoaderCircle size={18} className="spin" aria-hidden="true"/>:<GoogleIcon/>} {t(googlePending?'正在等待 Google 登录':'使用 Google 登录')}</button><div className="account-divider">{t('或使用邮箱')}</div></>}
    <form onSubmit={event=>{event.preventDefault();void(twoFactor||passwordMode||sent?login():requestCode());}}>
     {twoFactor?<><p className="cloud-hint">{t('输入验证器验证码或一个未使用的恢复码。')}</p><label className="account-field"><span>{t('验证器验证码或恢复码')}</span><input autoComplete="one-time-code" value={code} onChange={event=>setCode(event.target.value)} maxLength={64} required disabled={cloud.busy}/></label></>:
     <><label className="account-field"><span>{t('邮箱')}</span><input type="email" autoComplete="email" value={email} onChange={event=>{setEmail(event.target.value);setSent(false);}} required disabled={cloud.busy||googlePending} maxLength={254}/></label>
@@ -156,5 +156,11 @@ export function AccountDialog({cloud,inline=false}:{cloud:Controller;inline?:boo
   {content}
  </dialog>;
 }
-function GlobeGoogle(){return <span className="google-letter" aria-hidden="true">G</span>;}
+// Official Google sign-in artwork: https://developers.google.com/identity/branding-guidelines
+function GoogleIcon(){return <svg className="google-icon" width="18" height="18" viewBox="10 10 20 20" fill="none" aria-hidden="true" focusable="false">
+ <path d="M29.6 20.2273C29.6 19.5182 29.5364 18.8364 29.4182 18.1818H20V22.05H25.3818C25.15 23.3 24.4455 24.3591 23.3864 25.0682V27.5773H26.6182C28.5091 25.8364 29.6 23.2727 29.6 20.2273Z" fill="#4285F4"/>
+ <path d="M20 30C22.7 30 24.9636 29.1045 26.6181 27.5773L23.3863 25.0682C22.4909 25.6682 21.3454 26.0227 20 26.0227C17.3954 26.0227 15.1909 24.2636 14.4045 21.9H11.0636V24.4909C12.7091 27.7591 16.0909 30 20 30Z" fill="#34A853"/>
+ <path d="M14.4045 21.9C14.2045 21.3 14.0909 20.6591 14.0909 20C14.0909 19.3409 14.2045 18.7 14.4045 18.1V15.5091H11.0636C10.3864 16.8591 10 18.3864 10 20C10 21.6136 10.3864 23.1409 11.0636 24.4909L14.4045 21.9Z" fill="#FBBC04"/>
+ <path d="M20 13.9773C21.4681 13.9773 22.7863 14.4818 23.8227 15.4727L26.6909 12.6045C24.9591 10.9909 22.6954 10 20 10C16.0909 10 12.7091 12.2409 11.0636 15.5091L14.4045 18.1C15.1909 15.7364 17.3954 13.9773 20 13.9773Z" fill="#E94235"/>
+ </svg>;}
 function conflictField(path:string){return ({'/name':'副本名称','/notes':'备注','/tags':'标签','/proxy':'代理配置','/preferences/language':'浏览器语言','config_changed':'副本配置已变化','deletion_vs_edit':'删除与修改冲突','first_association':'首次关联冲突','cloud_object_missing':'云端记录缺失','concurrent_write':'云端已有新修改','close_browser':'等待副本关闭','login_state_changed':'两台设备的登录状态均有变化','lease_or_revision_changed':'另一台设备正在使用或已有新登录数据','deletion_waiting_device':'等待另一台设备释放登录数据后完成删除','lease_held':'另一台设备正在使用此副本；接管后该设备的后续更改需要处理冲突'} as Record<string,string>)[path]||path;}

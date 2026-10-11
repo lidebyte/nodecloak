@@ -28,6 +28,9 @@ pub struct Document {
 }
 impl Document {
     pub fn export(p: &profiles::Profile) -> Result<Self, String> {
+        if p.received_share.is_some() {
+            return Err("收到的共享副本不能导出或关联个人同步".into());
+        }
         let upstream = profiles::upstream(p, false)?;
         let mut prefs = p.preferences.clone();
         crate::regional::normalize_sources(&mut prefs);

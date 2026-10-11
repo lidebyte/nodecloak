@@ -286,7 +286,7 @@ pub fn preview(c: &mut Connection) -> Result<Value, String> {
         let doc = document(c, &object)?;
         out.push(json!({"id":o.id,"name":doc.name,"browser":doc.browser,"deleted":doc.deleted,"revision":object.revision}))
     }
-    let local=profiles::load(&c.root)?.into_iter().filter(|p|p.deleted_at.is_none()).map(|p|json!({"id":p.id,"name":p.name,"browser":p.browser,"eligible":c.disk.can_attach(&account,&p.id).is_ok(),"selected":c.disk.accounts[&account].bindings.contains_key(&p.id)&&!c.disk.accounts[&account].detached.contains(&p.id)})).collect::<Vec<_>>();
+    let local=profiles::load(&c.root)?.into_iter().filter(|p|p.deleted_at.is_none()).map(|p|json!({"id":p.id,"name":p.name,"browser":p.browser,"eligible":p.received_share.is_none()&&c.disk.can_attach(&account,&p.id).is_ok(),"selected":c.disk.accounts[&account].bindings.contains_key(&p.id)&&!c.disk.accounts[&account].detached.contains(&p.id)})).collect::<Vec<_>>();
     Ok(json!({"profiles":out,"localProfiles":local}))
 }
 pub fn setup(
@@ -309,6 +309,7 @@ pub fn setup(
     }
     let all = profiles::load(&c.root)?;
     for id in local {
+        super::sharing::editable(&c.root, id)?;
         c.disk.can_attach(&account, id)?;
         if !all.iter().any(|p| &p.id == id && p.deleted_at.is_none()) {
             return Err("所选副本不存在".into());
@@ -448,6 +449,9 @@ pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String
         .collect();
     let local = profiles::load(&c.root)?;
     for p in &local {
+        if super::sharing::restricted(&c.root, &p.id)? {
+            continue;
+        }
         if !c.disk.accounts[&account].known_local.contains(&p.id)
             && !c.disk.accounts[&account].bindings.contains_key(&p.id)
             && p.deleted_at.is_none()
@@ -470,6 +474,9 @@ pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String
     c.disk.save(&c.root)?;
     let bindings = c.disk.accounts[&account].bindings.clone();
     for (id, mut b) in bindings {
+        if super::sharing::restricted(&c.root, &id)? {
+            continue;
+        }
         if c.disk.accounts[&account].detached.contains(&id) {
             continue;
         }
@@ -594,6 +601,7 @@ pub fn resolve(
     choice: &str,
     runtime: &profiles::Runtime,
 ) -> Result<(), String> {
+    super::sharing::editable(&c.root, id)?;
     let account = c.account_id()?;
     let item = c.disk.accounts[&account]
         .conflicts

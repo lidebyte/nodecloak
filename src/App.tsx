@@ -10,6 +10,9 @@ import WindowControls from './WindowControls';
 import TerminalWorkspace from './TerminalWorkspace';
 import {useLanguage} from './LanguageControl';
 import BrowserProfiles from './BrowserProfiles';
+import {ShareProfileDialog,SharingWorkspace,useProfileSharing} from './ProfileSharing';
+import {effectiveShareStatus} from './profile-sharing';
+import {Share2} from 'lucide-react';
 import BrowserIcon from './BrowserIcon';
 import BrowserSiteShortcuts from './BrowserSiteShortcuts';
 import AnnouncementCenter from './AnnouncementCenter';
@@ -26,16 +29,16 @@ import { getFontCatalog, removeUserFonts, type FontCatalog, type FontOutcome } f
 import { summarizeOutcomes } from './repair-result';
 import { getTimezoneCatalog, checkRepairReadiness, openTimezoneSettings, openFirefoxDownload, native, type BrowserDestination, scanEnvironment, getHistory, repairEnvironment, undoRepair, launchBrowser } from './bridge';
 
-type Page = 'profiles' | 'computer' | 'overview' | 'code' | 'history' | 'settings' | 'account' | 'devices';
+type Page = 'profiles' | 'sharing' | 'computer' | 'overview' | 'code' | 'history' | 'settings' | 'account' | 'devices';
 type RepairRequest = { browser: BrowserId; ids: CheckId[]; consentTimezone: boolean; consentFonts: boolean; timezoneTarget: TimezoneTarget; customTimezone: string };
 type Modal = {kind:'fonts';catalog:FontCatalog;initialIds:string[]} | {kind:'font-result';outcomes:FontOutcome[]} | { kind: 'repair'; ids: CheckId[] } | { kind: 'detail'; id: CheckId } | { kind: 'undo'; record: RepairRecord } | { kind: 'help' } | { kind: 'result'; outcomes: Outcome[]; request: RepairRequest } | { kind: 'blocked'; request: RepairRequest; reason: string } | { kind: 'report' };
 const icons: Record<CheckId, ElementType> = { connection: Wifi, route: Globe2, webrtc: ShieldCheck, dns: LockKeyhole, language: Languages, timezone: Clock3, offset: Clock3, clock: Clock3, locale: Languages, cli: Terminal, fonts: Type, emoji: Fingerprint, webgl: Monitor, screen: Monitor, networkInfo: Wifi, plugins: Settings2, tracking: ShieldCheck };
 const nav: { id: Page; title: string; icon: ElementType }[] = [
-  {id:'profiles',title:'浏览器副本',icon:Globe2},{id:'computer',title:'电脑环境',icon:Monitor},
+  {id:'profiles',title:'浏览器副本',icon:Globe2},{id:'sharing',title:'共享',icon:Share2},{id:'computer',title:'电脑环境',icon:Monitor},
   { id: 'overview', title: '环境概览', icon: LayoutDashboard }, { id: 'code', title: '终端', icon: Terminal }, { id: 'history', title: '修复记录', icon: History },
 ];
 const pageTitles: Record<Page, string> = {
-  profiles: '浏览器副本', computer: '电脑环境', overview: '环境概览', code: '终端', history: '修复记录', settings: '偏好设置', account:'个人资料',devices:'设备',
+  profiles: '浏览器副本', sharing:'共享', computer: '电脑环境', overview: '环境概览', code: '终端', history: '修复记录', settings: '偏好设置', account:'个人资料',devices:'设备',
 };
 const browserNames = { chrome: 'Google Chrome', edge: 'Microsoft Edge', firefox: 'Firefox' };
 function Mark({ small = false }: { small?: boolean }) { return <span className={small ? 'brand-mark small' : 'brand-mark'}><img className="mark-light" src="/brand/symbol-positive.svg" alt="" /><img className="mark-dark" src="/brand/symbol-primary.svg" alt="" /></span>; }
@@ -53,6 +56,8 @@ export default function App() {
   const {catalog:siteCatalog}=useBrowserSiteCatalog();
   const [announcementToolbar,setAnnouncementToolbar]=useState<HTMLSpanElement|null>(null);
   const cloud=useCloudAccount();
+  const sharing=useProfileSharing(cloud.status.account?.id);
+  const [shareProfile,setShareProfile]=useState<BrowserProfile|null>(null);
   const [page, setPage] = useState<Page>('profiles');
   useEffect(()=>{if((page==='account'||page==='devices')&&!cloud.status.account)setPage('profiles');},[page,cloud.status.account?.id]);
   const [activeProfile,setActiveProfileState]=useState<BrowserProfile|null>(null);
@@ -127,6 +132,7 @@ export default function App() {
   useEffect(()=>{if(quitting)quitDialog.current?.showModal();else quitDialog.current?.close();},[quitting]);
   useEffect(()=>{if(!native)return;let stop:(()=>void)|undefined;let cancelled=false;void listen('request-quit',()=>{setQuitError('');setQuitting(true);}).then(fn=>{if(cancelled)fn();else stop=fn;});return()=>{cancelled=true;stop?.();};},[]);
   async function selectProfile(p:BrowserProfile,showHistory=false){if(busy)return;setActiveProfile(p.id);setActiveProfileState(p);setBrowser(p.browser);localStorage.setItem('claudedone.active-profile',p.id);setPage(showHistory?'history':'overview');setScan(null);setGroup('all');setOnlyPending(false);await perform('正在检测副本环境',()=>refresh(p.browser));}
+  useEffect(()=>{if(!native)return;let stopped=false;let stop:(()=>void)|undefined;void listen<{reason?:string}>('sharing-changed',event=>{const reason=event.payload?.reason;if(reason==='expiring')notify('共享副本将在 5 分钟内到期，请保存未完成的操作。');else if(reason==='authorizationEnded')notify('共享授权已结束，相关共享浏览器已关闭。');else if(reason==='authorizationFailed')notify('无法确认共享授权，相关共享浏览器已关闭。请检查网络并重新验证。',true);void loadProfileOptions().catch(e=>notify(String(e),true));}).then(fn=>{if(stopped)fn();else stop=fn;});return()=>{stopped=true;stop?.();};},[]);
   useEffect(()=>{if(page==='overview')void loadProfileOptions().catch(e=>notify(String(e),true));},[page,activeProfile?.id]);
   async function navigate(next:Page){
     if(busy)return;
@@ -197,18 +203,20 @@ export default function App() {
     <aside className="sidebar">
       <div className="brand" data-tauri-drag-region="deep"><Mark /><span><span className="brand-node">Node</span><b>Cloak</b><small>BROWSER WORKSPACE</small></span></div>
       <span className="sidebar-label">{t("工作空间")}</span>
-      <nav aria-label={t("主导航")}>{nav.map(({ id, title, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} disabled={!!busy} onClick={() => void navigate(id)}><Icon size={18} strokeWidth={1.7} /><span>{t(title)}</span>{id === 'overview' && warnings.length > 0 && <span className="nav-count">{warnings.length}</span>}{id === 'history' && history.filter(r => r.status === 'applied').length > 0 && <span className="nav-history-dot" />}</button>)}</nav>
+      <nav aria-label={t("主导航")}>{nav.map(({ id, title, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} disabled={!!busy} onClick={() => void navigate(id)}><Icon size={18} strokeWidth={1.7} /><span>{t(title)}</span>{id==='sharing'&&sharing.data.received.some(s=>effectiveShareStatus(s)==='pending')&&<span className="nav-count">{sharing.data.received.filter(s=>effectiveShareStatus(s)==='pending').length}</span>}{id === 'overview' && warnings.length > 0 && <span className="nav-count">{warnings.length}</span>}{id === 'history' && history.filter(r => r.status === 'applied').length > 0 && <span className="nav-history-dot" />}</button>)}</nav>
       <div className="sidebar-bottom"><div className="sidebar-footer"><AccountButton cloud={cloud} preferencesDisabled={!!busy} onPreferences={()=>{cloud.setPanel(null);setPage('settings');}} onAccountPage={next=>{cloud.setError('');cloud.setPanel(null);setPage(next);}}/><span>v{t(version)}</span></div></div>
     </aside>
     <main>
       <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}{siteCatalog.supportURL&&<button className="telegram-group" title={siteCatalog.supportURL.startsWith('https://t.me/')?t("加入 Telegram 群"):t("帮助与说明")} disabled={!!busy} onClick={() => void perform('正在打开帮助', openCatalogSupport)}>{siteCatalog.supportURL.startsWith('https://t.me/')?<Send size={14}/>:<CircleHelp size={14}/>}<span>{siteCatalog.supportURL.startsWith('https://t.me/')?'Telegram Group':t('帮助与说明')}</span><ArrowUpRight size={13} /></button>}<span className="announcement-toolbar-slot" ref={setAnnouncementToolbar}/><button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
       <div className="main-content">
         <AnnouncementCenter announcements={siteCatalog.announcements??[]} toolbarTarget={announcementToolbar}/>
-        {page!=='profiles'&&<div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{!['settings','account','devices'].includes(page)&&<button className="button secondary" style={{visibility:page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>}
+        {page!=='profiles'&&<div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{!['settings','account','devices','sharing'].includes(page)&&<button className="button secondary" style={{visibility:page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>}
 
         <AppUpdates expanded={page === 'settings'} busy={!!busy} onBusyChange={value=>setBusy(value?'正在更新应用':null)} />
         {(page==='account'||page==='devices')&&cloud.status.account&&<AccountDialog inline cloud={{...cloud,panel:page}}/>}
-        {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} busy={!!busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
+        {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} onShare={setShareProfile} onManageSharing={()=>setPage('sharing')} busy={!!busy||sharing.busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
+        {page==='sharing'&&<SharingWorkspace sharing={sharing} cloud={cloud}/>}
+        <ShareProfileDialog profile={shareProfile} sharing={sharing} cloud={cloud} onClose={()=>setShareProfile(null)}/>
         {activeProfile&&['overview','history'].includes(page)&&<div className="active-profile-bar"><div className={page==='overview'?'overview-profile-identity':undefined}>{page==='overview'?<label className="overview-profile-picker"><span>{t("当前副本")}</span><SelectMenu menuMinWidth={320} noWrap label={t("切换浏览器副本")} disabled={!!busy} value={activeProfile.id} onOpen={()=>void loadProfileOptions().catch(e=>notify(String(e),true))} onChange={value=>{const p=profileOptions.find(p=>p.id===value);if(p&&p.id!==activeProfile.id)void selectProfile(p);}} options={(!profileOptions.some(p=>p.id===activeProfile.id)?[activeProfile,...profileOptions]:profileOptions).map(p=>({value:p.id,label:`${p.name} · ${browserNames[p.browser]}`,icon:<BrowserIcon browser={p.browser}/>}))} /></label>:<strong>{activeProfile.name}</strong>}<span>{t(browserNames[browser])} · {t(activeProfile.proxy.mode==='system'?'系统代理':activeProfile.proxy.mode==='direct'?'直连':activeProfile.proxy.host+':'+activeProfile.proxy.port)}</span></div><button disabled={!!busy} className={page==='overview'?'selected':''} onClick={()=>setPage('overview')}>{t("环境检测")}</button><button disabled={!!busy} className={page==='history'?'selected':''} onClick={()=>setPage('history')}>{t("修复记录")}</button><button disabled={!!busy} onClick={()=>setPage('profiles')}>{t("返回列表")}</button></div>}
         {page==='computer'&&<div className="computer-sections"><div className="notice"><Info size={18}/><p>{t("这里的修改会影响电脑的所有应用。更改时区或卸载用户字体前，需退出全部专用浏览器副本。")}</p></div><section className="check-table">{checks.map(checkRow)}</section><div className="notice"><Clock3 size={18}/><p>{t("时区只影响本地时间显示，不会校准电脑时钟。若网页提示 Incorrect device time，请在系统日期与时间中启用自动设置时间并立即同步，然后重启副本复检。")}</p></div><section className="settings-card"><h3>{t("用户字体")}</h3><p>{t("查看可卸载的用户字体，修改前备份，支持从电脑级修复记录恢复。")}</p><div className="settings-actions"><button className="button secondary" disabled={!!busy} onClick={()=>void fontDialog()}>{t("管理用户字体")}</button><button className="button secondary" disabled={!!busy} onClick={()=>setPage('history')}>{t("查看电脑级修复记录")}</button></div></section></div>}
         {page !== 'code' && browser === 'firefox' && scan && !scan.browserAvailable && <FirefoxSetup busy={!!busy}

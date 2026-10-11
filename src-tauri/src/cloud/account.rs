@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+static SESSION_REFRESH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,7 +37,11 @@ impl Connection {
             device: vault::Device::load(ns)?,
             disk: Disk::load(root)?,
             root: root.into(),
-            session: None,
+            session: vault::read(&format!("{ns}:session"))?
+                .map(|s| {
+                    serde_json::from_str::<Session>(&s).map_err(|_| "登录凭据损坏，请重新登录")
+                })
+                .transpose()?,
         })
     }
     pub fn load(root: &Path) -> Result<Self, String> {
@@ -59,7 +64,12 @@ impl Connection {
             session,
         })
     }
+    #[cfg(test)]
     pub fn save_session(&mut self, s: Session) -> Result<(), String> {
+        let _lock = SESSION_REFRESH.lock().map_err(|_| "登录凭据锁不可用")?;
+        self.save_session_locked(s)
+    }
+    fn save_session_locked(&mut self, s: Session) -> Result<(), String> {
         vault::write(
             &format!("{}:session", self.ns),
             &Zeroizing::new(serde_json::to_string(&s).map_err(|_| "无法保存登录凭据")?),
@@ -80,28 +90,45 @@ impl Connection {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, String> {
-        self.account_id()?;
-        if self.session.as_ref().unwrap().expires_at <= chrono::Utc::now().timestamp() + 30 {
-            self.refresh_session()?
-        }
-        let result = self.client.call(
-            method.clone(),
-            path,
-            Some(&self.session.as_ref().unwrap().access_token),
-            body,
-        );
+        let expected_account = self.account_id()?;
+        let token = {
+            let _lock = SESSION_REFRESH.lock().map_err(|_| "登录凭据锁不可用")?;
+            self.reload_session()?;
+            self.account_id()?;
+            if self.account_id()? != expected_account {
+                return Err("账号状态已变化，请重试".into());
+            }
+            if self.session.as_ref().unwrap().expires_at <= chrono::Utc::now().timestamp() + 30 {
+                self.refresh_session()?;
+            }
+            Zeroizing::new(self.session.as_ref().unwrap().access_token.clone())
+        };
+        let result = self.client.call(method.clone(), path, Some(&token), body);
         match result {
             Err(e) if e.contains("unauthorized") => {
-                self.refresh_session()?;
-                self.client.call(
-                    method,
-                    path,
-                    Some(&self.session.as_ref().unwrap().access_token),
-                    body,
-                )
+                let retry = {
+                    let _lock = SESSION_REFRESH.lock().map_err(|_| "登录凭据锁不可用")?;
+                    self.reload_session()?;
+                    self.account_id()?;
+                    if self.account_id()? != expected_account {
+                        return Err("账号状态已变化，请重试".into());
+                    }
+                    if self.session.as_ref().unwrap().access_token.as_str() == token.as_str() {
+                        self.refresh_session()?;
+                    }
+                    Zeroizing::new(self.session.as_ref().unwrap().access_token.clone())
+                };
+                self.client.call(method, path, Some(&retry), body)
             }
             other => other,
         }
+    }
+    fn reload_session(&mut self) -> Result<(), String> {
+        self.session = vault::read(&format!("{}:session", self.ns))?
+            .map(|s| serde_json::from_str::<Session>(&s).map_err(|_| "登录凭据损坏，请重新登录"))
+            .transpose()?;
+        self.disk.account = Disk::load(&self.root)?.account;
+        Ok(())
     }
     fn refresh_session(&mut self) -> Result<(), String> {
         let old = self.session.as_ref().ok_or("请先登录")?;
@@ -115,6 +142,7 @@ impl Connection {
             Err(e) if e.contains("unauthorized") => {
                 vault::remove(&format!("{}:session", self.ns))?;
                 self.session = None;
+                self.disk = Disk::load(&self.root)?;
                 self.disk.account = None;
                 self.disk.save(&self.root)?;
                 return Err("unauthorized: 请重新登录".into());
@@ -128,9 +156,10 @@ impl Connection {
             refresh_token: required_string(&value, "refreshToken")?,
             expires_at: chrono::Utc::now().timestamp() + value["expiresIn"].as_i64().unwrap_or(900),
         };
-        self.save_session(s)
+        self.save_session_locked(s)
     }
     pub fn finish_login(&mut self, v: Value) -> Result<(), String> {
+        let _lock = SESSION_REFRESH.lock().map_err(|_| "登录凭据锁不可用")?;
         let account: Account =
             serde_json::from_value(v["account"].clone()).map_err(|_| "账号响应格式无效")?;
         if uuid::Uuid::parse_str(&account.id).is_err()
@@ -144,7 +173,8 @@ impl Connection {
             refresh_token: required_string(&v, "refreshToken")?,
             expires_at: chrono::Utc::now().timestamp() + 900,
         };
-        self.save_session(s)?;
+        self.save_session_locked(s)?;
+        self.disk = Disk::load(&self.root)?;
         self.disk.accounts.entry(account.id.clone()).or_default();
         self.disk.account = Some(account);
         self.disk.save(&self.root)
@@ -373,11 +403,22 @@ impl Connection {
         Ok(())
     }
     pub fn logout(&mut self) -> Result<(), String> {
+        let expected_account = self.account_id()?;
         let error = self
             .request(Method::POST, "/v1/auth/logout", Some(&json!({})))
             .err();
+        let _lock = SESSION_REFRESH.lock().map_err(|_| "登录凭据锁不可用")?;
+        self.reload_session()?;
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.account_id != expected_account)
+        {
+            return Err("账号状态已变化，请重试".into());
+        }
         vault::remove(&format!("{}:session", self.ns))?;
         self.session = None;
+        self.disk = Disk::load(&self.root)?;
         self.disk.account = None;
         self.disk.save(&self.root)?;
         if error.is_some() {

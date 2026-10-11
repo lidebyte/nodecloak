@@ -15,7 +15,7 @@ export function setLanguage(value: Language) { language = value; }
 export function getLanguage(): Language { return language; }
 export function getDateLocale(): string { return language === 'zh' ? 'zh-CN' : 'en-US'; }
 const dictionary: Record<string, string> = messages;
-const userInterpolations = new Set(['默认 {0}', '{0} 副本', '彻底删除 {0}', '{0} 更多操作']);
+const userInterpolations = new Set(['来自 {0}', '默认 {0}', '{0} 副本', '彻底删除 {0}', '{0} 更多操作']);
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const templates = Object.entries(dictionary).filter(([key]) => /\{\d+\}/.test(key)).sort(([a],[b]) => b.replace(/\{\d+\}/g,'').length-a.replace(/\{\d+\}/g,'').length).map(([key, value]) => {
   const indexes: string[] = [];

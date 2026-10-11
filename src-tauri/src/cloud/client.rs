@@ -62,6 +62,17 @@ pub fn api_error(status: u16, body: &str) -> String {
         "authentication_failed",
         "reauthentication_required",
         "two_factor_enabled",
+        "recipient_not_found",
+        "recipient_device_approval_required",
+        "recipient_device_unavailable",
+        "recipient_device_changed",
+        "invalid_deadline",
+        "share_quota_exceeded",
+        "share_id_conflict",
+        "share_expired",
+        "share_inactive",
+        "share_device_unavailable",
+        "share_authorization_required",
     ];
     format!(
         "云端请求失败 ({status}): {}",
@@ -143,6 +154,16 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sharing_device_unavailable_error_keeps_actionable_code_without_response_secrets() {
+        let error = api_error(
+            409,
+            r#"{"error":"recipient_device_unavailable","email":"private@example.com","token":"secret-access-token"}"#,
+        );
+        assert!(error.contains("recipient_device_unavailable"));
+        assert!(!error.contains("private@example.com"));
+        assert!(!error.contains("secret-access-token"));
+    }
     #[test]
     fn endpoint_cannot_redirect_secrets_to_untrusted_protocol() {
         for s in [

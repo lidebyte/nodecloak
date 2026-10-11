@@ -39,6 +39,9 @@ var announcementsSchema string
 //go:embed account_security.sql
 var securitySchema string
 
+//go:embed sharing.sql
+var sharingSchema string
+
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	tx, e := db.Begin(ctx)
 	if e != nil {
@@ -116,6 +119,27 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			return e
 		}
 	}
+	var v6 bool
+	if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=6)").Scan(&v6); e != nil {
+		return e
+	}
+	if !v6 {
+		if _, e = tx.Exec(ctx, sharingSchema); e != nil {
+			return e
+		}
+		if _, e = tx.Exec(ctx, "INSERT INTO schema_versions(version) VALUES(6)"); e != nil {
+			return e
+		}
+	}
+	var v7 bool
+	if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=7)").Scan(&v7); e != nil {
+		return e
+	}
+	if !v7 {
+		if _, e = tx.Exec(ctx, "ALTER TABLE profile_share_envelopes ADD COLUMN authorized_at timestamptz;INSERT INTO schema_versions(version) VALUES(7)"); e != nil {
+			return e
+		}
+	}
 	return tx.Commit(ctx)
 }
 
@@ -174,6 +198,7 @@ func New(db *pgxpool.Pool, c Config, m Mailer) *Server {
 	s.mux.HandleFunc("PUT /v1/objects/{id}", s.auth(true, s.putObject))
 	s.mux.HandleFunc("POST /v1/objects/{id}/lease", s.auth(true, s.lease))
 	s.registerAdmin()
+	s.registerSharing()
 	return s
 }
 func (s *Server) Handler() http.Handler {
@@ -1144,7 +1169,7 @@ func (c Config) Validate() error {
 
 // Clean expired ephemeral authentication rows; retained refresh hashes detect replay for 30 days.
 func (s *Server) Cleanup(ctx context.Context) error {
-	_, e := s.db.Exec(ctx, `DELETE FROM admin_sessions WHERE expires_at<now();DELETE FROM admin_email_codes WHERE expires_at<now();DELETE FROM login_challenges WHERE expires_at<now();DELETE FROM totp_setups WHERE expires_at<now();DELETE FROM recovery_challenges WHERE expires_at<now();DELETE FROM email_codes WHERE expires_at<now();DELETE FROM oauth_flows WHERE expires_at<now();DELETE FROM auth_limits WHERE started_at<now()-interval '1 day';DELETE FROM sessions WHERE refresh_expires<now()-interval '1 day';DELETE FROM audit WHERE created_at<now()-interval '90 days'`)
+	_, e := s.db.Exec(ctx, `DELETE FROM admin_sessions WHERE expires_at<now();DELETE FROM admin_email_codes WHERE expires_at<now();DELETE FROM login_challenges WHERE expires_at<now();DELETE FROM totp_setups WHERE expires_at<now();DELETE FROM recovery_challenges WHERE expires_at<now();DELETE FROM email_codes WHERE expires_at<now();DELETE FROM oauth_flows WHERE expires_at<now();DELETE FROM auth_limits WHERE started_at<now()-interval '1 day';DELETE FROM sessions WHERE refresh_expires<now()-interval '1 day';DELETE FROM audit WHERE created_at<now()-interval '90 days';UPDATE profile_shares SET status='expired',payload='' WHERE status IN ('pending','accepted') AND expires_at<=now();DELETE FROM profile_share_envelopes e USING profile_shares s WHERE e.share_id=s.id AND s.status NOT IN ('pending','accepted')`)
 	return e
 }
 

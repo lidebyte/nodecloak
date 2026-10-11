@@ -343,6 +343,9 @@ pub fn run(c: &mut Connection) -> Result<(), String> {
     let bindings = c.disk.accounts[&account].bindings.clone();
     let all = profiles::load(&c.root)?;
     for (id, mut b) in bindings {
+        if super::sharing::restricted(&c.root, &id)? {
+            continue;
+        }
         if c.disk.accounts[&account].detached.contains(&id) || config_conflicted(c, &account, &id) {
             continue;
         };
@@ -467,6 +470,9 @@ pub fn run(c: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 pub fn before_launch(root: &Path, id: &str) -> Result<(), String> {
+    if super::sharing::restricted(root, id)? {
+        return Ok(());
+    }
     if super::model::Disk::load(root)?.account.is_none() {
         return Ok(());
     }
@@ -592,6 +598,7 @@ pub fn resolve(
     choice: &str,
     runtime: &profiles::Runtime,
 ) -> Result<(), String> {
+    super::sharing::editable(&c.root, id)?;
     let account = c.account_id()?;
     if config_conflicted(c, &account, id) {
         return Err("请先处理此副本的配置冲突，再选择登录状态".into());

@@ -82,6 +82,8 @@ pub struct Profile {
     pub credential_refs: Vec<String>,
     #[serde(default)]
     pub last_region: Option<crate::regional::ResolvedRegion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_share: Option<String>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +97,8 @@ pub struct ProfileView {
     pub proxy_ready: bool,
     pub regional_ready: bool,
     pub regional_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<crate::cloud::sharing::View>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -277,6 +281,7 @@ pub fn load(root: &Path) -> Result<Vec<Profile>, String> {
                 preferences_dirty: false,
                 credential_refs: vec![],
                 last_region: None,
+                received_share: None,
             })
             .collect::<Vec<_>>();
         save(root, &profiles)?;
@@ -362,6 +367,7 @@ pub fn path(root: &Path, p: &Profile) -> Result<PathBuf, String> {
 }
 pub fn context(root: &Path, browser: &str, id: Option<&str>) -> Result<PathBuf, String> {
     if let Some(id) = id {
+        crate::cloud::sharing::editable(root, id)?;
         let p = get(root, id, false)?;
         if p.browser != browser {
             return Err("副本浏览器类型不匹配".into());
@@ -427,6 +433,9 @@ pub fn upstream(p: &Profile, active: bool) -> Result<Upstream, String> {
     })
 }
 pub fn draft_upstream(root: &Path, id: Option<&str>, draft: &Draft) -> Result<Upstream, String> {
+    if let Some(id) = id {
+        crate::cloud::sharing::editable(root, id)?;
+    }
     let mut normalized = draft.clone();
     crate::regional::normalize_sources(&mut normalized.preferences);
     let draft = &normalized;
@@ -496,6 +505,9 @@ pub(crate) fn validate(draft: &Draft) -> Result<(), String> {
     draft.proxy.validate()
 }
 pub fn create(root: &Path, draft: Draft, copy_id: Option<&str>) -> Result<Profile, String> {
+    if let Some(id) = copy_id {
+        crate::cloud::sharing::editable(root, id)?;
+    }
     create_with_id(root, draft, copy_id, identifier())
 }
 pub(crate) fn create_synced(root: &Path, draft: Draft, id: &str) -> Result<Profile, String> {
@@ -574,6 +586,7 @@ fn create_with_id(
         preferences_dirty: true,
         credential_refs: refs,
         last_region: None,
+        received_share: None,
     };
     apply_preferences(root, &p)?;
     p.preferences_dirty = false;
@@ -583,6 +596,7 @@ fn create_with_id(
     Ok(p)
 }
 pub fn update(root: &Path, id: &str, mut draft: Draft) -> Result<Profile, String> {
+    crate::cloud::sharing::editable(root, id)?;
     crate::regional::normalize_sources(&mut draft.preferences);
     validate(&draft)?;
     let mut pending = PendingCredentials {
@@ -632,6 +646,15 @@ pub fn update(root: &Path, id: &str, mut draft: Draft) -> Result<Profile, String
     save(root, &profiles)?;
     pending.committed = true;
     Ok(saved)
+}
+pub(crate) fn mark_shared(root: &Path, id: &str, grant: &str) -> Result<(), String> {
+    let mut all = load(root)?;
+    let p = all
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or("共享副本不存在")?;
+    p.received_share = Some(grant.into());
+    save(root, &all)
 }
 pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
     let dir = path(root, p)?;
@@ -878,6 +901,9 @@ pub fn views(root: &Path, runtime: &Runtime) -> Result<Vec<ProfileView>, String>
     let mut relays = runtime.0.lock().map_err(|_| "代理管理器不可用")?;
     let mut output = vec![];
     for p in &mut profiles {
+        if !crate::cloud::sharing::visible(root, &p.id)? {
+            continue;
+        }
         let running = platform::profile_ids_from(&processes, &path(root, p)?).len() > 0;
         if !running && p.active_proxy.is_some() {
             p.active_proxy = None;
@@ -905,6 +931,7 @@ pub fn views(root: &Path, runtime: &Runtime) -> Result<Vec<ProfileView>, String>
                 p.active_preferences.as_ref().unwrap_or(&p.preferences),
             ) || runtime.1.ready(&p.id),
             regional_error: runtime.1.error(&p.id),
+            sharing: crate::cloud::sharing::view(root, &p.id)?,
         });
     }
     drop(relays);

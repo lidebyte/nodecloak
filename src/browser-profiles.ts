@@ -1,6 +1,7 @@
 import {invoke} from '@tauri-apps/api/core';
 import {native} from './bridge';
 import type {BrowserId,Check} from './domain';
+import type {SharedProfileGrant} from './profile-sharing';
 export type ProxyMode='direct'|'system'|'http'|'https'|'socks5';
 export interface ProxyConfig {mode:ProxyMode;host:string;port:number;username:string;credentialRef?:string|null}
 export type PermissionMode='ask'|'block';
@@ -19,7 +20,7 @@ export function normalizePreferences(value:Partial<Preferences>):Preferences {
   return {...defaults().preferences,...value,advanced,regional:{...regionalDefaults(),languageMode:value.regional?.languageMode??'custom'}};
 }
 export interface ProxyTest {ip:string|null;country:string|null;latency:number;checkedAt:string;connection:string;target:string;clock?:Check|null}
-export interface BrowserProfile {id:string;name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;preferences:Preferences;createdAt:string;updatedAt:string;deletedAt:string|null;lastTest:ProxyTest|null;legacy:boolean;running:boolean;pendingRestart:boolean;browserAvailable:boolean;hasPassword:boolean;proxyReady:boolean;lastRegion?:ResolvedRegion|null;regionalReady?:boolean;regionalError?:string|null}
+export interface BrowserProfile {id:string;name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;preferences:Preferences;createdAt:string;updatedAt:string;deletedAt:string|null;lastTest:ProxyTest|null;legacy:boolean;running:boolean;pendingRestart:boolean;browserAvailable:boolean;hasPassword:boolean;proxyReady:boolean;lastRegion?:ResolvedRegion|null;regionalReady?:boolean;regionalError?:string|null;sharing?:SharedProfileGrant|null}
 export interface ProfileDraft {name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;password?:string;clearPassword:boolean;preferences:Preferences}
 export const defaults=():ProfileDraft=>({name:'',browser:'firefox',notes:'',tags:[],proxy:{mode:'system',host:'',port:8080,username:''},password:'',clearPassword:false,preferences:{language:'en-US,en',privacy:true,fontRestriction:false,startupUrl:'https://claude.ai',advanced:advancedDefaults(),regional:regionalDefaults()}});
 export function parseProxyUri(input:string):{proxy:ProxyConfig;password:string} {

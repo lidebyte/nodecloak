@@ -10,6 +10,7 @@ pub mod model;
 pub mod recovery_export;
 pub mod rotation;
 pub mod scheduler;
+pub mod sharing;
 pub mod session_sync;
 pub mod sync;
 pub mod vault;

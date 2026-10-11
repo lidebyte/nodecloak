@@ -486,17 +486,20 @@ pub fn run() {
         .manage(OperationLock::default())
         .manage(profiles::Runtime::default())
         .manage(cloud::commands::Runtime::default())
+        .manage(cloud::sharing::Runtime::default())
         .setup(|app| {
             let root = data_root::resolve(app.path().app_data_dir()?);
             profiles::load(&root)?;
             app.manage(data_root::DataRoot(root.clone()));
             cloud::scheduler::start(app.handle().clone());
+            cloud::sharing::start(app.handle().clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let guard = handle.state::<OperationLock>();
                 if let Ok(_lock) = guard.0.lock() {
                     if let Ok(list) = profiles::load(&root) {
                         for p in list {
+                            if p.received_share.is_some(){continue;}
                             if p.deleted_at.is_none()
                                 && profiles::running(&root, &p).unwrap_or(false)
                             {
@@ -543,6 +546,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            cloud::sharing::sharing_action,
             browser_sites::get_browser_site_catalog,
             browser_sites::get_browser_site_icon,
             browser_sites::open_catalog_support,
