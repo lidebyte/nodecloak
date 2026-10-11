@@ -596,7 +596,7 @@ mod tests {
     }
     #[test]
     fn restricted_binding_survives_restart_and_failed_import() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let s = share();
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut store = Store::default();
@@ -824,7 +824,7 @@ mod tests {
         std::fs::write(dir.join("done"), b"passed").unwrap();
     }
     fn real_sharing_flow(dir: &Path, endpoint: &str, enroll_vault: bool) {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let aroot = temp.path().join("sender");
         let broot = temp.path().join("recipient");
         let ans = format!("sharing-test-{}", uuid::Uuid::new_v4());
