@@ -235,7 +235,7 @@ mod website_shortcut_tests {
 
     #[test]
     fn website_shortcuts_keep_startup_and_profile_diagnostics_independent() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let draft: Draft = serde_json::from_value(serde_json::json!({
             "name": "Shopping", "browser": "chrome",
             "proxy": {"mode": "system", "host": "", "port": 0, "username": ""}
