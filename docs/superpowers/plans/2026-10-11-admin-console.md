@@ -53,4 +53,3 @@ Files: site shortcut components, `src/browser-sites.json`, `src-tauri/src/browse
 - [x] Run frontend/Rust/Go checks appropriate to changes, validate real admin denial and CRUD/publish on an isolated local API.
 - [x] Deploy binary and `/admin/` Nginx routing while preserving SMTP/Google/env/token pepper, bootstrap only named existing account.
 - [x] Verify public assets, unauthorized API denial, catalog and service readiness; record evidence and test limits.
-

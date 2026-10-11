@@ -75,4 +75,3 @@ Server backups, root encryption keys and login credentials are separate. Restori
 # Session/configuration consistency
 
 Desktop session writes include `configRevision`, the revision of their confirmed profile configuration. The service checks it together with the configuration's deletion state while holding the same transaction lock used by configuration writes. A change returns `409 config_conflict`; clients must synchronize configuration and resolve its conflicts before retrying the session write. Session CAS, epoch and lease generation checks still apply. Requests from older clients without `configRevision` retain compatibility, but cannot publish a live session for a deleted configuration or delete a session for a live configuration.
-
