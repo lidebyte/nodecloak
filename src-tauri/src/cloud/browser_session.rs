@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn interrupted_replacement_recovers_at_each_rename_boundary() {
         for phase in 0..4 {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let profile = dir.path().join("profile");
             let stage = dir.path().join(".nodecloak-sync-test");
             std::fs::create_dir(&stage).unwrap();
@@ -886,7 +886,7 @@ mod tests {
     }
     #[test]
     fn importing_cannot_touch_an_open_browser() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = dir.path().join("profile");
         std::fs::create_dir_all(&profile).unwrap();
         #[cfg(windows)]
@@ -907,7 +907,7 @@ mod tests {
     #[ignore = "launches installed browsers against synthetic, temporary profiles only"]
     fn installed_browsers_roundtrip_cookie_localstorage_and_indexeddb() {
         for browser in ["chrome", "edge", "firefox"] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let profile = dir.path().join("synthetic");
             let token = format!("synthetic-{}", uuid::Uuid::new_v4());
             let packed = |v: Value| json!({"root":v,"nodes":[]});

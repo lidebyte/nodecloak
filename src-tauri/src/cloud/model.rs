@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     #[test]
     fn cloud_profile_projection_excludes_device_paths_and_runtime() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = crate::profiles::load(dir.path()).unwrap().remove(0);
         let doc = Document::export(&p).unwrap();
         let value = serde_json::to_value(doc).unwrap();
@@ -260,7 +260,7 @@ mod tests {
     }
     #[test]
     fn imported_profile_rejects_unknown_schema_and_platform_state() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = crate::profiles::load(dir.path()).unwrap().remove(0);
         let doc = Document::export(&p).unwrap();
         let mut v = serde_json::to_value(doc).unwrap();
