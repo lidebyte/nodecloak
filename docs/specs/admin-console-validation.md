@@ -1,5 +1,7 @@
 # Administration console delivery evidence
 
+2.0.0 release update: current backend release is `f7b6e43ea961`, schema version 5. At the user's request, all 21 active production announcements were archived with audit records; the public list now contains zero notices. The historical publication counts below describe earlier checks. See [release evidence](../releases/2.0.0.md).
+
 Delivered 2026-10-11 at https://nodecloak.com/admin/ with the named existing administrator jamesupereal@gmail.com. Current backend release `5606616fd378`, migration version 5. Local desktop development process rebuilt and restarted against port 1421.
 
 ## Announcement pagination and Markdown update
