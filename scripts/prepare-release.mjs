@@ -18,18 +18,18 @@ for(const [platform,name] of Object.entries(names)) {
   if(!decoded.startsWith('untrusted comment:') || !decoded.includes('trusted comment:') || !decoded.includes(`\tversion:${version}`)) throw new Error(`Invalid or mismatched updater signature file: ${platform}`);
   platforms[platform]={url:`https://github.com/nodecloak/nodecloak/releases/download/v${version}/${name}`,signature};
 }
-// Update notices list only implemented features and bug fixes.
+// User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "新增账号系统：支持 Google 和邮箱登录、头像与用户名编辑、密码设置及两步验证。 / Adds Google and email sign-in, profile editing, passwords and two-factor authentication.",
-  "新增端到端加密云同步：同步浏览器副本配置和可迁移的网站登录状态，支持恢复密钥、设备授权、手动同步及冲突处理。 / Adds end-to-end encrypted profile and transferable website-session sync, recovery keys, device approval and conflict resolution.",
-  "新增管理后台：管理网站分组、站点图标、用户、设备、存储元数据、审计记录和系统设置。 / Adds an administration console for website groups, icons, users, devices, storage metadata and audit events.",
-  "公告支持分页、关闭和历史查看；后台使用带实时预览的 Markdown 编辑器，应用按 Markdown 展示。 / Adds paginated announcement history and Markdown editing, preview and display.",
-  "统一品牌控件与下拉菜单，优化个人资料和偏好设置，终端工作目录支持文件夹选择。 / Refines branded controls, profile and preferences pages, and adds a terminal working-folder picker."
+  "新增 Google 和邮箱登录，可修改头像与用户名，并设置密码和两步验证。 / Sign in with Google or email, edit your avatar and name, and set up a password and two-factor authentication.",
+  "新增端到端加密云同步，可同步浏览器副本配置和可迁移的网站登录状态，选择自动或手动同步，并处理设备间的冲突。 / Sync browser profiles and transferable website sign-in sessions with end-to-end encryption, automatic or manual sync, and conflict resolution.",
+  "AI 和电商网站菜单使用各站点的对应图标，查找和打开网站更方便。 / Recognize and open sites more easily with individual icons in the AI and shopping menus.",
+  "公告支持关闭和查看历史，向下滚动可继续加载更多内容。 / Dismiss announcements, browse their history, and scroll to load more.",
+  "优化个人资料、偏好设置和下拉菜单，终端工作目录可直接选择文件夹。 / Improved profile and preferences pages and dropdown menus; choose terminal working folders with a folder picker."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');
 files.push('latest.json');
 const sums=files.map(name=>`${crypto.createHash('sha256').update(fs.readFileSync(path.join(directory,name))).digest('hex')}  ${name}`).join('\n')+'\n';
 fs.writeFileSync(path.join(directory,'SHA256SUMS.txt'),sums);
-fs.writeFileSync(path.join(projectRoot,'.release-notes.md'),`NodeCloak ${version}。安装包由本版本标签的 GitHub Actions 自动构建。\n\n${manifest.notes}\n\n0.5.9 及后续版本可继续使用已签名的应用内更新。品牌更新保留已有配置；macOS 的旧应用入口名称可能保留，手动安装新版 DMG 后可使用 NodeCloak 入口。\n\n| 平台 | 手动安装文件 |\n| --- | --- |\n| Windows x64 安装版 | NodeCloak_${version}_windows_x64_setup.exe |\n| Windows x64 便携版 | NodeCloak_${version}_windows_x64_portable.exe |\n| macOS Apple Silicon（M 系列） | NodeCloak_${version}_macos_arm64.dmg |\n| macOS Intel | NodeCloak_${version}_macos_x64.dmg |\n\nlatest.json、签名文件和 app.tar.gz 供应用自动更新使用。SHA256SUMS.txt 提供包校验值；THIRD_PARTY_NOTICES 归档包含三端依赖许可。\n\n此构建先保存为草稿，完成平台签名、公证、自动更新签名及校验后发布。\n`);
+fs.writeFileSync(path.join(projectRoot,'.release-notes.md'),`NodeCloak ${version}\n\n${manifest.notes}\n\n已有浏览器副本和修复记录继续保留。0.5.9 及后续版本可在应用内检查更新。\n\n提供 Windows x64 安装版和便携版，以及 macOS Apple Silicon 和 Intel 安装包。\n`);
 console.log(`Verified complete release ${version}; checksums and release notes written.`);
