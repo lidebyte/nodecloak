@@ -1,5 +1,7 @@
 # Profile sharing verification — 2026-10-11
 
+Release follow-up: the completed feature is now committed and published as 2.1.0 from source `9f0ae7a`, with verified Windows x64 and both macOS packages. Sharing service schema 7 is deployed. See [2.1.0 release evidence](../releases/2.1.0.md). The pre-release version and uncommitted status below are historical.
+
 Internal engineering record. Requirements are in `profile-sharing.md`; UI follows `docs/branding.md` and the existing VI reference. Package version remains 2.0.1. Earlier Google icon/loading and homepage theme changes are preserved.
 
 ## Checks
