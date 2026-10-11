@@ -54,8 +54,8 @@ let demo:BrowserProfile[]|null=null;
 const name={chrome:'Chrome',edge:'Edge',firefox:'Firefox'};
 function data():BrowserProfile[] {
   if(demo)return demo;
-  try{const saved=JSON.parse(localStorage.getItem(KEY)||'null');if(Array.isArray(saved)){demo=saved.map(p=>({...p,preferences:normalizePreferences(p.preferences),running:false}));return demo!;}}catch{ /* recover demo data */ }
-  demo=(['chrome','edge','firefox'] as BrowserId[]).map(browser=>({...defaults(),id:`legacy-${browser}`,name:`默认 ${name[browser]}`,browser,tags:['默认'],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),deletedAt:null,lastTest:null,legacy:true,running:false,pendingRestart:false,browserAvailable:true,hasPassword:false,proxyReady:true}));return demo;
+  try{const saved=JSON.parse(localStorage.getItem(KEY)||'null');if(Array.isArray(saved)){demo=saved.map(p=>({...p,name:p.legacy&&p.name===`默认 ${name[p.browser as BrowserId]}`?name[p.browser as BrowserId]:p.name,preferences:normalizePreferences(p.preferences),running:false}));return demo!;}}catch{ /* recover demo data */ }
+  demo=(['chrome','edge','firefox'] as BrowserId[]).map(browser=>({...defaults(),id:`legacy-${browser}`,name:name[browser],browser,tags:['默认'],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),deletedAt:null,lastTest:null,legacy:true,running:false,pendingRestart:false,browserAvailable:true,hasPassword:false,proxyReady:true}));return demo;
 }
 function saveDemo(){try{localStorage.setItem(KEY,JSON.stringify(data().map(({...p})=>p)));}catch{throw new Error('演示存储已满，无法保存');}}
 function get(id:string){const p=data().find(p=>p.id===id);if(!p)throw new Error('副本不存在');return p;}

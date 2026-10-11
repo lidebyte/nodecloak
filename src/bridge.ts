@@ -166,7 +166,8 @@ export async function undoRepair(recordId: string,profileId?:string): Promise<vo
   }
   r.status = 'undone'; r.message = '演示设置已恢复';
 }
-export async function launchBrowser(browser: BrowserId, destination: 'claude' | 'verify' | 'dns' | 'diagnostics' | 'privacyDocs') {
+export type BrowserDestination = 'claude' | 'verify' | 'dns' | 'diagnostics' | 'privacyDocs' | `site:${string}`;
+export async function launchBrowser(browser: BrowserId, destination: BrowserDestination) {
   if (native) return invoke<void>('launch_browser', { browser, destination,profileId:activeProfileId });
   throw new Error('专用浏览器需要桌面版才能打开。当前为界面演示，未更改电脑。');
 }

@@ -254,16 +254,14 @@ pub fn load(root: &Path) -> Result<Vec<Profile>, String> {
             .into_iter()
             .map(|browser| Profile {
                 id: format!("legacy-{browser}"),
-                name: format!(
-                    "默认 {}",
-                    match browser {
-                        "chrome" => "Chrome",
-                        "edge" => "Edge",
-                        _ => "Firefox",
-                    }
-                ),
+                name: match browser {
+                    "chrome" => "Chrome",
+                    "edge" => "Edge",
+                    _ => "Firefox",
+                }
+                .into(),
                 browser: browser.into(),
-                notes: "从原专用浏览器接入，原有数据保留".into(),
+                notes: String::new(),
                 tags: vec!["默认".into()],
                 proxy: ProxyConfig::system(),
                 preferences: existing_preferences(root, browser),
@@ -309,6 +307,17 @@ pub fn load(root: &Path) -> Result<Vec<Profile>, String> {
         }
     }
     for profile in &mut registry.profiles {
+        let browser_name = match profile.browser.as_str() {
+            "chrome" => "Chrome",
+            "edge" => "Edge",
+            _ => "Firefox",
+        };
+        if profile.legacy && profile.name == format!("默认 {browser_name}") {
+            profile.name = browser_name.into();
+        }
+        if profile.legacy && profile.notes == "从原专用浏览器接入，原有数据保留" {
+            profile.notes.clear();
+        }
         if crate::regional::normalize_sources(&mut profile.preferences) {
             profile.preferences_dirty = true;
             profile.last_region = None;
@@ -1024,6 +1033,36 @@ pub fn history(root: &Path, id: Option<&str>) -> Result<Vec<engine::Record>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removes_default_name_prefix_without_renaming_custom_profiles() {
+        let root = test_dir();
+        let mut profiles = load(root.path()).unwrap();
+        assert_eq!(profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Chrome", "Edge", "Firefox"]);
+        profiles[0].name = "默认 Chrome".into();
+        profiles[1].name = "My Edge".into();
+        save(root.path(), &profiles).unwrap();
+        let custom = create(root.path(), draft("默认 Chrome"), None).unwrap();
+        let loaded = load(root.path()).unwrap();
+        assert_eq!(loaded.iter().find(|p| p.id == profiles[0].id).unwrap().name, "Chrome");
+        assert_eq!(loaded.iter().find(|p| p.id == profiles[1].id).unwrap().name, "My Edge");
+        assert_eq!(loaded.iter().find(|p| p.id == custom.id).unwrap().name, "默认 Chrome");
+    }
+    #[test]
+    fn removes_generated_legacy_notes_but_keeps_user_notes() {
+        let root = test_dir();
+        let mut profiles = load(root.path()).unwrap();
+        assert!(profiles.iter().all(|p| p.notes.is_empty()));
+        profiles[0].notes = "从原专用浏览器接入，原有数据保留".into();
+        profiles[1].notes = "Work browser".into();
+        save(root.path(), &profiles).unwrap();
+        let mut custom = draft("Custom profile");
+        custom.notes = "从原专用浏览器接入，原有数据保留".into();
+        let custom = create(root.path(), custom, None).unwrap();
+        let loaded = load(root.path()).unwrap();
+        assert!(loaded.iter().find(|p| p.id == profiles[0].id).unwrap().notes.is_empty());
+        assert_eq!(loaded.iter().find(|p| p.id == profiles[1].id).unwrap().notes, "Work browser");
+        assert_eq!(loaded.iter().find(|p| p.id == custom.id).unwrap().notes, custom.notes);
+    }
     #[test]
     fn legacy_region_sources_are_disabled_on_load_without_changing_proxy_or_language() {
         let root = test_dir();

@@ -1,4 +1,5 @@
 mod browser_control;
+mod browser_sites;
 mod claude_probe;
 mod clock_probe;
 mod data_root;

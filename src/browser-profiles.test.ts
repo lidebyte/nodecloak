@@ -3,6 +3,14 @@ vi.mock('./bridge',()=>({native:false}));
 const storage=new Map<string,string>();
 beforeEach(()=>{vi.resetModules();storage.clear();vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});});
 describe('browser profiles',()=>{
+  it('uses browser names and migrates only generated default names',async()=>{
+    const api=await import('./browser-profiles');
+    const profiles=await api.listProfiles();expect(profiles.map(p=>p.name)).toEqual(['Chrome','Edge','Firefox']);
+    profiles[0].name='默认 Chrome';profiles[1].name='My Edge';
+    storage.set('claudedone.profiles-demo.v1',JSON.stringify([...profiles,{...profiles[0],id:'custom',legacy:false}]));
+    vi.resetModules();
+    expect((await (await import('./browser-profiles')).listProfiles()).map(p=>p.name)).toEqual(['Chrome','My Edge','Firefox','默认 Chrome']);
+  });
   it('parses encoded credentials, IPv6 and protocol defaults',async()=>{
     const {parseProxyUri}=await import('./browser-profiles');
     expect(parseProxyUri('socks5://user:p%40ss@[::1]:1081')).toEqual({proxy:{mode:'socks5',host:'::1',port:1081,username:'user'},password:'p@ss'});

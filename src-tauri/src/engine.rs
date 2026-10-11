@@ -889,7 +889,8 @@ pub fn launch_browser(root: &Path, browser: &str, destination: &str) -> Result<(
                 "chrome://settings/security"
             }
         }
-        _ => return Err("不支持的目标页面".into()),
+        _ => crate::browser_sites::destination_url(destination)
+            .ok_or("不支持的目标页面")?,
     };
     let dir = profile(root, browser)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

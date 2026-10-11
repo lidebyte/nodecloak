@@ -1,0 +1,13 @@
+[
+  {"id":"claude","name":"Claude","group":"ai","url":"https://claude.ai"},
+  {"id":"chatgpt","name":"ChatGPT","group":"ai","url":"https://chatgpt.com/"},
+  {"id":"gemini","name":"Gemini","group":"ai","url":"https://gemini.google.com/"},
+  {"id":"grok","name":"Grok","group":"ai","url":"https://grok.com/"},
+  {"id":"muse","name":"Muse","group":"ai","url":"https://muse.ai/"},
+  {"id":"amazon","name":"Amazon","group":"commerce","url":"https://www.amazon.com/"},
+  {"id":"ebay","name":"eBay","group":"commerce","url":"https://www.ebay.com/"},
+  {"id":"etsy","name":"Etsy","group":"commerce","url":"https://www.etsy.com/"},
+  {"id":"walmart","name":"Walmart","group":"commerce","url":"https://www.walmart.com/"},
+  {"id":"shopee","name":"Shopee","group":"commerce","url":"https://shopee.sg/"},
+  {"id":"lazada","name":"Lazada","group":"commerce","url":"https://www.lazada.sg/"}
+]

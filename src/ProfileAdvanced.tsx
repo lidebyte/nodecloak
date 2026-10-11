@@ -3,6 +3,7 @@ import {Globe2,ShieldCheck,SlidersHorizontal} from 'lucide-react';
 import {needsRegionalControl,type IpRegion,type AdvancedSettings,type ProfileDraft} from './browser-profiles';
 import ProfileRegion from './ProfileRegion';
 import Toggle from './Toggle';
+import SelectMenu from './SelectMenu';
 
 export function ProfileAdvanced({draft,onChange,match,matching,onMatch}:{draft:ProfileDraft;onChange:(draft:ProfileDraft)=>void;match:IpRegion|null;matching:boolean;onMatch:()=>void}) {
   const prefs=draft.preferences,advanced=prefs.advanced,firefox=draft.browser==='firefox';
@@ -19,7 +20,7 @@ export function ProfileAdvanced({draft,onChange,match,matching,onMatch}:{draft:P
       {!firefox&&<p className="profile-field-hint">{t("字体限制、严格指纹保护和 WebGL 禁用需要 Firefox。Chrome / Edge 保留浏览器实际指纹。")}</p>}
     </section>
     <section className="advanced-card"><h3><SlidersHorizontal size={17}/>{t("网站权限与内容")}</h3><p>{t("设置新网站的默认权限。已在浏览器内保存的网站例外仍然保留。")}</p>
-      <div className="profile-form">{([['notifications','网页通知'],['camera','摄像头'],['microphone','麦克风']] as const).map(([key,label])=><label key={key}>{t(label)}<select aria-label={t(label)} value={advanced[key]} onChange={e=>set({[key]:e.target.value})}><option value="ask">{t("使用前询问")}</option><option value="block">{t("默认禁止")}</option></select></label>)}</div>
+      <div className="profile-form">{([['notifications','网页通知'],['camera','摄像头'],['microphone','麦克风']] as const).map(([key,label])=><label key={key}>{t(label)}<SelectMenu label={t(label)} value={advanced[key]} onChange={value=>set({[key]:value})} options={[{value:"ask",label:t("使用前询问"),icon:<ShieldCheck size={16}/>},{value:"block",label:t("默认禁止"),icon:<ShieldCheck size={16}/>}]} /></label>)}</div>
       <label className="advanced-toggle"><span><strong>{t("默认不加载图片")}</strong><small>{t("减少图片流量，也会影响头像、验证码和网页内容。已允许的网站可使用自己的设置。")}</small></span><Toggle checked={advanced.blockImages} onChange={e=>set({blockImages:e.target.checked})}/></label>
     </section>
   </div>;

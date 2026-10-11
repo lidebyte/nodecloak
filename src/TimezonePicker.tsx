@@ -1,4 +1,6 @@
 import {t} from './i18n';
+import {Clock3} from 'lucide-react';
+import SelectMenu from './SelectMenu';
 import { timezoneChoices, timezoneOffsetLabel, type TimezoneTarget, type TimezoneOption } from './domain';
 
 interface Props {
@@ -11,16 +13,14 @@ export default function TimezonePicker({ target, custom, options, loading, error
   const chosen = options.find(zone => zone.id === custom);
   return <section className="timezone-picker">
     <label htmlFor="target-timezone">{t("目标系统时区")}</label>
-    <select id="target-timezone" value={target} disabled={disabled} onChange={e => onTarget(e.target.value as TimezoneTarget)}>
-      {Object.entries(timezoneChoices).map(([value, choice]) => <option key={value} value={value}>{t(choice.label)}</option>)}
-    </select>
+    <SelectMenu id="target-timezone" label={t("目标系统时区")} value={target} disabled={disabled} onChange={value=>onTarget(value as TimezoneTarget)}
+      options={Object.entries(timezoneChoices).map(([value,choice])=>({value,label:t(choice.label),icon:<Clock3 size={16}/>}))} />
     {target === 'custom' && <>
       <label htmlFor="custom-timezone" className="custom-timezone-label">{t("搜索或输入指定时区")}</label>
-      <input id="custom-timezone" list="system-timezones" value={custom} disabled={disabled || loading || !options.length}
+      <SelectMenu id="custom-timezone" label={t("搜索或输入指定时区")} value={custom} disabled={disabled || loading || !options.length} searchable
         placeholder={t(platform === 'Windows' ? '例如 Tokyo Standard Time' : '例如 Asia/Tokyo 或 America/New_York')}
-        spellCheck={false} autoComplete="off" aria-invalid={!!custom && !chosen} aria-describedby="timezone-input-status"
-        onChange={e => onCustom(e.target.value)} />
-      <datalist id="system-timezones">{options.map(zone => <option key={zone.id} value={zone.id}>{t(timezoneOffsetLabel(zone.offsetMinutes))} · {zone.label}</option>)}</datalist>
+        invalid={!!custom && !chosen} describedBy="timezone-input-status" onChange={onCustom}
+        options={options.map(zone=>({value:zone.id,label:`${zone.id} · ${t(timezoneOffsetLabel(zone.offsetMinutes))} · ${zone.label}`,icon:<Clock3 size={16}/>}))} />
       <p id="timezone-input-status" role={error ? 'alert' : 'status'}>
         {t(loading ? '正在读取系统支持的时区…' : error || (chosen ? `已选择 ${chosen.id} · 当前偏移 ${timezoneOffsetLabel(chosen.offsetMinutes)}。支持夏令时的地区会按系统规则自动调整。` : '请从系统支持的清单选择完整时区名称，输入无效时无法应用。'))}
       </p>

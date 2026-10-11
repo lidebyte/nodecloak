@@ -195,6 +195,9 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
     Ok(())
 }
 fn destination_url(root: &Path, p: &Profile, destination: &str) -> Result<String, String> {
+    if let Some(url) = crate::browser_sites::destination_url(destination) {
+        return Ok(url.into());
+    }
     Ok(match destination {
         "startup" => p.preferences.startup_url.clone(),
         "claude" => "https://claude.ai".into(),
@@ -222,6 +225,27 @@ fn destination_url(root: &Path, p: &Profile, destination: &str) -> Result<String
         }
         _ => return Err("不支持的启动页面".into()),
     })
+}
+
+#[cfg(test)]
+mod website_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn website_shortcuts_keep_startup_and_profile_diagnostics_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let draft: Draft = serde_json::from_value(serde_json::json!({
+            "name": "Shopping", "browser": "chrome",
+            "proxy": {"mode": "system", "host": "", "port": 0, "username": ""}
+        })).unwrap();
+        let profile = profiles::create(root.path(), draft, None).unwrap();
+        let startup = profile.preferences.startup_url.clone();
+        assert_eq!(destination_url(root.path(), &profile, "site:chatgpt").unwrap(), "https://chatgpt.com/");
+        assert_eq!(destination_url(root.path(), &profile, "site:amazon").unwrap(), "https://www.amazon.com/");
+        assert_eq!(destination_url(root.path(), &profile, "startup").unwrap(), startup);
+        assert!(destination_url(root.path(), &profile, "verify").unwrap().contains(&format!("profile={}", profile.id)));
+        assert!(destination_url(root.path(), &profile, "site:unknown").is_err());
+    }
 }
 #[tauri::command]
 pub async fn start_profile(app: tauri::AppHandle, id: String) -> Result<(), String> {

@@ -1,5 +1,6 @@
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
-import {Languages} from 'lucide-react';
+import {CaseSensitive,Languages,Monitor} from 'lucide-react';
+import SelectMenu from './SelectMenu';
 import {invoke} from '@tauri-apps/api/core';
 import {native} from './bridge';
 import {languageStorageKey,readLanguagePreference,resolveLanguage,setLanguage,t,type Language,type LanguagePreference} from './i18n';
@@ -29,4 +30,4 @@ export function LanguageProvider({children}:{children:ReactNode}) {
   return <LanguageContext.Provider value={{language,preference,choose}}>{children}</LanguageContext.Provider>;
 }
 export function useLanguage(){const context=useContext(LanguageContext);if(!context)throw new Error('LanguageProvider is required');return context;}
-export default function LanguageControl(){const {preference,choose}=useLanguage();return <label className="language-control"><Languages size={15}/><span>{t('界面语言')}</span><select aria-label={t('界面语言')} value={preference} onChange={e=>choose(e.target.value as LanguagePreference)}><option value="system">{t('跟随系统语言')}</option><option value="zh">简体中文</option><option value="en">English</option></select></label>;}
+export default function LanguageControl(){const {preference,choose}=useLanguage();return <label className="language-control"><Languages size={15}/><span>{t('界面语言')}</span><SelectMenu label={t('界面语言')} value={preference} onChange={value=>choose(value as LanguagePreference)} options={[{value:"system",label:t("跟随系统语言"),icon:<Monitor size={16}/>},{value:"zh",label:"简体中文",icon:<Languages size={16}/>},{value:"en",label:"English",icon:<CaseSensitive size={16}/>}]} /></label>;}
