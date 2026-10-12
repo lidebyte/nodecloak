@@ -235,10 +235,25 @@ pub(super) fn one(
     b: &mut Binding,
     remote: Option<&Object>,
 ) -> Result<(), String> {
+    reconcile(c, p, b, remote, false).map(|_| ())
+}
+
+enum SessionPreparation {
+    Complete,
+    LocalOnly,
+}
+
+fn reconcile(
+    c: &mut Connection,
+    p: &profiles::Profile,
+    b: &mut Binding,
+    remote: Option<&Object>,
+    allow_local_launch: bool,
+) -> Result<SessionPreparation, String> {
     let account = c.account_id()?;
     // Configuration choices also decide whether the profile and its session survive.
     if config_conflicted(c, &account, &p.id) {
-        return Ok(());
+        return Ok(SessionPreparation::Complete);
     }
     if let (Some(base), Some(remote)) = (
         b.session_baseline
@@ -270,25 +285,44 @@ pub(super) fn one(
                 return Err("登录数据租约已到期，本机更改将保留为冲突".into());
             };
         }
-        return Ok(());
+        return Ok(SessionPreparation::Complete);
     }
+    let file_stamp = stamp(&p.browser, &path)?;
+    let changed = b.file_stamp.as_ref() != Some(&file_stamp) || b.session_dirty;
+    if !changed && remote_rev == base_rev {
+        c.disk
+            .accounts
+            .get_mut(&account)
+            .unwrap()
+            .conflicts
+            .retain(|x| x.local_id != p.id || x.kind != "session");
+        return Ok(SessionPreparation::Complete);
+    }
+    let local = match browser_session::export_profile(&p.browser, &path) {
+        Ok(local) => local,
+        Err(error)
+            if allow_local_launch
+                && p.received_share.is_none()
+                && error == browser_session::PARTITIONED_STORAGE_ERROR =>
+        {
+            // Migration capability is not a prerequisite for using an owner's
+            // original profile. Keep both baselines and pending data untouched.
+            c.disk.accounts.get_mut(&account).unwrap().last_error = Some(error);
+            return Ok(SessionPreparation::LocalOnly);
+        }
+        Err(error) => return Err(error),
+    };
     c.disk
         .accounts
         .get_mut(&account)
         .unwrap()
         .conflicts
         .retain(|x| x.local_id != p.id || x.kind != "session");
-    let file_stamp = stamp(&p.browser, &path)?;
-    let changed = b.file_stamp.as_ref() != Some(&file_stamp) || b.session_dirty;
-    if !changed && remote_rev == base_rev {
-        return Ok(());
-    }
-    let local = browser_session::export_profile(&p.browser, &path)?;
     let local_hash = hash(&local)?;
     let local_changed = b.session_hash.as_ref() != Some(&local_hash);
     if remote_rev == 0 && base_rev > 0 {
         conflict(c, &p.id, b, &p.name, "cloud_object_missing", 0)?;
-        return Ok(());
+        return Ok(SessionPreparation::Complete);
     }
     if remote_rev != base_rev {
         let o = remote.ok_or("云端登录记录不存在")?;
@@ -300,23 +334,23 @@ pub(super) fn one(
             b.file_stamp = Some(file_stamp);
             b.session_dirty = false;
             b.pending_session = None;
-            return Ok(());
+            return Ok(SessionPreparation::Complete);
         }
         // A live local profile may be awaiting a config deletion conflict, or may
         // have just been restored. A session tombstone requires an explicit choice.
         if o.deleted {
             b.pending_session = Some(cache(c, o)?);
             conflict(c, &p.id, b, &p.name, "deletion_vs_edit", remote_rev)?;
-            return Ok(());
+            return Ok(SessionPreparation::Complete);
         }
         if !local_changed || (base_rev == 0 && local.cookies.is_empty() && local.origins.is_empty())
         {
             apply(c, p, b, o)?;
-            return Ok(());
+            return Ok(SessionPreparation::Complete);
         }
         b.pending_session = Some(cache(c, o)?);
         conflict(c, &p.id, b, &p.name, "login_state_changed", remote_rev)?;
-        return Ok(());
+        return Ok(SessionPreparation::Complete);
     }
     if local_changed {
         lease(c, b, false)?;
@@ -332,7 +366,7 @@ pub(super) fn one(
         b.file_stamp = Some(file_stamp);
         b.session_dirty = false;
     }
-    Ok(())
+    Ok(SessionPreparation::Complete)
 }
 pub fn run(c: &mut Connection) -> Result<(), String> {
     let account = c.account_id()?;
@@ -532,7 +566,10 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             .map(|o| sync::fetch(&mut c, &o.id, "session"))
             .transpose()?;
         remote_revision = remote.as_ref().map(|o| o.revision).unwrap_or(0);
-        one(&mut c, &p, &mut b, remote.as_ref())?;
+        let local_only = matches!(
+            reconcile(&mut c, &p, &mut b, remote.as_ref(), true)?,
+            SessionPreparation::LocalOnly
+        );
         if c.disk.accounts[&account]
             .conflicts
             .iter()
@@ -540,7 +577,12 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
         {
             return Err("副本或登录状态有冲突，请在账号同步中选择保留本地、云端或两份".into());
         };
-        lease(&mut c, &mut b, false)
+        if local_only {
+            b.generation = 0;
+            Ok(())
+        } else {
+            lease(&mut c, &mut b, false)
+        }
     })();
     let offline = result.as_ref().err().is_some_and(|e| {
         e == "无法连接账号服务，请检查网络" || e == "云端响应中断" || e.contains("unauthorized")
@@ -660,4 +702,224 @@ pub fn resolve(
         .retain(|x| x.local_id != id || x.kind != "session");
     let _ = runtime;
     c.disk.save(&c.root)
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::super::{account::Session, client::Client, crypto, model::Account, vault};
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    struct Credentials(String, String);
+    impl Drop for Credentials {
+        fn drop(&mut self) {
+            let _ = vault::remove(&format!("{}:device", self.0));
+            let _ = vault::remove(&format!("{}:session", self.0));
+            let _ = vault::remove(&vault::root_name(&self.0, &self.1, 1));
+        }
+    }
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        Connection,
+        profiles::Profile,
+        Credentials,
+        std::thread::JoinHandle<()>,
+    ) {
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ns = format!("test-launch-{}", uuid::Uuid::new_v4());
+        let account = Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            email: "owner@example.invalid".into(),
+            name: "Owner".into(),
+            avatar: String::new(),
+            google_linked: false,
+            has_password: false,
+            two_factor_enabled: false,
+            recent_auth: false,
+        };
+        let credentials = Credentials(ns.clone(), account.id.clone());
+        let mut c = Connection::test_connection(
+            dir.path(),
+            Client::new(&format!("http://{}", listener.local_addr().unwrap()), true).unwrap(),
+            &ns,
+        )
+        .unwrap();
+        c.disk.account = Some(account.clone());
+        c.save_session(Session {
+            account_id: account.id.clone(),
+            access_token: "synthetic-token".into(),
+            refresh_token: "synthetic-refresh".into(),
+            expires_at: chrono::Utc::now().timestamp() + 900,
+        })
+        .unwrap();
+        let p = profiles::create(dir.path(), serde_json::from_value(json!({"name":"Owner original","browser":"firefox","proxy":{"mode":"system","host":"","port":0,"username":""}})).unwrap(), None).unwrap();
+        let path = profiles::path(dir.path(), &p).unwrap();
+        let partition = path.join(
+            "storage/default/https+++example.invalid^partitionKey=%28https%2Cexample.invalid%29",
+        );
+        std::fs::create_dir_all(&partition).unwrap();
+        std::fs::write(partition.join("sentinel"), b"local-session-preserved").unwrap();
+        let key = crypto::random_key().unwrap();
+        vault::save_root(&ns, &account.id, 1, &key).unwrap();
+        let state = c.disk.accounts.entry(account.id.clone()).or_default();
+        state.auto_sync = true;
+        state.session_sync = true;
+        state.setup_complete = true;
+        state.epoch = 1;
+        let mut binding = Binding::new(&uuid::Uuid::new_v4().to_string());
+        binding.generation = 42;
+        state.bindings.insert(p.id.clone(), binding);
+        c.disk.save(dir.path()).unwrap();
+        let info = json!({"epoch":1,"approved":true,
+            "deviceEnvelope":crypto::device_seal(&*vault::decode_key(&c.device.public_key).unwrap(), &account.id, &c.device.id, 1, &key).unwrap(),
+            "deviceProof":crypto::device_proof(&key, &account.id, &c.device.id, &c.device.public_key, 1)});
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            for (route, body) in [
+                ("/v1/account", json!(account)),
+                ("/v1/vault", info),
+                ("/v1/objects", json!({"objects":[]})),
+            ] {
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(10))
+                        }
+                        Err(error) => panic!("missing mock request {route}: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(String::from_utf8(request)
+                    .unwrap()
+                    .starts_with(&format!("GET {route} ")));
+                let body = body.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        (dir, c, p, credentials, server)
+    }
+
+    #[test]
+    fn owner_can_launch_with_partitioned_storage_without_publishing_or_replacing_sessions() {
+        let (dir, mut c, p, _credentials, server) = fixture();
+        assert!(super::super::sharing::before_launch(dir.path(), &p.id).is_ok());
+        let result = prepare_launch(&mut c, &p.id);
+        server.join().unwrap();
+        assert!(result.is_ok(), "local launch blocked: {result:?}");
+        let disk = super::super::model::Disk::load(dir.path()).unwrap();
+        let state = &disk.accounts[&c.account_id().unwrap()];
+        let binding = &state.bindings[&p.id];
+        assert_eq!(binding.generation, 0);
+        assert!(binding.session_dirty);
+        assert!(binding.session_baseline.is_none());
+        assert!(binding.pending_session.is_none());
+        assert!(state.last_error.as_ref().unwrap().contains("分区网站存储"));
+        let path = profiles::path(dir.path(), &p).unwrap();
+        assert!(browser_session::export_profile("firefox", &path)
+            .err()
+            .unwrap()
+            .contains("分区网站存储"));
+        let account = c.account_id().unwrap();
+        let mut binding = c.disk.accounts[&account].bindings[&p.id].clone();
+        // Explicit synchronization must still fail rather than upload incomplete data.
+        assert!(one(&mut c, &p, &mut binding, None)
+            .unwrap_err()
+            .contains("分区网站存储"));
+        let mut received = p.clone();
+        received.received_share = Some(uuid::Uuid::new_v4().to_string());
+        assert!(reconcile(&mut c, &received, &mut binding, None, true)
+            .err()
+            .unwrap()
+            .contains("分区网站存储"));
+        // A subsequent local-only launch must retain a pending cloud revision.
+        binding.pending_session = Some(Object {
+            id: binding.cloud_id.clone(),
+            kind: "session".into(),
+            revision: 7,
+            epoch: 1,
+            deleted: false,
+            payload: String::new(),
+            writer: c.device.id.clone(),
+            generation: 1,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
+        assert!(matches!(
+            reconcile(&mut c, &p, &mut binding, None, true).unwrap(),
+            SessionPreparation::LocalOnly
+        ));
+        assert_eq!(binding.pending_session.as_ref().unwrap().revision, 7);
+        // Other export failures must not become a local-only launch exemption.
+        let other = profiles::create(
+            dir.path(),
+            super::super::model::Document::export(&p).unwrap().draft(),
+            None,
+        )
+        .unwrap();
+        let other_path = profiles::path(dir.path(), &other).unwrap().join("storage");
+        std::fs::create_dir_all(&other_path).unwrap();
+        std::fs::write(other_path.join("default"), b"unchanged").unwrap();
+        assert!(reconcile(&mut c, &other, &mut binding, None, true)
+            .err()
+            .unwrap()
+            .contains("无法读取网站存储"));
+        assert_eq!(
+            std::fs::read(other_path.join("default")).unwrap(),
+            b"unchanged"
+        );
+        let partition = path.join("storage/default/https+++example.invalid^partitionKey=%28https%2Cexample.invalid%29/sentinel");
+        assert_eq!(
+            std::fs::read(partition).unwrap(),
+            b"local-session-preserved"
+        );
+    }
+
+    #[test]
+    fn partitioned_storage_does_not_bypass_configuration_conflicts() {
+        let (dir, mut c, p, _credentials, server) = fixture();
+        let account = c.account_id().unwrap();
+        let cloud_id = c.disk.accounts[&account].bindings[&p.id].cloud_id.clone();
+        c.disk
+            .accounts
+            .get_mut(&account)
+            .unwrap()
+            .conflicts
+            .push(Conflict {
+                local_id: p.id.clone(),
+                cloud_id,
+                name: p.name.clone(),
+                kind: "config".into(),
+                fields: vec!["name".into()],
+                remote_revision: 1,
+            });
+        let result = prepare_launch(&mut c, &p.id);
+        server.join().unwrap();
+        assert!(result.unwrap_err().contains("云端配置已变化"));
+        assert_eq!(
+            super::super::model::Disk::load(dir.path())
+                .unwrap()
+                .accounts[&account]
+                .conflicts
+                .len(),
+            1
+        );
+    }
 }

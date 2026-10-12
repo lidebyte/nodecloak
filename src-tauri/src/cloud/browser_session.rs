@@ -13,6 +13,8 @@ use std::{
 };
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
+pub(super) const PARTITIONED_STORAGE_ERROR: &str = "此副本包含分区网站存储，暂不支持完整迁移";
+
 pub fn origin(v: &str) -> Result<String, String> {
     let u = reqwest::Url::parse(v).map_err(|_| "网站来源无效")?;
     if !matches!(u.scheme(), "http" | "https")
@@ -204,7 +206,7 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<String>, String> 
                     continue;
                 };
                 if n.contains('^') {
-                    return Err("此副本包含分区网站存储，暂不支持完整迁移".into());
+                    return Err(PARTITIONED_STORAGE_ERROR.into());
                 };
                 let u = n.replacen("+++", "://", 1).replace('+', ":");
                 out.insert(origin(&u)?);
@@ -258,7 +260,7 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<String>, String> 
                     if s.starts_with("https://") || s.starts_with("http://") {
                         let s = s.strip_suffix('/').unwrap_or(s);
                         if s.contains('^') {
-                            return Err("此副本包含分区网站存储，暂不支持完整迁移".into());
+                            return Err(PARTITIONED_STORAGE_ERROR.into());
                         };
                         out.insert(origin(s)?);
                     }

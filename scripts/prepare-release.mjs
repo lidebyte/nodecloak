@@ -20,11 +20,8 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "新增副本分享：输入朋友的用户名和邮箱发送邀请，可设置有效期、调整期限并随时撤销。 / Share a browser profile by entering a friend's username and email; set or change its expiry and revoke access at any time.",
-  "朋友接受邀请后才能使用；未授权设备可在接受时直接授权，无需进入云端同步设置。 / Friends must accept an invitation before use; authorize a device directly when accepting, without opening cloud sync settings.",
-  "分享默认包含浏览器配置，可选择附带登录状态。朋友使用发送时的独立快照，不会自动同步或修改你的原副本；到期或撤销后停止使用。 / Shares include browser configuration by default, with optional sign-in data. Friends use an independent snapshot taken when sent; it does not sync with or modify your original profile, and access stops after expiry or revocation.",
-  "共享页面集中显示收到和发出的邀请，支持接受、拒绝与管理；移除顶部介绍卡片，让列表更直接。 / Manage received and sent invitations in the Sharing page, including acceptance, decline and expiry; the intro card has been removed for a simpler list.",
-  "更新 Google 登录图标，并让首页顶部卡片正确跟随浅色和深色主题。 / Updated the Google sign-in icon and made the homepage banner follow light and dark themes."
+  "改善本地副本启动：启用登录状态同步后，遇到分区网站存储时保留本地登录数据并正常启动。 / Improved local profile startup: profiles with partitioned website storage can start while preserving local sign-in data when session sync is enabled.",
+  "操作错误提示持续保留，支持手动关闭，方便查看原因和重试。 / Operation errors remain visible and can be dismissed manually, giving you time to read the details and retry."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

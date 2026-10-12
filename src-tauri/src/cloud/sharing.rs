@@ -613,6 +613,7 @@ mod tests {
         assert!(restricted(root.path(), &id).unwrap());
         assert!(editable(root.path(), &id).is_err());
         assert!(!visible(root.path(), &id).unwrap());
+        assert!(before_launch(root.path(), &id).is_err());
         assert!(!restricted(root.path(), "ordinary").unwrap());
     }
     #[test]
