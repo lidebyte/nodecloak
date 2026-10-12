@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {validateAppleTicket} from './apple-ticket.mjs';
+import {validateAppleTicket, stapleAppleTicket} from './apple-ticket.mjs';
 
 const lost = {status: 68, stdout: '', stderr: 'NSURLErrorDomain Code=-1005 "The network connection was lost."'};
 
@@ -41,4 +41,20 @@ test('persistent network failure exhausts bounded retries and blocks release', a
   }), /network connection was lost/);
   assert.equal(calls, 4);
   assert.deepEqual(delays, [5000, 10000, 20000]);
+});
+
+test('stapling also retries network interruption and must complete successfully', async () => {
+  let calls = 0;
+  const delays = [];
+  await stapleAppleTicket('fixture.app', {
+    execute(command, args) {
+      assert.equal(command, 'xcrun');
+      assert.deepEqual(args, ['stapler', 'staple', 'fixture.app']);
+      return ++calls === 1 ? lost : {status: 0};
+    },
+    wait: async delay => delays.push(delay),
+    log: () => {},
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [5000]);
 });

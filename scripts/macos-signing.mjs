@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {projectRoot, releaseVersion} from './release-utils.mjs';
-import {validateAppleTicket} from './apple-ticket.mjs';
+import {validateAppleTicket, stapleAppleTicket} from './apple-ticket.mjs';
 
 const stateFile = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'nodecloak-macos-signing.json');
 function run(command, args, options = {}) {
@@ -80,11 +80,14 @@ async function finish() {
       throw new Error('Package was not signed with the configured Developer ID team');
     }
   }
+  // Tauri can finish bundling after its automatic stapling is interrupted.
+  // Explicitly attach the accepted ticket before validating and archiving.
+  await stapleAppleTicket(app);
   await validateAppleTicket(app);
   run('spctl', ['--assess', '--type', 'execute', '--verbose=2', app]);
   const receipt = JSON.parse(run('xcrun', ['notarytool', 'submit', dmg, '--keychain-profile', 'nodecloak-ci', '--keychain', state.keychain, '--wait', '--timeout', '45m', '--output-format', 'json']).stdout);
   if (receipt.status !== 'Accepted') throw new Error(`DMG notarization was not accepted: ${receipt.status}; submission ${receipt.id}`);
-  run('xcrun', ['stapler', 'staple', dmg]);
+  await stapleAppleTicket(dmg);
   await validateAppleTicket(dmg);
   run('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', '--verbose=2', dmg]);
   // Generate the updater only after all mutations of the notarized application.
