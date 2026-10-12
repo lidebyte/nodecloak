@@ -49,7 +49,7 @@ jobs:
         run: node scripts/check-release-version.mjs
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-      - run: node --test scripts/release-checks.mjs
+      - run: node --test scripts/release-checks.mjs scripts/apple-ticket-checks.mjs
       - run: npm test
       - run: npm run test:session-codec
       - run: npm run build

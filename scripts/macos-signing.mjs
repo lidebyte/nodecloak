@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {projectRoot, releaseVersion} from './release-utils.mjs';
+import {validateAppleTicket} from './apple-ticket.mjs';
 
 const stateFile = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'nodecloak-macos-signing.json');
 function run(command, args, options = {}) {
@@ -64,7 +65,7 @@ function prepare() {
   }
 }
 
-function finish() {
+async function finish() {
   requireSecrets(['TAURI_SIGNING_PRIVATE_KEY', 'APPLE_TEAM_ID']);
   const version = releaseVersion();
   const state = readState();
@@ -79,12 +80,12 @@ function finish() {
       throw new Error('Package was not signed with the configured Developer ID team');
     }
   }
-  run('xcrun', ['stapler', 'validate', app]);
+  await validateAppleTicket(app);
   run('spctl', ['--assess', '--type', 'execute', '--verbose=2', app]);
   const receipt = JSON.parse(run('xcrun', ['notarytool', 'submit', dmg, '--keychain-profile', 'nodecloak-ci', '--keychain', state.keychain, '--wait', '--timeout', '45m', '--output-format', 'json']).stdout);
   if (receipt.status !== 'Accepted') throw new Error(`DMG notarization was not accepted: ${receipt.status}; submission ${receipt.id}`);
   run('xcrun', ['stapler', 'staple', dmg]);
-  run('xcrun', ['stapler', 'validate', dmg]);
+  await validateAppleTicket(dmg);
   run('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', '--verbose=2', dmg]);
   // Generate the updater only after all mutations of the notarized application.
   run('tar', ['-czf', archive, '-C', path.dirname(app), path.basename(app)], {env: {...process.env, COPYFILE_DISABLE: '1'}});
@@ -93,7 +94,7 @@ function finish() {
   fs.mkdirSync(extracted);
   run('tar', ['-xzf', archive, '-C', extracted]);
   run('codesign', ['--verify', '--deep', '--strict', path.join(extracted, 'NodeCloak.app')]);
-  run('xcrun', ['stapler', 'validate', path.join(extracted, 'NodeCloak.app')]);
+  await validateAppleTicket(path.join(extracted, 'NodeCloak.app'));
   // Keep verification receipts separate from the fixed set of public release assets.
   const receipts = path.join(projectRoot, 'notarization-receipts');
   fs.mkdirSync(receipts, {recursive: true});
@@ -104,6 +105,6 @@ function finish() {
 if (process.platform !== 'darwin') throw new Error('macOS signing requires a macOS runner');
 const command = process.argv[2];
 if (command === 'prepare') prepare();
-else if (command === 'finish') finish();
+else if (command === 'finish') await finish();
 else if (command === 'cleanup') cleanup();
 else throw new Error('Usage: node scripts/macos-signing.mjs prepare|finish|cleanup');
