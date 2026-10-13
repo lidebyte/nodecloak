@@ -200,3 +200,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --example verify-updates -- <附�
 问题反馈可使用 [GitHub Issues](https://github.com/nodecloak/nodecloak/issues) 或 [Telegram](https://t.me/nodecloak_official)。请说明系统、应用版本、浏览器类型和复现步骤。不要提交代理密码、API 密钥或浏览器登录数据。
 
 [贡献指南](CONTRIBUTING.md) · [安全反馈](SECURITY.md)
+
+## 友情链接
+
+[LINUX DO — 新的理想型社区](https://linux.do/)
