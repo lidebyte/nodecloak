@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn quota_discovery_preserves_idb_only_partitions_and_ignores_extension_buckets() {
         for location in ["Default/QuotaManager", "Default/WebStorage/QuotaManager"] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             std::fs::create_dir_all(dir.path().join(location).parent().unwrap()).unwrap();
             let c = Connection::open(dir.path().join(location)).unwrap();
             c.execute_batch("CREATE TABLE buckets(storage_key TEXT,name TEXT); INSERT INTO buckets VALUES ('https://login.example/^0https://shop.example','_default'),('chrome-extension://extension/','private');").unwrap();
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn firefox_cookie_database_versions_preserve_expiry_and_tcp_attribute() {
         for (version, units) in [(15, 1), (17, 1000)] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let c = Connection::open(dir.path().join("cookies.sqlite")).unwrap();
             c.execute_batch(&format!("PRAGMA user_version={version}; CREATE TABLE moz_cookies(name TEXT,value TEXT,host TEXT,path TEXT,isSecure INTEGER,isHttpOnly INTEGER,sameSite INTEGER,expiry INTEGER,originAttributes TEXT,isPartitionedAttributeSet INTEGER);")).unwrap();
             let expiry = chrono::Utc::now().timestamp() + 604800;

@@ -367,7 +367,7 @@ pub fn apply(profile: &Path, changes: &[(String, Value, Value)], undo: bool) -> 
 mod tests {
     #[test]
     fn stable_canvas_preserves_other_baseline_controls_and_restores_originals() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = temp.path();
         let key = "privacy.baselineFingerprintingProtection.overrides";
         let user = format!("user_pref(\"{key}\", \"+ScreenAvailToResolution\");\n");
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn native_geolocation_provider_restores_original_settings_and_preserves_login_data() {
         use base64::Engine;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = dir.path();
         fs::write(p.join("user.js"),"user_pref(\"geo.provider.network.url\", \"https://original.example/location\");\nuser_pref(\"unrelated\", 42);\n").unwrap();
         fs::write(p.join("cookies.sqlite"), "login data").unwrap();
@@ -437,7 +437,7 @@ mod tests {
     }
     #[test]
     fn native_geolocation_rejects_tampered_backups_without_changing_preferences() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = dir.path();
         fs::write(p.join("user.js"), "user_pref(\"unrelated\", 42);\n").unwrap();
         let before = fs::read(p.join("user.js")).unwrap();
@@ -451,7 +451,7 @@ mod tests {
     }
     #[test]
     fn dedicated_startup_overrides_homepage_without_changing_dns_or_login_data() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = temp.path().join("new profile");
         prepare_startup(&p).unwrap();
         fs::write(p.join("cookies.sqlite"), "login data").unwrap();
@@ -481,7 +481,7 @@ mod tests {
     }
     #[test]
     fn restores_runtime_and_startup_values_without_erasing_unrelated_changes() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = temp.path();
         fs::write(p.join("prefs.js"), "// keep\nuser_pref(\"font.system.whitelist\", \"Arial,SimSun\");\nuser_pref(\"unrelated\", 42);\n").unwrap();
         let before = snapshot(p, "font.system.whitelist").unwrap();
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn malformed_duplicate_or_conflicting_preferences_are_preserved() {
         for bad in ["user_pref(\"font.system.whitelist\", function(){});", "user_pref(\"font.system.whitelist\", \"Arial\");\nuser_pref(\"font.system.whitelist\", \"Calibri\");", "user_pref(\"font.system.whitelist\",\n\"Arial\");"] { assert!(value_in(bad,"font.system.whitelist").is_err()); }
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = temp.path();
         fs::write(
             p.join("user.js"),
@@ -531,7 +531,7 @@ mod tests {
     }
     #[test]
     fn omitted_runtime_defaults_and_unrelated_strings_survive_restore() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = temp.path();
         fs::write(p.join("prefs.js"),"user_pref(\"intl.regional_prefs.use_os_locales\", true);\nuser_pref(\"other\", \"font.system.whitelist\");\n").unwrap();
         let before = snapshot(p, "intl.regional_prefs.use_os_locales").unwrap();

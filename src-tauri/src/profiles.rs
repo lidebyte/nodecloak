@@ -1268,7 +1268,7 @@ pub fn history(root: &Path, id: Option<&str>) -> Result<Vec<engine::Record>, Str
 mod tests {
     #[test]
     fn new_profile_fingerprints_are_independent_and_survive_reload() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_dir();
         let draft=serde_json::from_value(serde_json::json!({"name":"Fingerprint","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""}})).unwrap();
         let first = super::create(root.path(), draft, None).unwrap();
         let draft=serde_json::from_value(serde_json::json!({"name":"Fingerprint two","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""}})).unwrap();
@@ -1287,7 +1287,7 @@ mod tests {
     }
     #[test]
     fn copied_fingerprints_are_new_but_cloud_restore_and_regeneration_preserve_login_data() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_dir();
         let draft=serde_json::from_value(serde_json::json!({"name":"Fingerprint","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""}})).unwrap();
         let first = create(root.path(), draft, None).unwrap();
         let document = crate::cloud::model::Document::export(&first).unwrap();
