@@ -7,6 +7,11 @@ use crate::{
 use std::path::Path;
 use tauri::Manager;
 
+#[tauri::command]
+pub fn generate_fingerprint_seed() -> Result<String, String> {
+    crate::fingerprint::seed()
+}
+
 async fn operation<T: Send + 'static>(
     app: tauri::AppHandle,
     action: impl FnOnce(&Path, &Runtime) -> Result<T, String> + Send + 'static,
@@ -100,13 +105,23 @@ pub async fn match_profile_region(
     .await
 }
 pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Result<(), String> {
+    launch_with_lookup(root, id, destination, runtime, crate::regional::LOOKUP_URL)
+}
+pub(crate) fn launch_with_lookup(
+    root: &Path,
+    id: &str,
+    destination: &str,
+    runtime: &Runtime,
+    lookup_url: &str,
+) -> Result<(), String> {
     crate::cloud::sharing::before_launch(root, id)?;
     let p = profiles::get(root, id, false)?;
     let path = profiles::path(root, &p)?;
     crate::cloud::browser_session::recover(&path)?;
     if profiles::running(root, &p)? {
         if destination == "startup" || destination == "focus" {
-            if crate::regional::needs_control(
+            if crate::regional::needs_control_for(
+                &p.browser,
                 p.active_preferences.as_ref().unwrap_or(&p.preferences),
             ) && !runtime.1.ready(id)
             {
@@ -114,10 +129,14 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
             }
             return platform::focus_profile(&path);
         }
-        if crate::regional::needs_control(p.active_preferences.as_ref().unwrap_or(&p.preferences)) {
+        if crate::regional::needs_control_for(
+            &p.browser,
+            p.active_preferences.as_ref().unwrap_or(&p.preferences),
+        ) {
             return runtime
                 .1
-                .open(id, destination_url(root, &p, destination)?, true);
+                .open(id, destination_url(root, &p, destination)?, true)
+                .map_err(|error| error.to_string());
         }
         if p.browser == "firefox" {
             return Err("此 Firefox 副本正在运行。请先关闭再打开检测页，或在该窗口访问 https://claudedone.com/check/。".into());
@@ -134,8 +153,9 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
         );
     }
     crate::cloud::session_sync::before_launch(root, id)?;
-    if crate::regional::needs_control(&p.preferences) {
+    if crate::regional::needs_control_for(&p.browser, &p.preferences) {
         runtime.1.stop(id);
+        let mut keep_browser = false;
         let result = (|| -> Result<(), String> {
             let mut resolved = crate::regional::initial(&p.preferences)?;
             if p.preferences.regional.language_mode == "ip" {
@@ -153,21 +173,39 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
                     planned.preferences_dirty = true;
                 }
                 profiles::apply_preferences(root, &planned)?;
+                let mut provider_region = resolved.clone();
+                if p.browser == "firefox" {
+                    if p.preferences.regional.location_mode == "custom"
+                        && p.preferences.advanced.location != profiles::PermissionMode::Block
+                    {
+                        provider_region.latitude = Some(p.preferences.regional.latitude);
+                        provider_region.longitude = Some(p.preferences.regional.longitude);
+                    }
+                    crate::firefox::prepare_geolocation(&path, Some(&provider_region))?;
+                }
                 platform::spawn_controlled_browser(&p.browser, &path, &p.proxy.mode, port)?;
-                let (control, actual) = crate::browser_control::start(
+                let (control, actual) = crate::browser_control::start_with_lookup(
                     p.browser.clone(),
                     path.clone(),
                     p.preferences.clone(),
                     resolved.clone(),
+                    lookup_url.into(),
                 )?;
-                if p.preferences.regional.language_mode == "ip"
-                    && actual.language != resolved.language
+                if (p.preferences.regional.language_mode == "ip"
+                    && actual.language != resolved.language)
+                    || (p.browser == "firefox"
+                        && p.preferences.regional.location_mode == "ip"
+                        && p.preferences.advanced.location != profiles::PermissionMode::Block
+                        && (actual.latitude != provider_region.latitude
+                            || actual.longitude != provider_region.longitude
+                            || actual.accuracy != provider_region.accuracy))
                 {
+                    control.quit_before_navigation()?;
                     platform::close_profile(&path)?;
                     drop(control);
                     if attempt == 1 {
                         return Err(
-                            "浏览器出口地区持续变化，无法稳定匹配语言，请固定代理或使用自定义语言"
+                            "浏览器出口地区持续变化，无法稳定匹配区域，请固定代理或使用自定义设置"
                                 .into(),
                         );
                     }
@@ -177,13 +215,21 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
                 runtime.1.insert(id.to_owned(), control)?;
                 profiles::mark_started(root, id, port)?;
                 profiles::remember_region(root, id, actual)?;
-                return runtime
+                return match runtime
                     .1
-                    .open(id, destination_url(root, &p, destination)?, false);
+                    .open(id, destination_url(root, &p, destination)?, false)
+                {
+                    Err(crate::browser_control::OpenError::Navigation(message)) => {
+                        keep_browser = true;
+                        Err(message)
+                    }
+                    Err(error) => Err(error.to_string()),
+                    Ok(()) => Ok(()),
+                };
             }
             Err("区域设置准备失败".into())
         })();
-        if result.is_err() {
+        if result.is_err() && !keep_browser {
             let _ = platform::close_profile(&path);
             runtime.1.stop(id);
             runtime.0.lock().map_err(|_| "代理管理器不可用")?.remove(id);
@@ -191,6 +237,9 @@ pub fn launch(root: &Path, id: &str, destination: &str, runtime: &Runtime) -> Re
         return result;
     }
     profiles::apply_preferences(root, &p)?;
+    if p.browser == "firefox" {
+        crate::firefox::prepare_geolocation(&path, None)?;
+    }
     let port = tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
     let url = destination_url(root, &p, destination)?;
     profiles::mark_started(root, id, port)?;

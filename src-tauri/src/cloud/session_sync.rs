@@ -759,9 +759,7 @@ mod launch_tests {
         .unwrap();
         let p = profiles::create(dir.path(), serde_json::from_value(json!({"name":"Owner original","browser":"firefox","proxy":{"mode":"system","host":"","port":0,"username":""}})).unwrap(), None).unwrap();
         let path = profiles::path(dir.path(), &p).unwrap();
-        let partition = path.join(
-            "storage/default/https+++example.invalid^partitionKey=%28https%2Cexample.invalid%29",
-        );
+        let partition = path.join("storage/default/https+++example.invalid^userContextId=2");
         std::fs::create_dir_all(&partition).unwrap();
         std::fs::write(partition.join("sentinel"), b"local-session-preserved").unwrap();
         let key = crypto::random_key().unwrap();
@@ -819,7 +817,7 @@ mod launch_tests {
     }
 
     #[test]
-    fn owner_can_launch_with_partitioned_storage_without_publishing_or_replacing_sessions() {
+    fn owner_can_launch_with_unsupported_storage_without_publishing_or_replacing_sessions() {
         let (dir, mut c, p, _credentials, server) = fixture();
         assert!(super::super::sharing::before_launch(dir.path(), &p.id).is_ok());
         let result = prepare_launch(&mut c, &p.id);
@@ -885,7 +883,8 @@ mod launch_tests {
             std::fs::read(other_path.join("default")).unwrap(),
             b"unchanged"
         );
-        let partition = path.join("storage/default/https+++example.invalid^partitionKey=%28https%2Cexample.invalid%29/sentinel");
+        let partition =
+            path.join("storage/default/https+++example.invalid^userContextId=2/sentinel");
         assert_eq!(
             std::fs::read(partition).unwrap(),
             b"local-session-preserved"
@@ -893,7 +892,7 @@ mod launch_tests {
     }
 
     #[test]
-    fn partitioned_storage_does_not_bypass_configuration_conflicts() {
+    fn unsupported_storage_does_not_bypass_configuration_conflicts() {
         let (dir, mut c, p, _credentials, server) = fixture();
         let account = c.account_id().unwrap();
         let cloud_id = c.disk.accounts[&account].bindings[&p.id].cloud_id.clone();

@@ -34,8 +34,25 @@ impl Document {
         let upstream = profiles::upstream(p, false)?;
         let mut prefs = p.preferences.clone();
         crate::regional::normalize_sources(&mut prefs);
+        let advanced = &prefs.advanced;
+        let enhanced = prefs.regional.enabled
+            || advanced.hardware_concurrency > 0
+            || advanced.viewport_width > 0
+            || advanced.block_webgpu
+            || advanced.block_speech
+            || advanced.block_battery
+            || advanced.canvas_protection
+            || advanced.do_not_track != profiles::DoNotTrack::Inherit
+            || advanced.web_rtc != profiles::WebRtcPolicy::Inherit
+            || (advanced.block_webgl && p.browser != "firefox");
         Ok(Self {
-            schema: 1,
+            schema: if prefs.fingerprint.is_some() {
+                3
+            } else if enhanced {
+                2
+            } else {
+                1
+            },
             name: p.name.clone(),
             browser: p.browser.clone(),
             notes: p.notes.clone(),
@@ -71,9 +88,12 @@ impl Document {
     }
     pub fn parse(v: Value) -> Result<Self, String> {
         let mut doc: Self = serde_json::from_value(v).map_err(|_| "云端副本格式无效")?;
-        if doc.schema != 1 {
+        if ![1, 2, 3].contains(&doc.schema) {
             return Err("不支持的云端副本版本".into());
         };
+        if doc.schema < 3 && doc.preferences.fingerprint.is_some() {
+            return Err("稳定指纹需要新版副本配置".into());
+        }
         crate::regional::normalize_sources(&mut doc.preferences);
         profiles::validate(&doc.draft())?;
         Ok(doc)
@@ -240,6 +260,22 @@ impl Disk {
 mod tests {
     use super::*;
     #[test]
+    fn enhanced_settings_round_trip_with_a_new_schema_that_old_clients_reject() {
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let mut draft:profiles::Draft=serde_json::from_value(serde_json::json!({"name":"Enhanced","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""},"preferences":{"language":"de-DE,de,en","privacy":true,"fontRestriction":false,"startupUrl":"about:blank","regional":{"enabled":true,"timezoneMode":"custom","timezone":"Europe/Berlin"},"advanced":{"hardwareConcurrency":4,"blockWebgpu":true}}})).unwrap();
+        let mut profile = profiles::create(root.path(), draft.clone(), None).unwrap();
+        profile.preferences.fingerprint = None; // A pre-fingerprint configuration.
+        let exported = Document::export(&profile).unwrap();
+        assert_eq!(exported.schema, 2);
+        let parsed = Document::parse(serde_json::to_value(exported).unwrap()).unwrap();
+        assert_eq!(parsed.preferences.regional.timezone, "Europe/Berlin");
+        assert_eq!(parsed.preferences.advanced.hardware_concurrency, 4);
+        draft.preferences = profiles::Preferences::default();
+        let mut normal = profiles::create(root.path(), draft, None).unwrap();
+        normal.preferences.fingerprint = None;
+        assert_eq!(Document::export(&normal).unwrap().schema, 1);
+    }
+    #[test]
     fn cloud_profile_projection_excludes_device_paths_and_runtime() {
         let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let p = crate::profiles::load(dir.path()).unwrap().remove(0);
@@ -267,7 +303,7 @@ mod tests {
         let p = crate::profiles::load(dir.path()).unwrap().remove(0);
         let doc = Document::export(&p).unwrap();
         let mut v = serde_json::to_value(doc).unwrap();
-        v["schema"] = serde_json::json!(2);
+        v["schema"] = serde_json::json!(99);
         assert!(Document::parse(v).is_err());
         let doc = Document::export(&p).unwrap();
         let mut v = serde_json::to_value(doc).unwrap();

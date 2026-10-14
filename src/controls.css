@@ -25,6 +25,21 @@
   --control-font-size: 13px;
   --control-font-size-small: 12px;
 }
+.profile-batch-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:0 0 14px;border:1px solid var(--control-border);background:var(--surface);border-radius:12px;font-size:12px;color:var(--text)}
+.profile-batch-bar>div{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.profile-selection{width:42px;padding-right:4px!important;text-align:center}
+.profile-table th.profile-selection,.profile-table td.profile-selection{width:42px;min-width:42px;max-width:42px;padding-left:12px;padding-right:12px!important}
+.profile-selection input[type=checkbox]{appearance:auto;width:16px;height:16px;min-height:0;margin:0;accent-color:var(--accent);cursor:pointer}
+.profile-selection input:disabled{cursor:not-allowed;opacity:.4}
+.profile-batch-review{max-height:200px;overflow:auto;list-style:none;padding:0;margin:16px 0;border-top:1px solid var(--control-border)}
+.profile-batch-review li{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--control-border);font-size:13px}
+.profile-batch-review small{color:var(--muted)}
+.profile-error-notice p{white-space:pre-line}
+.privacy-policy-fields{margin:16px 0}
+.profile-editor-layout{grid-template-columns:minmax(0,1fr) 280px}
+@media(max-width:980px){.profile-editor-layout{grid-template-columns:minmax(0,1fr)}.profile-preview{position:static;max-height:none}.profile-preview dl{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.profile-preview dl{grid-template-columns:1fr}}
+@media(max-width:800px){.profile-batch-bar{align-items:flex-start;flex-direction:column}.profile-batch-bar>div{width:100%}}
 :root[data-theme='dark'] {
   --control-bg: #1a1f26;
   --control-border: #2a313b;
@@ -520,3 +535,6 @@ details>summary { border-radius: 8px; padding: 8px; font-size: 13px; }
   :root input[type='range']::-moz-range-thumb { background: Highlight; }
   :root input[type='range']::-moz-range-track, :root input[type='range']::-moz-range-progress { background: GrayText; }
 }
+
+.fingerprint-actions { display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:18px; }
+.fingerprint-actions code { color:var(--control-text);font-size:12px;letter-spacing:1px; }

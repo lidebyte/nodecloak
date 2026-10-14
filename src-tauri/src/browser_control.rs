@@ -19,6 +19,28 @@ use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
 #[derive(Default)]
 pub struct Runtime(Mutex<HashMap<String, Control>>);
+#[derive(Debug, Clone)]
+pub enum OpenError {
+    Navigation(String),
+    Control(String),
+}
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Navigation(s) | Self::Control(s) => f.write_str(s),
+        }
+    }
+}
+impl From<String> for OpenError {
+    fn from(s: String) -> Self {
+        Self::Control(s)
+    }
+}
+impl From<&str> for OpenError {
+    fn from(s: &str) -> Self {
+        Self::Control(s.into())
+    }
+}
 impl Runtime {
     pub fn ready(&self, id: &str) -> bool {
         self.0
@@ -50,7 +72,7 @@ impl Runtime {
             .insert(id, control);
         Ok(())
     }
-    pub fn open(&self, id: &str, url: String, new_tab: bool) -> Result<(), String> {
+    pub fn open(&self, id: &str, url: String, new_tab: bool) -> Result<(), OpenError> {
         let m = self.0.lock().map_err(|_| "区域设置控制器不可用")?;
         m.get(id)
             .ok_or("此副本区域设置尚未连接，请关闭并重新启动")?
@@ -58,7 +80,8 @@ impl Runtime {
     }
 }
 enum Request {
-    Open(String, bool, mpsc::Sender<Result<(), String>>),
+    Open(String, bool, mpsc::Sender<Result<(), OpenError>>),
+    Quit(mpsc::Sender<Result<(), String>>),
     #[cfg(test)]
     Probe(mpsc::Sender<Result<Value, String>>),
 }
@@ -78,7 +101,16 @@ impl Drop for Control {
     }
 }
 impl Control {
-    fn open(&self, url: String, new_tab: bool) -> Result<(), String> {
+    /// Used only while retrying startup on about:blank; no user pages exist yet.
+    pub(crate) fn quit_before_navigation(&self) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.sender
+            .send(Request::Quit(tx))
+            .map_err(|_| "无法关闭初始化浏览器")?;
+        rx.recv_timeout(Duration::from_secs(20))
+            .map_err(|_| "初始化浏览器关闭超时")?
+    }
+    fn open(&self, url: String, new_tab: bool) -> Result<(), OpenError> {
         if !self.alive.load(Ordering::SeqCst) {
             return Err("区域控制连接已中断，请重启副本".into());
         }
@@ -95,6 +127,7 @@ struct Protocol {
     next: u64,
     events: VecDeque<Value>,
     last_error: Option<String>,
+    navigation: Option<(u64, Option<Value>)>,
 }
 impl Protocol {
     fn read(&mut self) -> Result<Option<Value>, String> {
@@ -142,7 +175,11 @@ impl Protocol {
             if let Some(value) = self.read()? {
                 if value["id"] == id {
                     if value.get("error").is_some() {
-                        self.last_error = value["error"]["message"].as_str().map(str::to_owned);
+                        self.last_error = value["error"]["message"]
+                            .as_str()
+                            .or_else(|| value["message"].as_str())
+                            .or_else(|| value["error"].as_str())
+                            .map(str::to_owned);
                         return Err(format!(
                             "浏览器不支持或拒绝了区域设置 {method}，请更新浏览器后重试"
                         ));
@@ -157,6 +194,10 @@ impl Protocol {
                 }
                 if value.get("id").is_none() {
                     self.events.push_back(value);
+                } else if let Some((waiting, reply)) = &mut self.navigation {
+                    if value["id"] == *waiting {
+                        *reply = Some(value);
+                    }
                 }
                 if self.events.len() > 4096 {
                     return Err("浏览器控制事件过多".into());
@@ -214,6 +255,12 @@ struct BrowserControl {
     sessions: HashSet<String>,
     targets: HashMap<String, String>,
     workers: HashSet<String>,
+    pages: HashSet<String>,
+    advanced: crate::profiles::AdvancedSettings,
+    fingerprint: Option<crate::fingerprint::Settings>,
+    fingerprint_sessions: HashSet<String>,
+    fingerprint_workers: HashMap<String, String>,
+    internal_workers: HashSet<String>,
 }
 impl BrowserControl {
     fn initialize(
@@ -223,6 +270,8 @@ impl BrowserControl {
         permission: PermissionMode,
         match_ip: bool,
         lookup_url: &str,
+        advanced: crate::profiles::AdvancedSettings,
+        fingerprint: Option<crate::fingerprint::Settings>,
     ) -> Result<Self, String> {
         let (mut socket, _) = tungstenite::connect(endpoint(browser, path)?.as_str())
             .map_err(|_| "无法连接此副本的本地浏览器接口")?;
@@ -240,6 +289,7 @@ impl BrowserControl {
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,
+                navigation: None,
             },
             firefox: browser == "firefox",
             region,
@@ -248,6 +298,12 @@ impl BrowserControl {
             sessions: HashSet::new(),
             targets: HashMap::new(),
             workers: HashSet::new(),
+            pages: HashSet::new(),
+            advanced,
+            fingerprint,
+            fingerprint_sessions: HashSet::new(),
+            fingerprint_workers: HashMap::new(),
+            internal_workers: HashSet::new(),
         };
         if this.firefox {
             this.protocol.call(
@@ -255,6 +311,9 @@ impl BrowserControl {
                 json!({"capabilities":{"alwaysMatch":{"acceptInsecureCerts":false}}}),
                 None,
             )?;
+            if let Some(settings) = this.fingerprint.as_ref().filter(|f| f.enabled) {
+                this.protocol.call("script.addPreloadScript",json!({"functionDeclaration":crate::fingerprint::preload(settings)?,"userContexts":["default"]}),None)?;
+            }
             let tree =
                 this.protocol
                     .call("browsingContext.getTree", json!({"maxDepth":0}), None)?;
@@ -293,6 +352,42 @@ impl BrowserControl {
         Ok(this)
     }
     fn apply(&mut self, session: Option<&str>) -> Result<(), String> {
+        if !self.firefox {
+            if let (Some(session), Some(settings)) =
+                (session, self.fingerprint.as_ref().filter(|f| f.enabled))
+            {
+                if !self.fingerprint_sessions.contains(session) {
+                    let script = crate::fingerprint::script(settings)?;
+                    if !self.workers.contains(session) {
+                        self.protocol
+                            .call("Page.enable", json!({}), Some(session))?;
+                        self.protocol.call(
+                            "Page.addScriptToEvaluateOnNewDocument",
+                            json!({"source":script}),
+                            Some(session),
+                        )?;
+                    } else if !self.internal_workers.contains(session) {
+                        // A new Worker has no usable global while waiting for the
+                        // debugger. Pause its first script, then protect that realm.
+                        self.protocol
+                            .call("Debugger.enable", json!({}), Some(session))?;
+                        let breakpoint = self.protocol.call(
+                            "Debugger.setInstrumentationBreakpoint",
+                            json!({"instrumentation":"beforeScriptExecution"}),
+                            Some(session),
+                        )?;
+                        self.fingerprint_workers.insert(
+                            session.into(),
+                            breakpoint["breakpointId"]
+                                .as_str()
+                                .ok_or("Worker 指纹预加载断点无效")?
+                                .into(),
+                        );
+                    }
+                    self.fingerprint_sessions.insert(session.into());
+                }
+            }
+        }
         let locale = self.region.language.split(',').next().unwrap_or("en-US");
         if self.firefox {
             self.protocol.call(
@@ -300,6 +395,9 @@ impl BrowserControl {
                 json!({"locale":locale,"userContexts":["default"]}),
                 None,
             )?;
+            if self.advanced.viewport_width > 0 {
+                self.protocol.call("browsingContext.setViewport",json!({"userContexts":["default"],"viewport":{"width":self.advanced.viewport_width,"height":self.advanced.viewport_height},"devicePixelRatio":1}),None)?;
+            }
             if let Some(timezone) = &self.region.timezone {
                 self.protocol.call(
                     "emulation.setTimezoneOverride",
@@ -312,8 +410,21 @@ impl BrowserControl {
                 self.protocol.call("emulation.setGeolocationOverride",json!({"coordinates":{"latitude":latitude,"longitude":longitude,"accuracy":self.region.accuracy},"userContexts":["default"]}),None)?;
             }
         } else {
-            let worker = session.map(|s| self.workers.contains(s)).unwrap_or(false);
-            let current=match self.protocol.call("Runtime.evaluate",json!({"expression":"Intl.DateTimeFormat().resolvedOptions()","returnByValue":true}),session) {Ok(result)=>result["result"]["value"].clone(),Err(_) if self.protocol.last_error.as_deref()==Some("Cannot find default execution context")=>Value::Null,Err(e)=>return Err(e)};
+            if self.advanced.hardware_concurrency > 0 {
+                self.protocol.call(
+                    "Emulation.setHardwareConcurrencyOverride",
+                    json!({"hardwareConcurrency":self.advanced.hardware_concurrency}),
+                    session,
+                )?;
+            }
+            if self.advanced.viewport_width > 0 && session.is_some_and(|s| self.pages.contains(s)) {
+                self.protocol.call("Emulation.setDeviceMetricsOverride",json!({"width":self.advanced.viewport_width,"height":self.advanced.viewport_height,"deviceScaleFactor":1,"mobile":false}),session)?;
+            }
+            let current = if session.is_some_and(|s| self.workers.contains(s)) {
+                Value::Null
+            } else {
+                match self.protocol.call("Runtime.evaluate",json!({"expression":"Intl.DateTimeFormat().resolvedOptions()","returnByValue":true}),session) {Ok(result)=>result["result"]["value"].clone(),Err(_) if self.protocol.last_error.as_deref()==Some("Cannot find default execution context")=>Value::Null,Err(e)=>return Err(e)}
+            };
             if current["locale"] != locale {
                 if let Err(error) = self.protocol.call(
                     "Emulation.setLocaleOverride",
@@ -349,7 +460,9 @@ impl BrowserControl {
                 }
             }
             if let (Some(latitude), Some(longitude)) = (
-                self.region.latitude.filter(|_| !worker),
+                self.region
+                    .latitude
+                    .filter(|_| session.is_some_and(|s| self.pages.contains(s))),
                 self.region.longitude,
             ) {
                 self.protocol.call("Emulation.setGeolocationOverride",json!({"latitude":latitude,"longitude":longitude,"accuracy":self.region.accuracy}),session)?;
@@ -370,7 +483,42 @@ impl BrowserControl {
     }
     fn drain(&mut self) -> Result<(), String> {
         while let Some(event) = self.protocol.events.pop_front() {
-            if event["method"] == "Target.attachedToTarget" {
+            if event["method"] == "Debugger.paused" {
+                if let Some(session) = event["sessionId"].as_str() {
+                    if event["params"]["reason"] == "instrumentation"
+                        && self.fingerprint_workers.contains_key(session)
+                    {
+                        if let Some(frame) =
+                            event["params"]["callFrames"][0]["callFrameId"].as_str()
+                        {
+                            if let Some(settings) = &self.fingerprint {
+                                self.protocol.call("Debugger.evaluateOnCallFrame",json!({"callFrameId":frame,"expression":crate::fingerprint::script(settings)?,"returnByValue":true,"silent":true}),Some(session))?;
+                            }
+                        } else {
+                            return Err("Worker 指纹初始化未获得执行上下文".into());
+                        }
+                        let breakpoint = self.fingerprint_workers.remove(session).unwrap();
+                        self.protocol.call(
+                            "Debugger.removeBreakpoint",
+                            json!({"breakpointId":breakpoint}),
+                            Some(session),
+                        )?;
+                        // Disable while still paused: this resumes execution and removes
+                        // our debugger before a self-closing Worker can disappear.
+                        if let Err(error) =
+                            self.protocol
+                                .call("Debugger.disable", json!({}), Some(session))
+                        {
+                            if !self.protocol.last_error.as_deref().is_some_and(|message| {
+                                message.contains("Session with given id not found")
+                                    || message.contains("Target closed")
+                            }) {
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
+            } else if event["method"] == "Target.attachedToTarget" {
                 let params = &event["params"];
                 let session = params["sessionId"]
                     .as_str()
@@ -383,6 +531,16 @@ impl BrowserControl {
                     .contains(&params["targetInfo"]["type"].as_str().unwrap_or(""))
                 {
                     self.workers.insert(session.clone());
+                    if params["targetInfo"]["url"].as_str().is_some_and(|url| {
+                        url.starts_with("chrome-extension:")
+                            || url.starts_with("chrome:")
+                            || url.starts_with("devtools:")
+                    }) {
+                        self.internal_workers.insert(session.clone());
+                    }
+                }
+                if params["targetInfo"]["type"] == "page" {
+                    self.pages.insert(session.clone());
                 }
                 if self.sessions.insert(session.clone()) {
                     if self.primary.is_empty() && params["targetInfo"]["type"] == "page" {
@@ -400,13 +558,35 @@ impl BrowserControl {
                 if let Some(session) = event["params"]["sessionId"].as_str() {
                     self.sessions.remove(session);
                     self.workers.remove(session);
+                    self.pages.remove(session);
+                    self.fingerprint_sessions.remove(session);
+                    self.fingerprint_workers.remove(session);
+                    self.internal_workers.remove(session);
                     self.targets.retain(|_, attached| attached != session);
                 }
             }
         }
         Ok(())
     }
-    fn open(&mut self, url: &str, new_tab: bool) -> Result<(), String> {
+    fn handle_open(
+        &mut self,
+        url: &str,
+        new_tab: bool,
+        response: mpsc::Sender<Result<(), OpenError>>,
+    ) -> Result<(), String> {
+        let result = self.open(url, new_tab);
+        let fatal = match &result {
+            Err(OpenError::Control(message)) => Some(message.clone()),
+            _ => None,
+        };
+        let _ = response.send(result);
+        if let Some(message) = fatal {
+            Err(message)
+        } else {
+            Ok(())
+        }
+    }
+    fn open(&mut self, url: &str, new_tab: bool) -> Result<(), OpenError> {
         if self.firefox {
             let context = if new_tab {
                 self.protocol.call(
@@ -420,18 +600,24 @@ impl BrowserControl {
             } else {
                 self.primary.clone()
             };
+            self.protocol.activate(&context)?;
             if let Ok(parsed) = reqwest::Url::parse(url) {
                 if ["http", "https"].contains(&parsed.scheme()) {
                     self.protocol.call("permissions.setPermission",json!({"descriptor":{"name":"geolocation"},"state":match self.permission{PermissionMode::Allow=>"granted",PermissionMode::Block=>"denied",_=>"prompt"},"origin":parsed.origin().ascii_serialization(),"userContext":"default"}),None)?;
                 }
             }
-            self.protocol.call(
+            match self.protocol.call(
                 "browsingContext.navigate",
                 json!({"context":context,"url":url,"wait":"none"}),
                 None,
-            )?;
-            if new_tab {
-                self.protocol.activate(&context)?;
+            ) {
+                Err(_) if self.protocol.last_error.is_some() => {
+                    return Err(OpenError::Navigation(
+                        "浏览器页面打开失败，请检查代理连接和网址".into(),
+                    ))
+                }
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
             }
         } else {
             let session = if new_tab {
@@ -459,27 +645,61 @@ impl BrowserControl {
             } else {
                 self.primary.clone()
             };
-            self.protocol
-                .call("Page.navigate", json!({"url":url}), Some(&session))?;
+            if let Some(target) = self
+                .targets
+                .iter()
+                .find_map(|(target, attached)| (attached == &session).then(|| target.clone()))
+            {
+                self.protocol
+                    .call("Target.activateTarget", json!({"targetId":target}), None)?;
+            }
+            // Page.navigate can wait for a newly auto-attached frame or worker.
+            // Pump those targets while waiting; a plain synchronous call deadlocks.
+            self.protocol.next += 1;
+            let id = self.protocol.next;
+            self.protocol.navigation = Some((id, None));
+            self.protocol.socket.send(Message::Text(json!({"id":id,"method":"Page.navigate","params":{"url":url},"sessionId":session}).to_string().into()))
+                .map_err(|_| "无法发送浏览器页面打开请求")?;
+            let result = (|| {
+                let started = Instant::now();
+                loop {
+                    self.drain()?;
+                    if let Some((_, Some(reply))) = self.protocol.navigation.as_mut() {
+                        let reply = reply.take();
+                        if reply.get("error").is_some() {
+                            return Err(OpenError::Navigation(
+                                "浏览器拒绝打开页面，请检查网址并重试".into(),
+                            ));
+                        }
+                        if let Some(error) = reply["result"]["errorText"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Err(OpenError::Navigation(format!(
+                                "浏览器页面打开失败：{error}；请检查代理连接和网址"
+                            )));
+                        }
+                        return Ok(());
+                    }
+                    if started.elapsed() > Duration::from_secs(15) {
+                        return Err("浏览器页面打开超时，请检查代理连接并重试".into());
+                    }
+                    if let Some(event) = self.protocol.read()? {
+                        if event["id"] == id {
+                            self.protocol.navigation.as_mut().unwrap().1 = Some(event);
+                        } else if event.get("id").is_none() {
+                            self.protocol.events.push_back(event);
+                        }
+                    }
+                }
+            })();
+            self.protocol.navigation = None;
+            result?;
         }
         Ok(())
     }
 }
-pub fn start(
-    browser: String,
-    path: PathBuf,
-    preferences: crate::profiles::Preferences,
-    initial: ResolvedRegion,
-) -> Result<(Control, ResolvedRegion), String> {
-    start_with_lookup(
-        browser,
-        path,
-        preferences,
-        initial,
-        regional::LOOKUP_URL.to_owned(),
-    )
-}
-fn start_with_lookup(
+pub(crate) fn start_with_lookup(
     browser: String,
     path: PathBuf,
     preferences: crate::profiles::Preferences,
@@ -506,6 +726,8 @@ fn start_with_lookup(
             preferences.advanced.location.clone(),
             regional::uses_ip(&preferences),
             &lookup_url,
+            preferences.advanced.clone(),
+            preferences.fingerprint.clone(),
         )
         .and_then(|mut state| {
             state.region = regional::resolve(&preferences, state.region.ip_region.clone())?;
@@ -528,13 +750,24 @@ fn start_with_lookup(
             while !stop.load(Ordering::SeqCst) {
                 if let Ok(request) = requests.try_recv() {
                     match request {
-                        Request::Open(url, new_tab, response) => {
-                            let result = state.open(&url, new_tab);
-                            let failed = result.clone().err();
+                        Request::Quit(response) => {
+                            let result = state
+                                .protocol
+                                .call(
+                                    if state.firefox {
+                                        "browser.close"
+                                    } else {
+                                        "Browser.close"
+                                    },
+                                    json!({}),
+                                    None,
+                                )
+                                .map(|_| ());
                             let _ = response.send(result);
-                            if let Some(error) = failed {
-                                return Err(error);
-                            }
+                            return Ok(());
+                        }
+                        Request::Open(url, new_tab, response) => {
+                            state.handle_open(&url, new_tab, response)?;
                         }
                         #[cfg(test)]
                         Request::Probe(response) => {
@@ -581,10 +814,389 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+    #[cfg(windows)]
+    unsafe extern "system" fn show_test_window(
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        state: isize,
+    ) -> i32 {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let ids = &*(state as *const Vec<u32>);
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if ids.contains(&pid) && IsWindowVisible(hwnd) != 0 {
+            // Only the synthetic fixture's native window. No browser API overrides.
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                40,
+                40,
+                0,
+                0,
+                SWP_SHOWWINDOW | SWP_NOSIZE,
+            );
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+        1
+    }
+    fn navigation_fixture(fail: bool) -> (BrowserControl, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(18)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let navigation: Value =
+                serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(navigation["method"], "Page.navigate");
+            if fail {
+                ws.send(Message::Text(json!({"id":navigation["id"],"result":{"errorText":"net::ERR_PROXY_CONNECTION_FAILED"}}).to_string().into())).unwrap();
+                if let Ok(Message::Text(raw)) = ws.read() {
+                    let retry: Value = serde_json::from_str(&raw).unwrap();
+                    assert_eq!(retry["method"], "Page.navigate");
+                    ws.send(Message::Text(
+                        json!({"id":retry["id"],"result":{"frameId":"main"}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .unwrap();
+                }
+                return;
+            }
+            ws.send(Message::Text(json!({"method":"Target.attachedToTarget","params":{"sessionId":"child","targetInfo":{"targetId":"frame","type":"iframe"},"waitingForDebugger":true}}).to_string().into())).unwrap();
+            loop {
+                let command = match ws.read() {
+                    Ok(Message::Text(raw)) => serde_json::from_str::<Value>(&raw).unwrap(),
+                    _ => break,
+                };
+                let method = command["method"].as_str().unwrap();
+                let result = if method == "Runtime.evaluate" {
+                    json!({"result":{"value":{"locale":"en-US"}}})
+                } else {
+                    json!({})
+                };
+                ws.send(Message::Text(
+                    json!({"id":command["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+                if method == "Runtime.runIfWaitingForDebugger" {
+                    ws.send(Message::Text(
+                        json!({"id":navigation["id"],"result":{"frameId":"main"}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .unwrap();
+                    break;
+                }
+            }
+        });
+        let (mut socket, _) = tungstenite::connect(format!("ws://{address}")).unwrap();
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+        }
+        (
+            BrowserControl {
+                protocol: Protocol {
+                    socket,
+                    next: 0,
+                    events: VecDeque::new(),
+                    last_error: None,
+                    navigation: None,
+                },
+                firefox: false,
+                region: regional::initial(&Preferences::default()).unwrap(),
+                permission: PermissionMode::Ask,
+                primary: "main".into(),
+                sessions: HashSet::new(),
+                targets: HashMap::new(),
+                workers: HashSet::new(),
+                pages: HashSet::new(),
+                advanced: Default::default(),
+                fingerprint: None,
+                fingerprint_sessions: HashSet::new(),
+                fingerprint_workers: HashMap::new(),
+                internal_workers: HashSet::new(),
+            },
+            server,
+        )
+    }
+    #[test]
+    fn navigation_resumes_new_frames_before_waiting_for_navigation_acknowledgement() {
+        let (mut state, server) = navigation_fixture(false);
+        let result = state.open("https://example.invalid/", false);
+        drop(state);
+        server.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+    }
+    #[test]
+    fn navigation_reports_browser_network_errors_instead_of_claiming_success() {
+        let (mut state, server) = navigation_fixture(true);
+        let result = state.open("https://example.invalid/", false);
+        drop(state);
+        server.join().unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ERR_PROXY_CONNECTION_FAILED"));
+    }
+    #[test]
+    fn page_network_failure_keeps_controller_usable_for_a_second_navigation() {
+        let (mut state, server) = navigation_fixture(true);
+        let (tx, rx) = mpsc::channel();
+        assert!(state
+            .handle_open("https://example.invalid/", false, tx)
+            .is_ok());
+        assert!(rx.recv().unwrap().is_err());
+        let (tx, rx) = mpsc::channel();
+        assert!(state
+            .handle_open("https://example.invalid/retry", false, tx)
+            .is_ok());
+        assert!(rx.recv().unwrap().is_ok());
+        drop(state);
+        server.join().unwrap();
+    }
+    #[test]
+    fn firefox_page_network_errors_are_recoverable_without_losing_the_controller() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            for i in 0..6 {
+                let command: Value =
+                    serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+                let reply = if i == 2 {
+                    json!({"id":command["id"],"type":"error","error":"unknown error","message":"NS_ERROR_NET_TIMEOUT"})
+                } else {
+                    json!({"id":command["id"],"type":"success","result":{}})
+                };
+                ws.send(Message::Text(reply.to_string().into())).unwrap();
+            }
+        });
+        let (socket, _) = tungstenite::connect(format!("ws://{address}")).unwrap();
+        let mut state = BrowserControl {
+            protocol: Protocol {
+                socket,
+                next: 0,
+                events: VecDeque::new(),
+                last_error: None,
+                navigation: None,
+            },
+            firefox: true,
+            region: regional::initial(&Preferences::default()).unwrap(),
+            permission: PermissionMode::Ask,
+            primary: "main".into(),
+            sessions: HashSet::new(),
+            targets: HashMap::new(),
+            workers: HashSet::new(),
+            pages: HashSet::new(),
+            advanced: Default::default(),
+            fingerprint: None,
+            fingerprint_sessions: HashSet::new(),
+            fingerprint_workers: HashMap::new(),
+            internal_workers: HashSet::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        assert!(state
+            .handle_open("https://example.invalid/", false, tx)
+            .is_ok());
+        assert!(matches!(rx.recv().unwrap(), Err(OpenError::Navigation(_))));
+        let (tx, rx) = mpsc::channel();
+        assert!(state
+            .handle_open("https://example.invalid/retry", false, tx)
+            .is_ok());
+        assert!(rx.recv().unwrap().is_ok());
+        drop(state);
+        server.join().unwrap();
+    }
+    #[test]
+    #[ignore = "Starts isolated installed browsers; verifies first document, iframe, worker, viewport, DNT and graphics/voice API restrictions"]
+    fn native_privacy_settings_are_observed_in_all_browsers() {
+        let fixture = Fixture::new();
+        for engine in ["chrome", "edge", "firefox"].into_iter().filter(|name| {
+            std::env::var("CLAUDE_DONE_TEST_BROWSER")
+                .map(|s| s == *name)
+                .unwrap_or(true)
+        }) {
+            let mut prefs:Preferences=serde_json::from_value(json!({"language":"en-US,en","privacy":true,"fontRestriction":false,"startupUrl":"about:blank","advanced":{"location":"allow","doNotTrack":"on","webRtc":"public","blockWebgl":true,"blockWebgpu":true,"blockSpeech":true,"hardwareConcurrency":4,"viewportWidth":1280,"viewportHeight":800},"regional":{"enabled":true,"locationMode":"custom","latitude":1.3521,"longitude":103.8198}})).unwrap();
+            let first = browser(engine, prefs.clone(), &fixture.url("/region"));
+            first.control.open(fixture.url("/privacy"), false).unwrap();
+            let report = fixture.report(&first);
+            assert_eq!(report["hardware"], 4, "{engine}: {report}");
+            assert_eq!(report["worker"]["hardware"], 4, "{engine}: worker {report}");
+            assert_eq!(report["frame"]["hardware"], 4, "{engine}: frame {report}");
+            assert_eq!(report["dnt"], "1", "{engine}: {report}");
+            assert_eq!(report["width"], 1280, "{engine}: {report}");
+            assert_eq!(report["height"], 800, "{engine}: {report}");
+            assert_eq!(report["webgl"], false, "{engine}: {report}");
+            assert_eq!(report["webgpu"], false, "{engine}: {report}");
+            assert_eq!(report["voices"], 0, "{engine}: {report}");
+            prefs.advanced = Default::default();
+            prefs.advanced.location = PermissionMode::Allow;
+            let second = browser(engine, prefs, &fixture.url("/region"));
+            second.control.open(fixture.url("/normal"), false).unwrap();
+            let natural = fixture.report(&second);
+            assert_ne!(
+                natural["hardware"], 4,
+                "{engine}: native baseline {natural}"
+            );
+        }
+    }
     struct Fixture {
         port: u16,
         reports: mpsc::Receiver<Value>,
         stop: Arc<AtomicBool>,
+    }
+    const FINGERPRINT_PROBE: &str = r#"async function fingerprintProbe(){
+      const c=document.createElement('canvas');c.width=64;c.height=32;const x=c.getContext('2d');x.fillStyle='#735941';x.fillRect(0,0,64,32);x.font='14px serif';x.fillText('NodeCloak',2,19);
+      const hash=data=>{let h=2166136261;for(const v of data)h=Math.imul(h^v,16777619);return h>>>0;};
+      const raw=()=>hash(x.getImageData(0,0,64,32).data);const first=raw(),again=raw();const metric=x.measureText('NodeCloak');
+      const ctx=new OfflineAudioContext(1,512,44100);const osc=ctx.createOscillator();osc.type='triangle';osc.frequency.value=1000;osc.connect(ctx.destination);osc.start();const audio=await ctx.startRendering();
+      const gl=document.createElement('canvas').getContext('webgl');let webgl=null;if(gl){gl.clearColor(.3,.4,.5,1);gl.clear(gl.COLOR_BUFFER_BIT);const out=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,out);webgl=[...out];}
+      const exported=await new Promise(resolve=>c.toBlob(async blob=>{const image=await createImageBitmap(blob);const copy=document.createElement('canvas');copy.width=64;copy.height=32;copy.getContext('2d').drawImage(image,0,0);resolve(hash(copy.getContext('2d').getImageData(0,0,64,32).data));}));
+      // Decode export in an unhooked bitmap path to avoid applying readback noise twice.
+      const blank=document.createElement('canvas').getContext('2d').getImageData(0,0,1,1).data;
+      let invalid=false;try{x.getImageData(Infinity,0,1,1);}catch(e){invalid=e instanceof TypeError;}
+      const numeric=hash(x.getImageData('0','0','64','32').data)===first;
+      if(gl){gl.pixelStorei(gl.PACK_ALIGNMENT,8);const padded=new Uint8Array(8).fill(77);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,padded);gl.pixelStorei(gl.PACK_ALIGNMENT,4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));if(padded.slice(4).some(v=>v!==77))throw Error('pixel padding changed');}
+      return {marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),first,again,uri:hash(new TextEncoder().encode(c.toDataURL())),font:metric.width,branded:Object.getOwnPropertyDescriptor(TextMetrics.prototype,'width').get.call(metric)===metric.width,audio:hash(new Uint8Array(audio.getChannelData(0).buffer)),webgl,exported,after:raw(),blank:[...blank],invalid,numeric};
+    }"#;
+    #[test]
+    #[ignore = "Synthetic installed-browser fingerprint first-document/iframe/restart/regeneration verification"]
+    fn native_fingerprints_are_stable_across_restart_and_distinct_between_profiles() {
+        let fixture = Fixture::new();
+        for engine in ["chrome", "edge", "firefox"].into_iter().filter(|name| {
+            std::env::var("CLAUDE_DONE_TEST_BROWSER")
+                .map(|v| v == *name)
+                .unwrap_or(true)
+        }) {
+            let mut prefs = Preferences::default();
+            let mut settings = crate::fingerprint::fresh().unwrap();
+            settings.seed = "11".repeat(32);
+            prefs.fingerprint = Some(settings.clone());
+            let first = browser(engine, prefs.clone(), &fixture.url("/region"));
+            let route = if engine == "firefox" {
+                "/fingerprint"
+            } else {
+                "/fingerprint?worker=1"
+            };
+            first.control.open(fixture.url(route), false).unwrap();
+            let report = fixture
+                .reports
+                .recv_timeout(Duration::from_secs(25))
+                .unwrap();
+            assert_eq!(
+                report["main"]["marker"], true,
+                "{engine} preload was not executed"
+            );
+            if engine != "firefox" {
+                assert_eq!(report["worker"]["marker"], true, "{engine} Worker preload");
+                assert_eq!(
+                    report["worker"]["first"], report["main"]["first"],
+                    "{engine} Worker canvas consistency"
+                );
+                assert_eq!(
+                    report["worker"]["font"], report["main"]["font"],
+                    "{engine} Worker font consistency"
+                );
+            }
+            assert_eq!(
+                report["main"]["first"], report["main"]["again"],
+                "{engine} repeat read"
+            );
+            assert_eq!(
+                report["main"], report["frame"],
+                "{engine} same-origin iframe preload"
+            );
+            assert_eq!(
+                report["cross"]["marker"], true,
+                "{engine} cross-origin iframe preload"
+            );
+            assert_ne!(
+                report["cross"]["first"], report["main"]["first"],
+                "{engine} origins have separate noise"
+            );
+            assert_eq!(
+                report["main"]["blank"],
+                json!([0, 0, 0, 0]),
+                "{engine} transparent pixels stay native"
+            );
+            assert_eq!(
+                report["main"]["invalid"], true,
+                "{engine} canvas native range validation"
+            );
+            assert_eq!(
+                report["main"]["numeric"], true,
+                "{engine} numeric coordinate coercion"
+            );
+            assert_eq!(
+                report["main"]["after"], report["main"]["first"],
+                "{engine} export mutated source"
+            );
+            assert_eq!(
+                report["main"]["branded"], true,
+                "{engine} TextMetrics identity"
+            );
+            first.control.open(fixture.url(route), true).unwrap();
+            assert_eq!(
+                fixture
+                    .reports
+                    .recv_timeout(Duration::from_secs(25))
+                    .unwrap()["main"],
+                report["main"],
+                "{engine} new tab"
+            );
+            let path = first.path.clone();
+            first.control.quit_before_navigation().unwrap();
+            platform::close_profile(&path).unwrap();
+            platform::spawn_controlled_browser(engine, &path, "direct", None).unwrap();
+            let (control, _) = start_with_lookup(
+                engine.into(),
+                path.clone(),
+                prefs.clone(),
+                regional::initial(&prefs).unwrap(),
+                fixture.url("/region"),
+            )
+            .unwrap();
+            control.open(fixture.url(route), false).unwrap();
+            assert_eq!(
+                fixture
+                    .reports
+                    .recv_timeout(Duration::from_secs(25))
+                    .unwrap()["main"],
+                report["main"],
+                "{engine} restart"
+            );
+            control.quit_before_navigation().unwrap();
+            platform::close_profile(&path).unwrap();
+            drop(control);
+            prefs.fingerprint.as_mut().unwrap().seed = "aa".repeat(32);
+            let second = browser(engine, prefs, &fixture.url("/region"));
+            second.control.open(fixture.url(route), false).unwrap();
+            let regenerated = fixture
+                .reports
+                .recv_timeout(Duration::from_secs(25))
+                .unwrap();
+            assert_ne!(
+                regenerated["main"]["first"], report["main"]["first"],
+                "{engine} independent canvas"
+            );
+            assert_ne!(
+                regenerated["main"]["font"], report["main"]["font"],
+                "{engine} independent font"
+            );
+            assert_ne!(
+                regenerated["main"]["audio"], report["main"]["audio"],
+                "{engine} independent audio"
+            );
+            println!("{engine}: fingerprint repeat/frame/tab/restart/independence verified");
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -661,16 +1273,23 @@ mod tests {
                                 .unwrap_or(""));
                             let _ = tx.send(data);
                             ("text/plain", "ok".into())
+                        } else if route.starts_with("/fingerprint-worker") {
+                            ("application/javascript",r#"const c=new OffscreenCanvas(64,32);const x=c.getContext('2d');x.fillStyle='#735941';x.fillRect(0,0,64,32);x.font='14px serif';x.fillText('NodeCloak',2,19);const bytes=x.getImageData(0,0,64,32).data;let h=2166136261;for(const v of bytes)h=Math.imul(h^v,16777619);postMessage({marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),first:h>>>0,font:x.measureText('NodeCloak').width});self.close();"#.into())
+                        } else if route.starts_with("/fingerprint-frame") {
+                            ("text/html",format!("<script>{FINGERPRINT_PROBE};fingerprintProbe().then(fingerprint=>parent.postMessage({{fingerprint}},'*'));</script>"))
+                        } else if route.starts_with("/fingerprint") {
+                            ("text/html",format!("<!doctype html><title>Fingerprint fixture</title><script>{FINGERPRINT_PROBE};const frameAt=url=>new Promise(resolve=>{{const f=document.createElement('iframe');addEventListener('message',e=>{{if(e.source===f.contentWindow&&e.data.fingerprint)resolve(e.data.fingerprint)}});f.src=url;document.documentElement.append(f)}});const frame=frameAt('/fingerprint-frame');const cross=frameAt(location.origin.replace('127.0.0.1','localhost')+'/fingerprint-frame');const worker=location.search.includes('worker')?new Promise(resolve=>{{const w=new Worker('/fingerprint-worker');w.onmessage=e=>resolve(e.data);w.onerror=e=>resolve({{error:e.message}})}}):Promise.resolve(null);Promise.all([fingerprintProbe(),frame,cross,worker]).then(([main,frame,cross,worker])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({{main,frame,cross,worker}}))));</script>"))
                         } else if route.starts_with("/frame") {
-                            ("text/html",r#"<script>parent.postMessage({frame:{timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset()}},'*')</script>"#.into())
+                            ("text/html",r#"<script>const frame={hardware:navigator.hardwareConcurrency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset(),visibility:document.visibilityState};navigator.permissions.query({name:'geolocation'}).then(p=>frame.permission=p.state);let done=false;const send=geo=>{if(done)return;done=true;frame.geo=geo;frame.visibilityNow=document.visibilityState;parent.postMessage({frame},'*')};navigator.geolocation.getCurrentPosition(p=>send({latitude:p.coords.latitude,longitude:p.coords.longitude}),e=>send({error:e.code}),{timeout:8000});setTimeout(()=>send({error:'timeout'}),9000);</script>"#.into())
                         } else {
                             ("text/html",r#"<!doctype html><title>NodeCloak region verification</title><p>Verifying isolated browser settings</p><script>
-                    const snapshot=()=>({webdriver:navigator.webdriver,language:navigator.language,languages:[...navigator.languages],locale:Intl.DateTimeFormat().resolvedOptions().locale,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset()});
-                    const first=snapshot();first.tag=location.pathname;window.progress={};
-                    const worker=new Promise(resolve=>{const w=new Worker(URL.createObjectURL(new Blob(['postMessage(('+snapshot.toString()+')())'],{type:'application/javascript'})));w.onmessage=e=>{w.terminate();window.progress.worker=e.data;resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'timeout'}),5000)});
-                    const frame=new Promise(resolve=>{addEventListener('message',e=>{if(e.data.frame){window.progress.frame=e.data.frame;resolve(e.data.frame)}});const f=document.createElement('iframe');f.src=location.origin.replace('127.0.0.1','localhost')+'/frame';document.documentElement.append(f);setTimeout(()=>resolve({error:'timeout'}),5000)});
-                    const geo=new Promise(resolve=>navigator.geolocation.getCurrentPosition(p=>{window.progress.geo='success';resolve({latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy})},e=>{window.progress.geo='error '+e.code;resolve({error:e.code})},{timeout:5000}));const permission=navigator.permissions.query({name:'geolocation'}).then(p=>{window.progress.permission=p.state;return p});setTimeout(()=>window.progress.timer='fired',6000);
-                    Promise.all([worker,frame,geo,permission]).then(([worker,frame,geo,permission])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({...first,worker,frame,geo,permission:permission.state})))).catch(e=>fetch('/report?data='+encodeURIComponent(JSON.stringify({error:String(e)}))));
+                    const snapshot=()=>({hardware:navigator.hardwareConcurrency,webdriver:navigator.webdriver,language:navigator.language,languages:[...navigator.languages],locale:Intl.DateTimeFormat().resolvedOptions().locale,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset()});
+                    const first=snapshot();first.tag=location.pathname;first.visibility=document.visibilityState;first.focus=document.hasFocus();first.dnt=navigator.doNotTrack;first.width=innerWidth;first.height=innerHeight;first.webgl=!!document.createElement('canvas').getContext('webgl');window.progress={};
+                    const privacy=(async()=>{first.webgpu=!!(navigator.gpu&&await navigator.gpu.requestAdapter());if(window.speechSynthesis){await new Promise(r=>setTimeout(r,300));first.voices=speechSynthesis.getVoices().length;}else first.voices=0;})();
+                    const worker=new Promise(resolve=>{const w=new Worker(URL.createObjectURL(new Blob(['postMessage(('+snapshot.toString()+')())'],{type:'application/javascript'})));w.onmessage=e=>{w.terminate();window.progress.worker=e.data;resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'timeout'}),10000)});
+                    const frame=new Promise(resolve=>{addEventListener('message',e=>{if(e.data.frame){window.progress.frame=e.data.frame;resolve(e.data.frame)}});const f=document.createElement('iframe');f.allow='geolocation';f.src=location.origin.replace('127.0.0.1','localhost')+'/frame';document.documentElement.append(f);setTimeout(()=>resolve({error:'timeout'}),10000)});
+                    const geo=new Promise(resolve=>{setTimeout(()=>resolve({error:'position timeout'}),6000);navigator.geolocation.getCurrentPosition(p=>{window.progress.geo='success';resolve({latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy})},e=>{window.progress.geo='error '+e.code;resolve({error:e.code})},{timeout:5000});});const permission=navigator.permissions.query({name:'geolocation'}).then(p=>{window.progress.permission=p.state;return p});setTimeout(()=>window.progress.timer='fired',6000);
+                    Promise.all([worker,frame,geo,permission,privacy]).then(([worker,frame,geo,permission])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({...first,worker,frame,geo,permission:permission.state})))).catch(e=>fetch('/report?data='+encodeURIComponent(JSON.stringify({error:String(e)}))));
                     </script>"#.into())
                         };
                         let response=format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nCache-Control: no-store\r\n\r\n{body}",body.len());
@@ -688,6 +1307,19 @@ mod tests {
             format!("http://127.0.0.1:{}{route}", self.port)
         }
         fn report(&self, browser: &TempBrowser) -> Value {
+            // Chromium suspends geolocation while its native window is occluded.
+            // Test actual visible-window behavior rather than overriding visibility.
+            platform::focus_profile(&browser.path).unwrap();
+            #[cfg(windows)]
+            {
+                let ids = platform::profile_process_ids(&browser.path).unwrap();
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows(
+                        Some(show_test_window),
+                        &ids as *const _ as isize,
+                    );
+                }
+            }
             match self.reports.recv_timeout(Duration::from_secs(20)) {
                 Ok(data) => data,
                 Err(e) => {
@@ -707,13 +1339,32 @@ mod tests {
         control: Control,
         _root: tempfile::TempDir,
     }
-    impl Drop for TempBrowser {
-        fn drop(&mut self) {
-            self.control.stop.store(true, Ordering::SeqCst);
-            let _ = platform::close_profile(&self.path);
+    impl TempBrowser {
+        fn show(&self) {
+            platform::focus_profile(&self.path).unwrap();
+            #[cfg(windows)]
+            {
+                let ids = platform::profile_process_ids(&self.path).unwrap();
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows(
+                        Some(show_test_window),
+                        &ids as *const _ as isize,
+                    );
+                }
+            }
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
-    fn browser(browser: &str, prefs: Preferences, lookup: &str) -> TempBrowser {
+    impl Drop for TempBrowser {
+        fn drop(&mut self) {
+            let _ = self.control.quit_before_navigation();
+            self.control.stop.store(true, Ordering::SeqCst);
+            let _ = platform::close_profile(&self.path);
+            let _ = platform::force_close_profile(&self.path);
+        }
+    }
+    fn browser(browser: &str, mut prefs: Preferences, lookup: &str) -> TempBrowser {
+        prefs.regional.enabled = true;
         let root = tempfile::tempdir().unwrap();
         let canonical = root.path().canonicalize().unwrap();
         let draft = Draft {
@@ -732,6 +1383,13 @@ mod tests {
         let p = profiles::create(&canonical, draft, None).unwrap();
         let path = profiles::path(&canonical, &p).unwrap();
         let ip=regional::uses_ip(&prefs).then(||regional::parse_ip_region(&json!({"success":true,"ip":"203.0.113.12","country_code":"JP","city":"Tokyo","latitude":35.68,"longitude":139.69,"timezone":{"id":"Asia/Tokyo"}})).unwrap());
+        if browser == "firefox" {
+            crate::firefox::prepare_geolocation(
+                &path,
+                Some(&regional::resolve(&prefs, ip.clone()).unwrap()),
+            )
+            .unwrap();
+        }
         platform::spawn_controlled_browser(browser, &path, "direct", None).unwrap();
         let result = start_with_lookup(
             browser.into(),
@@ -741,14 +1399,17 @@ mod tests {
             lookup.into(),
         );
         if result.is_err() {
-            platform::close_profile(&path).unwrap();
+            let _ = platform::force_close_profile(&path);
         }
-        let (control, _) = result.unwrap();
-        TempBrowser {
+        let (control, actual) = result.unwrap();
+        println!("{browser} resolved: {actual:?}");
+        let browser = TempBrowser {
             path,
             control,
             _root: root,
-        }
+        };
+        browser.show();
+        browser
     }
     fn check(
         data: &Value,
@@ -779,6 +1440,27 @@ mod tests {
             (data["geo"]["longitude"].as_f64().unwrap() - longitude).abs() < 0.000001,
             "geo {data}"
         );
+        if data["frame"]["geo"].get("error").is_none() {
+            assert!(
+                (data["frame"]["geo"]["latitude"].as_f64().unwrap() - latitude).abs() < 0.000001,
+                "iframe geo {data}"
+            );
+            assert!(
+                (data["frame"]["geo"]["longitude"].as_f64().unwrap() - longitude).abs() < 0.000001,
+                "iframe geo {data}"
+            );
+        } else {
+            // Native Geolocation waits for document visibility. Hidden frames
+            // must defer rather than expose the actual device coordinates.
+            assert_eq!(
+                data["frame"]["visibilityNow"], "hidden",
+                "visible iframe failed geolocation: {data}"
+            );
+            assert_eq!(
+                data["frame"]["geo"]["error"], 3,
+                "unexpected hidden-frame error: {data}"
+            );
+        }
     }
     #[test]
     #[ignore = "Starts temporary installed browsers and verifies custom/IP regions, new tabs, worker/iframe offsets and simultaneous profile isolation"]
@@ -822,6 +1504,7 @@ mod tests {
             let data = fixture.report(&second);
             println!("{engine} IP: {data}");
             check(&data, "ja-JP", "Asia/Tokyo", -540, -540, 35.68, 139.69);
+            first.show();
             first.control.open(fixture.url("/new-tab"), true).unwrap();
             let data = fixture.report(&first);
             println!("{engine} new tab: {data}");
@@ -836,6 +1519,96 @@ mod tests {
             );
             assert_eq!(data["webdriver"], true);
         }
+    }
+    #[test]
+    #[ignore = "Starts temporary Firefox; verify browser-network IP retry and restoration; use MOZ_HEADLESS=1 on an occluded test desktop"]
+    fn native_firefox_ip_launch_retries_then_restores_provider() {
+        let fixture = Fixture::new();
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let mut preferences = Preferences::default();
+        preferences.regional.enabled = true;
+        preferences.regional.language_mode = "ip".into();
+        preferences.regional.timezone_mode = "ip".into();
+        preferences.regional.location_mode = "ip".into();
+        preferences.advanced.location = PermissionMode::Allow;
+        preferences.startup_url = fixture.url("/launch-ip");
+        let mut draft = Draft {
+            name: "Native provider launch".into(),
+            browser: "firefox".into(),
+            notes: String::new(),
+            tags: vec![],
+            proxy: ProxyConfig {
+                mode: "direct".into(),
+                ..Default::default()
+            },
+            password: None,
+            clear_password: false,
+            preferences,
+        };
+        let p = profiles::create(&canonical, draft.clone(), None).unwrap();
+        let path = profiles::path(&canonical, &p).unwrap();
+        let original = json!({"user":"https://original.example/location","runtime":"https://original.example/location"});
+        crate::firefox::apply(
+            &path,
+            &[(
+                "geo.provider.network.url".into(),
+                crate::firefox::snapshot(&path, "geo.provider.network.url").unwrap(),
+                original.clone(),
+            )],
+            false,
+        )
+        .unwrap();
+        let runtime = profiles::Runtime::default();
+        let result = crate::profile_commands::launch_with_lookup(
+            &canonical,
+            &p.id,
+            "startup",
+            &runtime,
+            &fixture.url("/region"),
+        )
+        .and_then(|_| {
+            let data = fixture
+                .reports
+                .recv_timeout(Duration::from_secs(20))
+                .map_err(|_| "Firefox IP report timeout")?;
+            println!("Firefox native launch IP: {data}");
+            check(&data, "ja-JP", "Asia/Tokyo", -540, -540, 35.68, 139.69);
+            assert!(runtime.1.ready(&p.id));
+            assert!(profiles::get(&canonical, &p.id, false)?
+                .last_region
+                .unwrap()
+                .ip_region
+                .is_some());
+            Ok(())
+        });
+        if let Ok(controls) = runtime.1 .0.lock() {
+            if let Some(control) = controls.get(&p.id) {
+                let _ = control.quit_before_navigation();
+            }
+        }
+        runtime.1.clear();
+        platform::close_profile(&path).unwrap();
+        result.unwrap();
+        draft.preferences.regional.language_mode = "custom".into();
+        draft.preferences.regional.timezone_mode = "system".into();
+        draft.preferences.regional.location_mode = "system".into();
+        draft.preferences.startup_url = "about:blank".into();
+        profiles::update(&canonical, &p.id, draft).unwrap();
+        let result = crate::profile_commands::launch_with_lookup(
+            &canonical,
+            &p.id,
+            "startup",
+            &runtime,
+            &fixture.url("/region"),
+        );
+        platform::force_close_profile(&path).unwrap();
+        result.unwrap();
+        assert_eq!(
+            crate::firefox::snapshot(&path, "geo.provider.network.url").unwrap(),
+            original
+        );
+        assert!(!path.join("nodecloak-geolocation-original.json").exists());
     }
     #[test]
     #[ignore = "Uses the live HTTPS region provider through a temporary Chrome profile and tests the complete profile launch/relaunch path"]

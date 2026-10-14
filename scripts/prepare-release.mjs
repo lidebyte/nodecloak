@@ -20,8 +20,12 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "改善本地副本启动：启用登录状态同步后，遇到分区网站存储时保留本地登录数据并正常启动。 / Improved local profile startup: profiles with partitioned website storage can start while preserving local sign-in data when session sync is enabled.",
-  "操作错误提示持续保留，支持手动关闭，方便查看原因和重试。 / Operation errors remain visible and can be dismissed manually, giving you time to read the details and retry."
+  "新增稳定指纹：新建和复制副本生成独立指纹，同一副本重启保持稳定，并可重新生成指纹。 / Adds stable fingerprints: new and copied profiles receive independent identities that persist across restarts and can be regenerated.",
+  "Chrome、Edge、Firefox 新增 Canvas、字体测量、WebGL、音频和媒体设备标识保护，可分别调整。 / Adds individually adjustable Canvas, font measurement, WebGL, audio and media-input identity protection for Chrome, Edge and Firefox.",
+  "新增批量管理：支持批量启动、关闭、删除和恢复浏览器副本。 / Adds batch profile management: start, close, delete and restore multiple browser profiles.",
+  "扩展副本环境设置：支持逻辑处理器数量、页面视口、独立隐私策略及网页功能开关。 / Expands environment settings with logical processor hints, page viewport, independent privacy policies and website feature controls.",
+  "增强网站登录状态同步：支持更多分区网站数据，保留不同网站之间的数据隔离。 / Improves website-session sync with support for more partitioned website data while preserving isolation between sites.",
+  "改善浏览器副本启动和区域设置应用，打开页面更稳定。 / Improves profile startup and regional settings for more reliable page navigation."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

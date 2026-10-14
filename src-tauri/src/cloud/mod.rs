@@ -1,5 +1,6 @@
 pub mod account;
 pub mod browser_session;
+mod session_storage;
 pub mod client;
 pub mod commands;
 pub mod crypto;

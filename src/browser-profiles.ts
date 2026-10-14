@@ -2,27 +2,29 @@ import {invoke} from '@tauri-apps/api/core';
 import {native} from './bridge';
 import type {BrowserId,Check} from './domain';
 import type {SharedProfileGrant} from './profile-sharing';
+import {fingerprintDefaults,type FingerprintSettings} from './profile-fingerprint';
 export type ProxyMode='direct'|'system'|'http'|'https'|'socks5';
 export interface ProxyConfig {mode:ProxyMode;host:string;port:number;username:string;credentialRef?:string|null}
 export type PermissionMode='ask'|'block';
-export interface RegionalSettings {languageMode:'ip'|'custom';timezoneMode:'system'|'ip'|'custom';timezone:string;locationMode:'system'|'ip'|'custom';latitude:number;longitude:number;accuracy:number}
+export interface RegionalSettings {enabled:boolean;languageMode:'ip'|'custom';timezoneMode:'system'|'ip'|'custom';timezone:string;locationMode:'system'|'ip'|'custom';latitude:number;longitude:number;accuracy:number}
 export interface IpRegion {ip:string;country:string;city:string;language:string;timezone:string;latitude:number;longitude:number;checkedAt:string}
 export interface ResolvedRegion {language:string;timezone:string|null;latitude:number|null;longitude:number|null;accuracy:number;ipRegion:IpRegion|null}
-export const regionalDefaults=():RegionalSettings=>({languageMode:'custom',timezoneMode:'system',timezone:'UTC',locationMode:'system',latitude:1.3521,longitude:103.8198,accuracy:100});
-export const needsRegionalControl=(p:Preferences)=>p.regional.languageMode==='ip';
-export interface AdvancedSettings {notifications:PermissionMode;location:PermissionMode|'allow';camera:PermissionMode;microphone:PermissionMode;blockImages:boolean;blockWebgl:boolean;resistFingerprinting:boolean}
-export const advancedDefaults=():AdvancedSettings=>({notifications:'ask',location:'ask',camera:'ask',microphone:'ask',blockImages:false,blockWebgl:false,resistFingerprinting:false});
-export interface Preferences {language:string;privacy:boolean;fontRestriction:boolean;startupUrl:string;advanced:AdvancedSettings;regional:RegionalSettings}
+export const regionalDefaults=():RegionalSettings=>({enabled:false,languageMode:'custom',timezoneMode:'system',timezone:'UTC',locationMode:'system',latitude:1.3521,longitude:103.8198,accuracy:100});
+export const needsRegionalControl=(p:Preferences)=>p.regional.languageMode==='ip'||p.regional.timezoneMode!=='system'||p.regional.locationMode!=='system'||p.advanced.hardwareConcurrency>0||p.advanced.viewportWidth>0;
+export const requiresBrowserControl=(browser:BrowserId,p:Preferences)=>Boolean(p.fingerprint?.enabled)||p.regional.languageMode==='ip'||p.regional.timezoneMode!=='system'||p.regional.locationMode!=='system'||p.advanced.viewportWidth>0||browser!=='firefox'&&p.advanced.hardwareConcurrency>0;
+export interface AdvancedSettings {notifications:PermissionMode;location:PermissionMode|'allow';camera:PermissionMode;microphone:PermissionMode;blockImages:boolean;blockWebgl:boolean;resistFingerprinting:boolean;doNotTrack:'inherit'|'on'|'off';webRtc:'inherit'|'default'|'public'|'proxy';blockWebgpu:boolean;blockSpeech:boolean;blockBattery:boolean;canvasProtection:boolean;hardwareConcurrency:number;viewportWidth:number;viewportHeight:number}
+export const advancedDefaults=():AdvancedSettings=>({notifications:'ask',location:'ask',camera:'ask',microphone:'ask',blockImages:false,blockWebgl:false,resistFingerprinting:false,doNotTrack:'inherit',webRtc:'inherit',blockWebgpu:false,blockSpeech:false,blockBattery:false,canvasProtection:false,hardwareConcurrency:0,viewportWidth:0,viewportHeight:0});
+export interface Preferences {language:string;privacy:boolean;fontRestriction:boolean;startupUrl:string;advanced:AdvancedSettings;regional:RegionalSettings;fingerprint?:FingerprintSettings}
 export function normalizePreferences(value:Partial<Preferences>):Preferences {
   const advanced={...advancedDefaults(),...value.advanced};
   // Old "allow" permissions applied to a simulated position, not the actual device.
-  if(value.regional?.locationMode&&value.regional.locationMode!=='system'&&advanced.location==='allow')advanced.location='ask';
-  return {...defaults().preferences,...value,advanced,regional:{...regionalDefaults(),languageMode:value.regional?.languageMode??'custom'}};
+  if(!value.regional?.enabled&&value.regional?.locationMode&&value.regional.locationMode!=='system'&&advanced.location==='allow')advanced.location='ask';
+  return {...defaults().preferences,...value,fingerprint:value.fingerprint,advanced,regional:value.regional?.enabled?{...regionalDefaults(),...value.regional}:{...regionalDefaults(),languageMode:value.regional?.languageMode??'custom'}};
 }
 export interface ProxyTest {ip:string|null;country:string|null;latency:number;checkedAt:string;connection:string;target:string;clock?:Check|null}
 export interface BrowserProfile {id:string;name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;preferences:Preferences;createdAt:string;updatedAt:string;deletedAt:string|null;lastTest:ProxyTest|null;legacy:boolean;running:boolean;pendingRestart:boolean;browserAvailable:boolean;hasPassword:boolean;proxyReady:boolean;lastRegion?:ResolvedRegion|null;regionalReady?:boolean;regionalError?:string|null;sharing?:SharedProfileGrant|null}
 export interface ProfileDraft {name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;password?:string;clearPassword:boolean;preferences:Preferences}
-export const defaults=():ProfileDraft=>({name:'',browser:'firefox',notes:'',tags:[],proxy:{mode:'system',host:'',port:8080,username:''},password:'',clearPassword:false,preferences:{language:'en-US,en',privacy:true,fontRestriction:false,startupUrl:'https://claude.ai',advanced:advancedDefaults(),regional:regionalDefaults()}});
+export const defaults=():ProfileDraft=>({name:'',browser:'firefox',notes:'',tags:[],proxy:{mode:'system',host:'',port:8080,username:''},password:'',clearPassword:false,preferences:{language:'en-US,en',privacy:true,fontRestriction:false,startupUrl:'https://claude.ai',advanced:advancedDefaults(),regional:regionalDefaults(),fingerprint:fingerprintDefaults()}});
 export function parseProxyUri(input:string):{proxy:ProxyConfig;password:string} {
   let url:URL;try{url=new URL(input.trim());}catch{throw new Error('请粘贴 http://、https:// 或 socks5:// 代理地址');}
   const mode=url.protocol.slice(0,-1);if(!['http','https','socks5'].includes(mode)||!url.hostname||url.pathname!=='/'&&url.pathname!==''||url.search||url.hash)throw new Error('代理链接协议或格式无效');
@@ -36,13 +38,18 @@ export function validateDraft(draft:ProfileDraft):string|null {
   if(draft.tags.length>10||draft.tags.some(tag=>!tag.trim()||tag.length>24))return '最多 10 个标签，每个标签不超过 24 个字符';
   if(draft.notes.length>1000)return '备注最多 1000 个字符';
   const advanced=draft.preferences.advanced;
+  const fingerprint=draft.preferences.fingerprint;
+  if(fingerprint&&(fingerprint.version!==1||!/^[0-9a-f]{64}$/.test(fingerprint.seed)))return '指纹种子或版本无效';
+  if(fingerprint?.enabled&&(advanced.resistFingerprinting||advanced.canvasProtection))return '稳定指纹与 Firefox 原生随机保护不能同时开启';
+  if(![0,2,4,8,16].includes(advanced.hardwareConcurrency)||!Number.isInteger(advanced.viewportWidth)||!Number.isInteger(advanced.viewportHeight)||((advanced.viewportWidth!==0||advanced.viewportHeight!==0)&&(advanced.viewportWidth<320||advanced.viewportWidth>3840||advanced.viewportHeight<200||advanced.viewportHeight>2160)))return '硬件提示或页面视口尺寸无效';
+  if(!['inherit','on','off'].includes(advanced.doNotTrack)||!['inherit','default','public','proxy'].includes(advanced.webRtc)||[advanced.blockWebgpu,advanced.blockSpeech,advanced.blockBattery,advanced.canvasProtection].some(v=>typeof v!=='boolean'))return '隐私设置格式无效';
   if(!advanced||[advanced.notifications,advanced.camera,advanced.microphone].some(v=>!['ask','block'].includes(v))||!['ask','allow','block'].includes(advanced.location)||[advanced.blockImages,advanced.blockWebgl,advanced.resistFingerprinting].some(v=>typeof v!=='boolean'))return '高级设置格式无效';
   const r=draft.preferences.regional;
   if(!r||!['ip','custom'].includes(r.languageMode)||!['system','ip','custom'].includes(r.timezoneMode)||!['system','ip','custom'].includes(r.locationMode))return '区域匹配方式无效';
   if(r.timezoneMode==='custom'){try{new Intl.DateTimeFormat('en-US',{timeZone:r.timezone});}catch{return '请填写有效的 IANA 时区，例如 America/Los_Angeles';}if(!r.timezone.trim())return '请填写时区';}
   if(!Number.isFinite(r.latitude)||!Number.isFinite(r.longitude)||!Number.isFinite(r.accuracy)||Math.abs(r.latitude)>90||Math.abs(r.longitude)>180||r.accuracy<1||r.accuracy>100000)return '经纬度或定位精度无效';
   if(advanced.resistFingerprinting&&needsRegionalControl(draft.preferences))return '独立区域设置与 Firefox 严格指纹保护冲突，请关闭严格保护';
-  if(draft.browser!=='firefox'&&(advanced.blockWebgl||advanced.resistFingerprinting||draft.preferences.fontRestriction))return '字体限制、严格指纹保护和 WebGL 禁用仅适用于 Firefox';
+  if(draft.browser!=='firefox'&&(advanced.canvasProtection||advanced.blockBattery||advanced.resistFingerprinting||draft.preferences.fontRestriction))return '字体限制、Canvas 保护、电池保护和严格指纹保护仅适用于 Firefox';
   if(!/^[a-zA-Z0-9-]+(?:,[a-zA-Z0-9-]+)*$/.test(draft.preferences.language))return '语言格式示例：en-US,en';
   if(draft.preferences.startupUrl.length>4096)return '启动页面地址过长';
   try {if(draft.preferences.startupUrl!=='about:blank'){const url=new URL(draft.preferences.startupUrl);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return '启动页面只支持 HTTP、HTTPS 或 about:blank';}}catch{return '请填写完整的启动页面地址';}
@@ -65,6 +72,7 @@ export async function saveProfile(draft:ProfileDraft,id?:string,copyId?:string):
   const failure=validateDraft(draft);if(failure)throw new Error(failure);
   if(native)return invoke('save_profile',{id:id??null,draft,copyId:copyId??null});
   const clean=structuredClone({...draft,preferences:normalizePreferences(draft.preferences)});delete clean.password;delete clean.proxy.credentialRef;
+  if(!id){if(!clean.preferences.fingerprint)clean.preferences.fingerprint=fingerprintDefaults();else if(copyId||data().some(p=>p.preferences.fingerprint?.seed===clean.preferences.fingerprint?.seed))clean.preferences.fingerprint={...clean.preferences.fingerprint,seed:fingerprintDefaults().seed};}
   const p=id?get(id):{...clean,id:crypto.randomUUID().replaceAll('-',''),createdAt:new Date().toISOString(),deletedAt:null,lastTest:null,legacy:false,running:false,pendingRestart:false,browserAvailable:true,hasPassword:false,proxyReady:true,updatedAt:''};
   const running=p.running;const changed=JSON.stringify(p.proxy)!==JSON.stringify(clean.proxy)||JSON.stringify(p.preferences)!==JSON.stringify(clean.preferences);
   const savedPassword=p.hasPassword;

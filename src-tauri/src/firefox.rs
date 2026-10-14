@@ -49,11 +49,26 @@ fn allowed(key: &str) -> bool {
         "permissions.default.desktop-notification",
         "permissions.default.geo",
         "geo.enabled",
+        "geo.provider.network.url",
+        "geo.provider.testing",
+        "geo.provider.network.scan",
+        "geo.provider.network.timeToWaitBeforeSending",
         "permissions.default.camera",
         "permissions.default.microphone",
         "permissions.default.image",
         "webgl.disabled",
         "privacy.resistFingerprinting",
+        "privacy.donottrackheader.enabled",
+        "privacy.fingerprintingProtection",
+        "privacy.fingerprintingProtection.pbmode",
+        "privacy.baselineFingerprintingProtection.overrides",
+        "dom.webgpu.enabled",
+        "media.webspeech.synth.enabled",
+        "dom.battery.enabled",
+        "dom.maxHardwareConcurrency",
+        "media.peerconnection.ice.default_address_only",
+        "media.peerconnection.ice.no_host",
+        "media.peerconnection.ice.proxy_only",
         "remote.prefs.recommended",
     ]
     .contains(&key)
@@ -119,6 +134,162 @@ pub fn snapshot(profile: &Path, key: &str) -> Result<Value, String> {
     Ok(
         json!({"user":value_in(&document(&profile.join("user.js"))?,key)?, "runtime":value_in(&document(&profile.join("prefs.js"))?,key)?}),
     )
+}
+const GEO_FIELDS: [&str; 4] = [
+    "geo.provider.network.url",
+    "geo.provider.testing",
+    "geo.provider.network.scan",
+    "geo.provider.network.timeToWaitBeforeSending",
+];
+/// Replace only Firefox's session-random PNG chunk while stable mode is on.
+/// Preserve all unrelated baseline protections and restore both preference files.
+pub fn prepare_stable_canvas(profile: &Path, enabled: bool) -> Result<(), String> {
+    crate::platform::ensure_profile_closed(profile)?;
+    let key = "privacy.baselineFingerprintingProtection.overrides";
+    let backup = profile.join("nodecloak-fingerprint-original.json");
+    let original = if backup.exists() {
+        crate::profiles::guard_tree(&backup)?;
+        if fs::metadata(&backup).map_err(|e| e.to_string())?.len() > 16384 {
+            return Err("Firefox 指纹设置备份过大".into());
+        }
+        let value: Value = serde_json::from_slice(&fs::read(&backup).map_err(|e| e.to_string())?)
+            .map_err(|_| "Firefox 指纹设置备份无效")?;
+        if value
+            .as_object()
+            .is_none_or(|v| v.len() != 2 || !v.contains_key("user") || !v.contains_key("runtime"))
+            || ["user", "runtime"]
+                .iter()
+                .any(|field| !value[field].is_null() && !value[field].is_string())
+        {
+            return Err("Firefox 指纹设置备份无效".into());
+        }
+        Some(value)
+    } else {
+        None
+    };
+    if !enabled && original.is_none() {
+        return Ok(());
+    }
+    let current = snapshot(profile, key)?;
+    let desired = if enabled {
+        let base = original.as_ref().unwrap_or(&current);
+        let mut result = json!({});
+        for field in ["user", "runtime"] {
+            if !base[field].is_null() && !base[field].is_string() {
+                return Err("Firefox 指纹覆盖设置类型无效".into());
+            }
+            let mut tokens = base[field]
+                .as_str()
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .filter(|token| {
+                    !token.is_empty()
+                        && token.trim_start_matches(['+', '-']) != "EfficientCanvasRandomization"
+                })
+                .collect::<Vec<_>>();
+            tokens.push("-EfficientCanvasRandomization");
+            result[field] = json!(tokens.join(","));
+        }
+        if original.is_none() {
+            crate::engine::atomic_write(
+                &backup,
+                &serde_json::to_vec(&current).map_err(|e| e.to_string())?,
+            )?;
+        }
+        result
+    } else {
+        original.unwrap()
+    };
+    apply(profile, &[(key.into(), current, desired)], false)?;
+    if !enabled {
+        fs::remove_file(&backup).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+/// Firefox's BiDi override is local to the top document process. Its native
+/// provider also reaches out-of-process frames, using an inline response so no
+/// device position or Wi-Fi data is sent to a network service.
+pub fn prepare_geolocation(
+    profile: &Path,
+    region: Option<&crate::regional::ResolvedRegion>,
+) -> Result<(), String> {
+    use base64::Engine;
+    crate::platform::ensure_profile_closed(profile)?;
+    let backup = profile.join("nodecloak-geolocation-original.json");
+    let original: Option<Vec<(String, Value)>> = if backup.exists() {
+        crate::profiles::guard_tree(&backup)?;
+        if fs::metadata(&backup).map_err(|e| e.to_string())?.len() > 16384 {
+            return Err("Firefox 定位设置备份过大".into());
+        }
+        let values: Vec<(String, Value)> =
+            serde_json::from_slice(&fs::read(&backup).map_err(|e| e.to_string())?)
+                .map_err(|_| "Firefox 定位设置备份无效")?;
+        if values.len() != GEO_FIELDS.len()
+            || values
+                .iter()
+                .zip(GEO_FIELDS)
+                .any(|((key, _), expected)| key != expected)
+        {
+            return Err("Firefox 定位设置备份字段无效".into());
+        }
+        Some(values)
+    } else {
+        None
+    };
+    let coordinates = region.and_then(|r| {
+        r.latitude
+            .zip(r.longitude)
+            .map(|(lat, lng)| (lat, lng, r.accuracy))
+    });
+    if coordinates.is_none() && original.is_none() {
+        return Ok(());
+    }
+    let current = GEO_FIELDS
+        .into_iter()
+        .map(|key| Ok((key.to_owned(), snapshot(profile, key)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    let desired = if let Some((lat, lng, accuracy)) = coordinates {
+        if !lat.is_finite()
+            || !lng.is_finite()
+            || !(-90.0..=90.0).contains(&lat)
+            || !(-180.0..=180.0).contains(&lng)
+            || !(1.0..=100_000.0).contains(&accuracy)
+        {
+            return Err("Firefox 定位坐标无效".into());
+        }
+        if original.is_none() {
+            crate::engine::atomic_write(
+                &backup,
+                &serde_json::to_vec(&current).map_err(|e| e.to_string())?,
+            )?;
+        }
+        let uri = format!(
+            "data:application/json;base64,{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(json!({"location":{"lat":lat,"lng":lng},"accuracy":accuracy}).to_string())
+        );
+        [json!(uri), json!(true), json!(false), json!(100)]
+            .into_iter()
+            .map(|value| json!({"user":value,"runtime":value}))
+            .collect::<Vec<_>>()
+    } else {
+        original
+            .unwrap()
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect()
+    };
+    let changes = current
+        .into_iter()
+        .zip(desired)
+        .map(|((key, before), after)| (key, before, after))
+        .collect::<Vec<_>>();
+    apply(profile, &changes, false)?;
+    if coordinates.is_none() {
+        fs::remove_file(backup).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 pub fn configured(profile: &Path, id: &str) -> Result<bool, String> {
     for (key, expected) in fields(id)? {
@@ -194,7 +365,90 @@ pub fn apply(profile: &Path, changes: &[(String, Value, Value)], undo: bool) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stable_canvas_preserves_other_baseline_controls_and_restores_originals() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let key = "privacy.baselineFingerprintingProtection.overrides";
+        let user = format!("user_pref(\"{key}\", \"+ScreenAvailToResolution\");\n");
+        let runtime = format!("user_pref(\"{key}\", \"-MaxTouchPointsCollapse\");\n");
+        std::fs::write(profile.join("user.js"), &user).unwrap();
+        std::fs::write(profile.join("prefs.js"), &runtime).unwrap();
+        super::prepare_stable_canvas(profile, true).unwrap();
+        let protected = super::snapshot(profile, key).unwrap();
+        assert_eq!(
+            protected["user"],
+            "+ScreenAvailToResolution,-EfficientCanvasRandomization"
+        );
+        assert_eq!(
+            protected["runtime"],
+            "-MaxTouchPointsCollapse,-EfficientCanvasRandomization"
+        );
+        super::prepare_stable_canvas(profile, true).unwrap();
+        assert_eq!(super::snapshot(profile, key).unwrap(), protected);
+        super::prepare_stable_canvas(profile, false).unwrap();
+        assert_eq!(
+            super::snapshot(profile, key).unwrap(),
+            serde_json::json!({"user":"+ScreenAvailToResolution","runtime":"-MaxTouchPointsCollapse"})
+        );
+        assert!(!profile.join("nodecloak-fingerprint-original.json").exists());
+    }
     use super::*;
+    #[test]
+    fn native_geolocation_provider_restores_original_settings_and_preserves_login_data() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        fs::write(p.join("user.js"),"user_pref(\"geo.provider.network.url\", \"https://original.example/location\");\nuser_pref(\"unrelated\", 42);\n").unwrap();
+        fs::write(p.join("cookies.sqlite"), "login data").unwrap();
+        let originals = GEO_FIELDS
+            .into_iter()
+            .map(|key| snapshot(p, key).unwrap())
+            .collect::<Vec<_>>();
+        let mut region =
+            crate::regional::initial(&crate::profiles::Preferences::default()).unwrap();
+        region.latitude = Some(1.3521);
+        region.longitude = Some(103.8198);
+        prepare_geolocation(p, Some(&region)).unwrap();
+        region.latitude = Some(35.68);
+        region.longitude = Some(139.69);
+        prepare_geolocation(p, Some(&region)).unwrap();
+        let snapshot = snapshot(p, GEO_FIELDS[0]).unwrap();
+        let uri = snapshot["user"].as_str().unwrap();
+        let payload: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(uri.strip_prefix("data:application/json;base64,").unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["location"]["lat"], 35.68);
+        assert_eq!(payload["location"]["lng"], 139.69);
+        prepare_geolocation(p, None).unwrap();
+        prepare_geolocation(p, None).unwrap();
+        for (key, original) in GEO_FIELDS.into_iter().zip(originals) {
+            assert_eq!(super::snapshot(p, key).unwrap(), original);
+        }
+        assert!(document(&p.join("user.js")).unwrap().contains("unrelated"));
+        assert_eq!(
+            fs::read_to_string(p.join("cookies.sqlite")).unwrap(),
+            "login data"
+        );
+        assert!(!p.join("nodecloak-geolocation-original.json").exists());
+    }
+    #[test]
+    fn native_geolocation_rejects_tampered_backups_without_changing_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        fs::write(p.join("user.js"), "user_pref(\"unrelated\", 42);\n").unwrap();
+        let before = fs::read(p.join("user.js")).unwrap();
+        fs::write(
+            p.join("nodecloak-geolocation-original.json"),
+            r#"[["security.sandbox.content.level",{"user":0,"runtime":0}]]"#,
+        )
+        .unwrap();
+        assert!(prepare_geolocation(p, None).is_err());
+        assert_eq!(fs::read(p.join("user.js")).unwrap(), before);
+    }
     #[test]
     fn dedicated_startup_overrides_homepage_without_changing_dns_or_login_data() {
         let temp = tempfile::tempdir().unwrap();

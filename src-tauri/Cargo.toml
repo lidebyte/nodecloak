@@ -1,6 +1,6 @@
 [package]
 name = "nodecloak"
-version = "2.1.1"
+version = "2.2.0"
 description = "Independent browser workspaces and environment diagnostics"
 authors = ["NodeCloak contributors"]
 edition = "2021"
@@ -44,6 +44,7 @@ hmac = "0.12"
 zeroize = { version = "1", features = ["derive"] }
 ed25519-dalek = "2.2"
 rusty-leveldb = "4"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 minisign-verify = "0.2"

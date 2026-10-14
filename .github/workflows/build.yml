@@ -47,6 +47,7 @@ jobs:
       - run: node --test scripts/release-checks.mjs scripts/apple-ticket-checks.mjs
       - run: npm test
       - run: npm run test:session-codec
+      - run: node --test scripts/fingerprint.checks.mjs
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Import Developer ID and validate notarization credentials

@@ -18,6 +18,23 @@ pub enum PermissionMode {
     Allow,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DoNotTrack {
+    #[default]
+    Inherit,
+    On,
+    Off,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum WebRtcPolicy {
+    #[default]
+    Inherit,
+    Default,
+    Public,
+    Proxy,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AdvancedSettings {
     pub notifications: PermissionMode,
@@ -27,11 +44,22 @@ pub struct AdvancedSettings {
     pub block_images: bool,
     pub block_webgl: bool,
     pub resist_fingerprinting: bool,
+    pub do_not_track: DoNotTrack,
+    pub web_rtc: WebRtcPolicy,
+    pub block_webgpu: bool,
+    pub block_speech: bool,
+    pub block_battery: bool,
+    pub canvas_protection: bool,
+    pub hardware_concurrency: u8,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<crate::fingerprint::Settings>,
     pub language: String,
     pub privacy: bool,
     pub font_restriction: bool,
@@ -44,6 +72,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            fingerprint: None,
             language: "en-US,en".into(),
             privacy: true,
             font_restriction: false,
@@ -195,6 +224,26 @@ fn existing_preferences(root: &Path, browser: &str) -> Preferences {
                 "privacy.resistFingerprinting",
                 &mut prefs.advanced.resist_fingerprinting,
                 serde_json::json!(true),
+            ),
+            (
+                "privacy.fingerprintingProtection",
+                &mut prefs.advanced.canvas_protection,
+                serde_json::json!(true),
+            ),
+            (
+                "dom.webgpu.enabled",
+                &mut prefs.advanced.block_webgpu,
+                serde_json::json!(false),
+            ),
+            (
+                "media.webspeech.synth.enabled",
+                &mut prefs.advanced.block_speech,
+                serde_json::json!(false),
+            ),
+            (
+                "dom.battery.enabled",
+                &mut prefs.advanced.block_battery,
+                serde_json::json!(false),
             ),
         ] {
             if let Ok(value) = crate::firefox::snapshot(&dir, key) {
@@ -460,12 +509,20 @@ pub fn draft_upstream(root: &Path, id: Option<&str>, draft: &Draft) -> Result<Up
 pub(crate) fn validate(draft: &Draft) -> Result<(), String> {
     crate::regional::validate(&draft.preferences)?;
     let advanced = &draft.preferences.advanced;
+    if ![0, 2, 4, 8, 16].contains(&advanced.hardware_concurrency)
+        || ((advanced.viewport_width != 0 || advanced.viewport_height != 0)
+            && (!(320..=3840).contains(&advanced.viewport_width)
+                || !(200..=2160).contains(&advanced.viewport_height)))
+    {
+        return Err("硬件提示或页面视口尺寸无效".into());
+    }
     if draft.browser != "firefox"
         && (advanced.resist_fingerprinting
-            || advanced.block_webgl
+            || advanced.canvas_protection
+            || advanced.block_battery
             || draft.preferences.font_restriction)
     {
-        return Err("字体限制、严格指纹保护和 WebGL 禁用仅适用于 Firefox".into());
+        return Err("字体限制、Canvas 保护、电池保护和严格指纹保护仅适用于 Firefox".into());
     }
     if draft.name.trim().is_empty()
         || draft.name.chars().count() > 60
@@ -508,23 +565,45 @@ pub fn create(root: &Path, draft: Draft, copy_id: Option<&str>) -> Result<Profil
     if let Some(id) = copy_id {
         crate::cloud::sharing::editable(root, id)?;
     }
-    create_with_id(root, draft, copy_id, identifier())
+    create_with_id(root, draft, copy_id, identifier(), false)
 }
 pub(crate) fn create_synced(root: &Path, draft: Draft, id: &str) -> Result<Profile, String> {
     if !valid_id(id) || id.starts_with("legacy-") || load(root)?.iter().any(|p| p.id == id) {
         return Err("同步副本标识冲突".into());
     }
-    create_with_id(root, draft, None, id.into())
+    create_with_id(root, draft, None, id.into(), true)
 }
 fn create_with_id(
     root: &Path,
     mut draft: Draft,
     copy_id: Option<&str>,
     id: String,
+    preserve_fingerprint: bool,
 ) -> Result<Profile, String> {
     crate::regional::normalize_sources(&mut draft.preferences);
     validate(&draft)?;
     let mut profiles = load(root)?;
+    if !preserve_fingerprint {
+        let mut fingerprint = match &draft.preferences.fingerprint {
+            Some(f) => f.clone(),
+            None => crate::fingerprint::fresh()?,
+        };
+        if profiles.iter().any(|p| {
+            p.preferences
+                .fingerprint
+                .as_ref()
+                .is_some_and(|f| f.seed == fingerprint.seed)
+        }) {
+            fingerprint.seed = crate::fingerprint::seed()?;
+        }
+        if draft.preferences.fingerprint.is_none()
+            && (draft.preferences.advanced.resist_fingerprinting
+                || draft.preferences.advanced.canvas_protection)
+        {
+            fingerprint.enabled = false;
+        }
+        draft.preferences.fingerprint = Some(fingerprint);
+    }
     if profiles.len() >= 500 {
         return Err("副本数量已达 500，请先清理最近删除".into());
     }
@@ -660,7 +739,20 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
     let dir = path(root, p)?;
     platform::ensure_profile_closed(&dir)?;
     std::fs::create_dir_all(&dir).map_err(|_| "无法创建副本目录")?;
+    if p.preferences_managed {
+        engine::atomic_write(
+            &dir.join("nodecloak-runtime-settings.json"),
+            &serde_json::to_vec(&p.preferences.advanced).map_err(|_| "高级设置格式无效")?,
+        )?;
+    }
     if p.browser == "firefox" {
+        crate::firefox::prepare_stable_canvas(
+            &dir,
+            p.preferences
+                .fingerprint
+                .as_ref()
+                .is_some_and(|f| f.enabled),
+        )?;
         let mut changes = vec![];
         let mut fields = vec![];
         if p.preferences_managed && p.preferences_dirty {
@@ -676,10 +768,6 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
                 (
                     "intl.regional_prefs.use_os_locales",
                     serde_json::json!(false),
-                ),
-                (
-                    "media.peerconnection.enabled",
-                    serde_json::json!(!(p.preferences.privacy || p.proxy.custom())),
                 ),
                 (
                     "privacy.globalprivacycontrol.enabled",
@@ -731,8 +819,98 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
                     "privacy.resistFingerprinting",
                     serde_json::json!(advanced.resist_fingerprinting),
                 ),
+                (
+                    "privacy.donottrackheader.enabled",
+                    serde_json::json!(match advanced.do_not_track {
+                        DoNotTrack::On => true,
+                        DoNotTrack::Off => false,
+                        _ => p.preferences.privacy,
+                    }),
+                ),
+                (
+                    "dom.webgpu.enabled",
+                    if advanced.block_webgpu {
+                        serde_json::json!(false)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ),
+                (
+                    "media.webspeech.synth.enabled",
+                    if advanced.block_speech {
+                        serde_json::json!(false)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ),
+                (
+                    "dom.battery.enabled",
+                    if advanced.block_battery {
+                        serde_json::json!(false)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ),
+                (
+                    "privacy.fingerprintingProtection",
+                    if advanced.canvas_protection {
+                        serde_json::json!(true)
+                    } else if p
+                        .preferences
+                        .fingerprint
+                        .as_ref()
+                        .is_some_and(|f| f.enabled)
+                    {
+                        serde_json::json!(false)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ),
+                (
+                    "dom.maxHardwareConcurrency",
+                    if advanced.hardware_concurrency > 0 {
+                        serde_json::json!(advanced.hardware_concurrency)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ),
             ]);
-            if crate::regional::needs_control(&p.preferences) {
+            let rtc = &advanced.web_rtc;
+            fields.push((
+                "privacy.fingerprintingProtection.pbmode",
+                if p.preferences
+                    .fingerprint
+                    .as_ref()
+                    .is_some_and(|f| f.enabled)
+                {
+                    serde_json::json!(false)
+                } else {
+                    serde_json::Value::Null
+                },
+            ));
+            fields.push((
+                "media.peerconnection.enabled",
+                serde_json::json!(
+                    !p.proxy.custom() && (*rtc != WebRtcPolicy::Inherit || !p.preferences.privacy)
+                ),
+            ));
+            for (key, value) in [
+                (
+                    "media.peerconnection.ice.default_address_only",
+                    matches!(rtc, WebRtcPolicy::Public | WebRtcPolicy::Proxy),
+                ),
+                (
+                    "media.peerconnection.ice.no_host",
+                    matches!(rtc, WebRtcPolicy::Public | WebRtcPolicy::Proxy),
+                ),
+                (
+                    "media.peerconnection.ice.proxy_only",
+                    *rtc == WebRtcPolicy::Proxy,
+                ),
+            ] {
+                fields.push((key, serde_json::json!(value)));
+            }
+            if crate::regional::needs_control_for(&p.browser, &p.preferences) {
                 fields.push(("remote.prefs.recommended", serde_json::json!(false)));
             }
         }
@@ -758,7 +936,7 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
         if !data.is_object() {
             return Err("副本设置格式无效".into());
         }
-        if crate::regional::needs_control(&p.preferences) {
+        if crate::regional::needs_control_for(&p.browser, &p.preferences) {
             if data.get("session").is_none() {
                 data["session"] = serde_json::json!({});
             }
@@ -825,13 +1003,28 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
             if !data["webrtc"].is_object() {
                 return Err("浏览器隐私字段结构无效，未覆盖".into());
             }
-            data["webrtc"]["ip_handling_policy"] =
-                serde_json::json!(if p.preferences.privacy || p.proxy.custom() {
-                    "disable_non_proxied_udp"
-                } else {
-                    "default"
+            data["webrtc"]["ip_handling_policy"] = serde_json::json!(if p.proxy.custom() {
+                "disable_non_proxied_udp"
+            } else {
+                match p.preferences.advanced.web_rtc {
+                    WebRtcPolicy::Proxy => "disable_non_proxied_udp",
+                    WebRtcPolicy::Public => "default_public_interface_only",
+                    WebRtcPolicy::Default => "default",
+                    WebRtcPolicy::Inherit => {
+                        if p.preferences.privacy {
+                            "disable_non_proxied_udp"
+                        } else {
+                            "default"
+                        }
+                    }
+                }
+            });
+            data["enable_do_not_track"] =
+                serde_json::json!(match p.preferences.advanced.do_not_track {
+                    DoNotTrack::On => true,
+                    DoNotTrack::Off => false,
+                    _ => p.preferences.privacy,
                 });
-            data["enable_do_not_track"] = serde_json::json!(p.preferences.privacy);
         }
         engine::atomic_write(
             &file,
@@ -927,7 +1120,8 @@ pub fn views(root: &Path, runtime: &Runtime) -> Result<Vec<ProfileView>, String>
             has_password: p.proxy.credential_ref.is_some(),
             proxy_ready: !p.active_proxy.as_ref().unwrap_or(&p.proxy).custom()
                 || relays.contains_key(&p.id),
-            regional_ready: !crate::regional::needs_control(
+            regional_ready: !crate::regional::needs_control_for(
+                &p.browser,
                 p.active_preferences.as_ref().unwrap_or(&p.preferences),
             ) || runtime.1.ready(&p.id),
             regional_error: runtime.1.error(&p.id),
@@ -1072,7 +1266,127 @@ pub fn history(root: &Path, id: Option<&str>) -> Result<Vec<engine::Record>, Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_profile_fingerprints_are_independent_and_survive_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let draft=serde_json::from_value(serde_json::json!({"name":"Fingerprint","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""}})).unwrap();
+        let first = super::create(root.path(), draft, None).unwrap();
+        let draft=serde_json::from_value(serde_json::json!({"name":"Fingerprint two","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""}})).unwrap();
+        let second = super::create(root.path(), draft, None).unwrap();
+        let seed = |p: &super::Profile| {
+            serde_json::to_value(p).unwrap()["preferences"]["fingerprint"]["seed"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        assert!(seed(&first).is_some(), "missing persisted fingerprint seed");
+        assert_ne!(seed(&first), seed(&second));
+        assert_eq!(
+            seed(&super::get(root.path(), &first.id, false).unwrap()),
+            seed(&first)
+        );
+    }
+    #[test]
+    fn copied_fingerprints_are_new_but_cloud_restore_and_regeneration_preserve_login_data() {
+        let root = tempfile::tempdir().unwrap();
+        let draft=serde_json::from_value(serde_json::json!({"name":"Fingerprint","browser":"chrome","proxy":{"mode":"direct","host":"","port":0,"username":""}})).unwrap();
+        let first = create(root.path(), draft, None).unwrap();
+        let document = crate::cloud::model::Document::export(&first).unwrap();
+        assert_eq!(document.schema, 3);
+        let mut older = serde_json::to_value(&document).unwrap();
+        older["schema"] = serde_json::json!(2);
+        assert!(crate::cloud::model::Document::parse(older).is_err());
+        let copy = create(root.path(), document.draft(), Some(&first.id)).unwrap();
+        assert!(
+            copy.preferences.fingerprint.as_ref().unwrap().seed
+                != first.preferences.fingerprint.as_ref().unwrap().seed
+        );
+        let imported = create_synced(root.path(), document.draft(), &identifier()).unwrap();
+        assert!(imported.preferences.fingerprint == first.preferences.fingerprint);
+        let path = super::path(root.path(), &first).unwrap();
+        std::fs::write(path.join("login-sentinel"), b"retained").unwrap();
+        let mut edited = document.draft();
+        edited.preferences.fingerprint.as_mut().unwrap().seed = crate::fingerprint::seed().unwrap();
+        let updated = update(root.path(), &first.id, edited).unwrap();
+        assert!(
+            updated.preferences.fingerprint.as_ref().unwrap().seed
+                != first.preferences.fingerprint.as_ref().unwrap().seed
+        );
+        assert_eq!(
+            std::fs::read(path.join("login-sentinel")).unwrap(),
+            b"retained"
+        );
+        let context = crate::cloud::crypto::Context {
+            account: "fixture",
+            object: "profile",
+            kind: "config",
+            revision: 1,
+            epoch: 1,
+            deleted: false,
+            generation: 0,
+            writer: "fixture",
+        };
+        let key = crate::cloud::crypto::random_key().unwrap();
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let encrypted = crate::cloud::crypto::seal(&key, &context, &bytes).unwrap();
+        let plain = crate::cloud::crypto::open(&key, &context, &encrypted).unwrap();
+        let decoded =
+            crate::cloud::model::Document::parse(serde_json::from_slice(&plain).unwrap()).unwrap();
+        assert!(decoded.preferences.fingerprint == first.preferences.fingerprint);
+    }
     use super::*;
+    #[test]
+    fn independent_privacy_controls_are_applied_and_reversible_in_native_profiles() {
+        for browser in ["chrome", "edge", "firefox"] {
+            let root = test_dir();
+            let mut d = draft("Privacy controls");
+            d.browser = browser.into();
+            d.preferences.privacy = false;
+            d.preferences.advanced=serde_json::from_value(serde_json::json!({"doNotTrack":"on","webRtc":"public","blockWebgl":true,"blockWebgpu":true,"blockSpeech":true,"blockBattery":browser=="firefox","canvasProtection":browser=="firefox"})).unwrap();
+            let p = create(root.path(), d.clone(), None).unwrap();
+            let dir = path(root.path(), &p).unwrap();
+            if browser == "firefox" {
+                for (key, value) in [
+                    ("privacy.donottrackheader.enabled", true),
+                    ("media.peerconnection.ice.no_host", true),
+                    ("webgl.disabled", true),
+                    ("dom.webgpu.enabled", false),
+                    ("media.webspeech.synth.enabled", false),
+                    ("dom.battery.enabled", false),
+                    ("privacy.fingerprintingProtection", true),
+                ] {
+                    assert_eq!(
+                        crate::firefox::snapshot(&dir, key).unwrap()["user"],
+                        serde_json::json!(value),
+                        "{key}"
+                    );
+                }
+            } else {
+                let prefs: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(dir.join("Default/Preferences")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(prefs["enable_do_not_track"], true);
+                assert_eq!(
+                    prefs["webrtc"]["ip_handling_policy"],
+                    "default_public_interface_only"
+                );
+            }
+            d.preferences.advanced = AdvancedSettings::default();
+            update(root.path(), &p.id, d).unwrap();
+            apply_pending_preferences(root.path(), &p.id).unwrap();
+            if browser == "firefox" {
+                assert_eq!(
+                    crate::firefox::snapshot(&dir, "dom.webgpu.enabled").unwrap()["user"],
+                    serde_json::Value::Null
+                );
+                assert_eq!(
+                    crate::firefox::snapshot(&dir, "privacy.fingerprintingProtection").unwrap()
+                        ["user"],
+                    serde_json::Value::Null
+                );
+            }
+        }
+    }
     #[test]
     fn removes_default_name_prefix_without_renaming_custom_profiles() {
         let root = test_dir();
@@ -1138,6 +1452,7 @@ mod tests {
         let created = create(root.path(), d, None).unwrap();
         let mut old = load(root.path()).unwrap();
         let p = old.iter_mut().find(|p| p.id == created.id).unwrap();
+        p.preferences.fingerprint = None; // This fixture models an older persisted profile.
         p.preferences.regional.timezone_mode = "custom".into();
         p.preferences.regional.timezone = "America/Los_Angeles".into();
         p.preferences.regional.location_mode = "ip".into();
@@ -1164,6 +1479,7 @@ mod tests {
             "language":"en-GB,en", "privacy":false, "fontRestriction":false, "startupUrl":"about:blank"
         })).unwrap();
         assert_eq!(prefs.language, "en-GB,en");
+        assert!(prefs.fingerprint.is_none());
         assert!(prefs.advanced == AdvancedSettings::default());
         assert!(serde_json::from_value::<AdvancedSettings>(
             serde_json::json!({"notifications":"invalid"})

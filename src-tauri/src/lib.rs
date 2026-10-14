@@ -6,6 +6,7 @@ mod cloud;
 mod data_root;
 mod engine;
 mod firefox;
+mod fingerprint;
 mod fonts;
 mod platform;
 mod profile_commands;
@@ -546,6 +547,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            profile_commands::generate_fingerprint_seed,
             cloud::sharing::sharing_action,
             browser_sites::get_browser_site_catalog,
             browser_sites::get_browser_site_icon,

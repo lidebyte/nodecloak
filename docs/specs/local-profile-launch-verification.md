@@ -1,5 +1,11 @@
 # Local profile launch and partitioned storage
 
+This document records the 2.1.1 launch fallback. The subsequent partition-aware
+session migration implementation is documented in
+`partitioned-session-storage-validation.md`; normal supported partitions now
+synchronize. The fallback remains for unsupported namespaces, with a regression
+fixture using a Firefox container rather than an ordinary site partition.
+
 ## Report
 
 A local Firefox profile that had previously been shared failed to launch with

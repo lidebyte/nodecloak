@@ -27,7 +27,7 @@ The implementation remains uncommitted. The Go account service was deployed on 2
 
 The user has exercised actual Google login after registering the callback. SMTP delivery was verified using the supplied server credentials, but interactive email-code redemption and 2FA email login remain untested in production. Unconfigured providers return 503 rather than simulating success. The new full Rust/cloud flow has not been built/run on macOS; earlier Windows↔macOS synthetic browser API probes established basic migration feasibility, but are separate from this implementation's full integration.
 
-Third-party websites can reject copied sessions or require reauthentication. The tested cookies were persistent; browser-exit cookies may disappear before export. Unsupported partitioned storage/non-exportable keys fail explicitly. Snapshot scope and IndexedDB generator limitations are documented in `account-cloud-sync.md`.
+Third-party websites can reject copied sessions or require reauthentication. The tested cookies were persistent; browser-exit cookies may disappear before export. Standard partitioned persistent storage is now supported; see `partitioned-session-storage-validation.md`. Opaque/nonce partitions, unsupported containers, named storage buckets and non-exportable keys fail explicitly. Snapshot scope and IndexedDB generator limitations are documented in `account-cloud-sync.md`.
 
 ## Reproduction
 

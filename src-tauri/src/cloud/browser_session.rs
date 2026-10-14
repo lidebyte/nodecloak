@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, HashSet},
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Stdio},
@@ -13,7 +13,8 @@ use std::{
 };
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
-pub(super) const PARTITIONED_STORAGE_ERROR: &str = "此副本包含分区网站存储，暂不支持完整迁移";
+pub(super) const PARTITIONED_STORAGE_ERROR: &str =
+    "此副本包含尚未支持迁移的分区网站存储，已保留本机数据";
 
 pub fn origin(v: &str) -> Result<String, String> {
     let u = reqwest::Url::parse(v).map_err(|_| "网站来源无效")?;
@@ -59,6 +60,24 @@ pub struct Cookie {
     pub expires: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_key: Option<Partition>,
+    #[serde(
+        default = "default_true",
+        skip_serializing_if = "is_true",
+        rename = "partitionedAttribute"
+    )]
+    pub partitioned_attribute: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "firefoxPartitionKey"
+    )]
+    pub firefox_partition_key: Option<String>,
+}
+fn default_true() -> bool {
+    true
+}
+fn is_true(v: &bool) -> bool {
+    *v
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -71,6 +90,27 @@ pub struct Partition {
 pub struct Site {
     pub origin: String,
     pub state: Value,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "partitionKey"
+    )]
+    pub partition_key: Option<Partition>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SiteKey {
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<Partition>,
+}
+impl Site {
+    fn key(&self) -> SiteKey {
+        SiteKey {
+            origin: self.origin.clone(),
+            partition_key: self.partition_key.clone(),
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +120,18 @@ pub struct Snapshot {
     pub origins: Vec<Site>,
 }
 impl Snapshot {
+    fn from_parts(cookies: Vec<Cookie>, origins: Vec<Site>) -> Result<Self, String> {
+        let schema = if cookies
+            .iter()
+            .any(|c| c.partition_key.is_some() || c.same_site == "Default")
+            || origins.iter().any(|s| s.partition_key.is_some())
+        {
+            2
+        } else {
+            1
+        };
+        Self::parse(json!({"schema":schema,"cookies":cookies,"origins":origins}))
+    }
     pub fn empty() -> Self {
         Self {
             schema: 1,
@@ -92,7 +144,7 @@ impl Snapshot {
             return Err("登录数据超过 8 MiB，暂不支持同步".into());
         };
         let mut s: Self = serde_json::from_value(v).map_err(|_| "登录数据格式无效")?;
-        if s.schema != 1 || s.cookies.len() > 10000 || s.origins.len() > 500 {
+        if ![1, 2].contains(&s.schema) || s.cookies.len() > 10000 || s.origins.len() > 500 {
             return Err("登录数据版本或数量超过限制".into());
         }
         for c in &s.cookies {
@@ -107,7 +159,8 @@ impl Snapshot {
                 || c.path.len() > 4096
                 || !c.path.starts_with('/')
                 || !c.expires.is_finite()
-                || !matches!(c.same_site.as_str(), "Lax" | "Strict" | "None")
+                || !(matches!(c.same_site.as_str(), "Lax" | "Strict" | "None")
+                    || s.schema >= 2 && c.same_site == "Default")
             {
                 return Err("Cookie 范围或内容无效".into());
             };
@@ -116,14 +169,50 @@ impl Snapshot {
                     return Err("Cookie 分区无效".into());
                 }
             }
+            if !c.partitioned_attribute && (s.schema < 2 || c.partition_key.is_none()) {
+                return Err("Cookie 分区属性无效".into());
+            }
+            if let Some(native) = &c.firefox_partition_key {
+                if s.schema < 2 || native.len() > 4096 {
+                    return Err("Cookie 原生分区无效".into());
+                }
+                let raw = super::session_storage::firefox_partition(native)?
+                    .ok_or("Cookie 原生分区无效")?;
+                let p = c.partition_key.as_ref().ok_or("Cookie 原生分区无效")?;
+                if raw.top_level_site != p.top_level_site {
+                    return Err("Cookie 原生分区与快照不一致".into());
+                }
+                let scheme = reqwest::Url::parse(&p.top_level_site)
+                    .map_err(|_| "Cookie 分区无效")?
+                    .scheme()
+                    .to_owned();
+                let cross = !super::session_storage::same_site(
+                    &format!("{scheme}://{}", c.domain.trim_start_matches('.')),
+                    &p.top_level_site,
+                );
+                if raw.has_cross_site_ancestor && cross {
+                    return Err(PARTITIONED_STORAGE_ERROR.into());
+                }
+                if (raw.has_cross_site_ancestor || cross) != p.has_cross_site_ancestor {
+                    return Err("Cookie 原生分区与快照不一致".into());
+                }
+            }
         }
         let mut seen = BTreeSet::new();
         for site in &s.origins {
             if origin(&site.origin)? != site.origin
-                || !seen.insert(&site.origin)
+                || !seen.insert(site.key())
                 || !site.state.is_object()
             {
                 return Err("网站存储来源无效".into());
+            }
+            if let Some(p) = &site.partition_key {
+                if s.schema < 2
+                    || origin(&p.top_level_site)? != p.top_level_site
+                    || !p.has_cross_site_ancestor
+                {
+                    return Err("网站存储分区无效".into());
+                }
             }
         }
         s.cookies.sort_by(|a, b| {
@@ -134,7 +223,7 @@ impl Snapshot {
                 &b.partition_key,
             ))
         });
-        s.origins.sort_by(|a, b| a.origin.cmp(&b.origin));
+        s.origins.sort_by_key(Site::key);
         for site in &mut s.origins {
             canonical_storage(&mut site.state)?;
         }
@@ -191,7 +280,7 @@ fn copy_tree(src: &Path, dst: &Path, budget: &mut u64) -> Result<(), String> {
     }
     Ok(())
 }
-fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<String>, String> {
+fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<SiteKey>, String> {
     let mut out = BTreeSet::new();
     if browser == "firefox" {
         let dir = path.join("storage/default");
@@ -205,14 +294,11 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<String>, String> 
                 if !n.starts_with("https+++") && !n.starts_with("http+++") {
                     continue;
                 };
-                if n.contains('^') {
-                    return Err(PARTITIONED_STORAGE_ERROR.into());
-                };
-                let u = n.replacen("+++", "://", 1).replace('+', ":");
-                out.insert(origin(&u)?);
+                out.insert(super::session_storage::firefox_key(&n)?);
             }
         }
     } else {
+        super::session_storage::quota_keys(path, &mut out)?;
         let dir = path.join("Default/IndexedDB");
         if dir.exists() {
             for e in std::fs::read_dir(dir).map_err(|_| "无法读取网站存储")? {
@@ -230,7 +316,10 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<String>, String> 
                             } else {
                                 format!("{scheme}://{host}:{port}")
                             };
-                            out.insert(origin(&u)?);
+                            out.insert(SiteKey {
+                                origin: origin(&u)?,
+                                partition_key: None,
+                            });
                         }
                     }
                 }
@@ -258,11 +347,7 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<String>, String> 
                 };
                 if let Ok(s) = std::str::from_utf8(raw) {
                     if s.starts_with("https://") || s.starts_with("http://") {
-                        let s = s.strip_suffix('/').unwrap_or(s);
-                        if s.contains('^') {
-                            return Err(PARTITIONED_STORAGE_ERROR.into());
-                        };
-                        out.insert(origin(s)?);
+                        out.insert(super::session_storage::chromium_key(s)?);
                     }
                 }
             }
@@ -281,6 +366,12 @@ struct Browser {
     target: String,
     session: Option<String>,
     closed: bool,
+    path: PathBuf,
+    waiting: HashSet<u64>,
+    replies: HashMap<u64, Value>,
+    frames: HashMap<String, String>,
+    eval_target: Option<String>,
+    eval_context: Option<(String, i64)>,
 }
 impl Browser {
     fn launch(browser: &str, path: &Path) -> Result<Self, String> {
@@ -294,7 +385,7 @@ impl Browser {
                 .arg(path)
                 .args(["--remote-debugging-port", "0", "about:blank"]);
         } else {
-            cmd.arg(format!("--user-data-dir={}", path.display()))
+            cmd.arg(format!("--user-data-dir={}", browser_launch_path(path)))
                 .args([
                     "--headless=new",
                     "--remote-debugging-address=127.0.0.1",
@@ -315,6 +406,7 @@ impl Browser {
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = platform::force_close_profile(path);
                 return Err(e);
             }
         };
@@ -323,6 +415,7 @@ impl Browser {
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = platform::force_close_profile(path);
                 return Err("无法连接隔离浏览器".into());
             }
         };
@@ -340,6 +433,12 @@ impl Browser {
             target: String::new(),
             session: None,
             closed: false,
+            path: path.to_owned(),
+            waiting: HashSet::new(),
+            replies: HashMap::new(),
+            frames: HashMap::new(),
+            eval_target: None,
+            eval_context: None,
         };
         if b.firefox {
             b.call(
@@ -347,7 +446,11 @@ impl Browser {
                 json!({"capabilities":{"alwaysMatch":{"acceptInsecureCerts":false}}}),
                 false,
             )?;
-            let v = b.call("browsingContext.create", json!({"type":"tab"}), false)?;
+            let v = b.call(
+                "browsingContext.create",
+                json!({"type":"tab","background":true}),
+                false,
+            )?;
             b.target = v["context"].as_str().ok_or("无法创建隔离页面")?.into();
             b.call(
                 "session.subscribe",
@@ -378,26 +481,52 @@ impl Browser {
                 json!({"patterns":[{"urlPattern":"*"}]}),
                 true,
             )?;
+            b.call("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"exclude":true}]}),true)?;
         }
         Ok(b)
     }
     fn send(&mut self, method: &str, params: Value, target: bool) -> Result<u64, String> {
+        let session = if target { self.session.clone() } else { None };
+        self.send_to(method, params, session.as_deref())
+    }
+    fn send_to(
+        &mut self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+    ) -> Result<u64, String> {
         self.next += 1;
         let mut v = json!({"id":self.next,"method":method,"params":params});
-        if target {
-            if let Some(s) = &self.session {
-                v["sessionId"] = json!(s)
-            }
-        };
+        if let Some(s) = session {
+            v["sessionId"] = json!(s)
+        }
         self.socket
             .send(Message::Text(v.to_string().into()))
             .map_err(|_| "隔离浏览器连接中断")?;
         Ok(self.next)
     }
     fn call(&mut self, method: &str, params: Value, target: bool) -> Result<Value, String> {
-        let id = self.send(method, params, target)?;
+        let session = if target { self.session.clone() } else { None };
+        self.call_to(method, params, session.as_deref())
+    }
+    fn call_to(
+        &mut self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+    ) -> Result<Value, String> {
+        let id = self.send_to(method, params, session)?;
+        self.waiting.insert(id);
+        let result = self.wait_for(id, method);
+        self.waiting.remove(&id);
+        result
+    }
+    fn wait_for(&mut self, id: u64, method: &str) -> Result<Value, String> {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(40) {
+            if let Some(v) = self.replies.remove(&id) {
+                return Self::result(v, method);
+            }
             match self.socket.read() {
                 Ok(Message::Text(text)) => {
                     if text.len() > 12 << 20 {
@@ -405,13 +534,44 @@ impl Browser {
                     };
                     let v: Value = serde_json::from_str(&text).map_err(|_| "浏览器响应无效")?;
                     if v["id"] == id {
-                        if v.get("error").is_some() || v["type"] == "error" {
-                            return Err(format!("浏览器拒绝登录数据操作 {method}"));
-                        };
-                        return Ok(v["result"].clone());
+                        return Self::result(v, method);
+                    }
+                    if let Some(other) = v["id"].as_u64() {
+                        if self.waiting.contains(&other) {
+                            self.replies.insert(other, v);
+                        }
+                        continue;
+                    }
+                    if v["method"] == "Target.attachedToTarget" {
+                        let s = v["params"]["sessionId"]
+                            .as_str()
+                            .ok_or("分区页面会话无效")?
+                            .to_owned();
+                        let target = v["params"]["targetInfo"]["targetId"]
+                            .as_str()
+                            .ok_or("分区页面无效")?
+                            .to_owned();
+                        self.frames.insert(target, s.clone());
+                        self.call_to(
+                            "Network.setBypassServiceWorker",
+                            json!({"bypass":true}),
+                            Some(&s),
+                        )?;
+                        self.call_to(
+                            "Fetch.enable",
+                            json!({"patterns":[{"urlPattern":"*"}]}),
+                            Some(&s),
+                        )?;
+                        self.call_to("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"exclude":true}]}),Some(&s))?;
+                        self.call_to("Runtime.runIfWaitingForDebugger", json!({}), Some(&s))?;
+                    }
+                    if v["method"] == "Target.detachedFromTarget" {
+                        if let Some(target) = v["params"]["targetId"].as_str() {
+                            self.frames.remove(target);
+                        }
                     }
                     if v["method"] == "Fetch.requestPaused" {
-                        self.send("Fetch.fulfillRequest",json!({"requestId":v["params"]["requestId"],"responseCode":200,"responseHeaders":[{"name":"Content-Type","value":"text/html"},{"name":"Cache-Control","value":"no-store"}],"body":B64.encode(b"<!doctype html><title>NodeCloak sync</title>")}),true)?;
+                        self.send_to("Fetch.fulfillRequest",json!({"requestId":v["params"]["requestId"],"responseCode":200,"responseHeaders":[{"name":"Content-Type","value":"text/html"},{"name":"Cache-Control","value":"no-store"}],"body":B64.encode(b"<!doctype html><title>NodeCloak sync</title>")}),v["sessionId"].as_str())?;
                     }
                     if v["method"] == "network.beforeRequestSent"
                         && v["params"]["isBlocked"] == true
@@ -431,40 +591,62 @@ impl Browser {
         }
         Err(format!("浏览器登录数据操作 {method} 超时"))
     }
+    fn result(v: Value, method: &str) -> Result<Value, String> {
+        if v.get("error").is_some() || v["type"] == "error" {
+            return Err(format!("浏览器拒绝登录数据操作 {method}"));
+        }
+        Ok(v["result"].clone())
+    }
     fn eval(&mut self, expression: &str) -> Result<Value, String> {
         if self.firefox {
-            let v=self.call("script.evaluate",json!({"expression":format!("(async()=>JSON.stringify(await ({expression})))()"),"target":{"context":self.target},"awaitPromise":true}),false)?;
+            let context = self.eval_target.as_ref().unwrap_or(&self.target).clone();
+            let v=self.call("script.evaluate",json!({"expression":format!("(async()=>JSON.stringify(await ({expression})))()"),"target":{"context":context},"awaitPromise":true}),false)?;
             if v["type"] == "exception" {
                 return Err("网站存储包含不可迁移的值，保留本机数据".into());
             };
             serde_json::from_str(v["result"]["value"].as_str().ok_or("网站存储响应无效")?)
                 .map_err(|_| "网站存储响应无效".into())
         } else {
-            let v = self.call(
-                "Runtime.evaluate",
-                json!({"expression":expression,"awaitPromise":true,"returnByValue":true}),
-                true,
-            )?;
+            let mut params =
+                json!({"expression":expression,"awaitPromise":true,"returnByValue":true});
+            let session = if let Some((s, id)) = &self.eval_context {
+                params["contextId"] = json!(id);
+                Some(s.clone())
+            } else {
+                self.session.clone()
+            };
+            let v = self.call_to("Runtime.evaluate", params, session.as_deref())?;
             if v.get("exceptionDetails").is_some() {
                 return Err("网站存储包含不可迁移的值，保留本机数据".into());
             };
             Ok(v["result"]["value"].clone())
         }
     }
-    fn site(&mut self, site: &str) -> Result<(), String> {
+    fn site(&mut self, scope: &SiteKey) -> Result<(), String> {
+        self.eval_target = None;
+        self.eval_context = None;
+        let site = scope
+            .partition_key
+            .as_ref()
+            .map(|p| p.top_level_site.as_str())
+            .unwrap_or(&scope.origin);
+        let url = format!("{site}/.__nodecloak_sync_{}", uuid::Uuid::new_v4().simple());
         if self.firefox {
             self.call(
                 "browsingContext.navigate",
-                json!({"context":self.target,"url":format!("{site}/"),"wait":"none"}),
+                json!({"context":self.target,"url":url,"wait":"none"}),
                 false,
             )?;
         } else {
-            self.call("Page.navigate", json!({"url":format!("{site}/")}), true)?;
+            self.call("Page.navigate", json!({"url":url}), true)?;
         }
         let start = Instant::now();
         loop {
-            let r = self.eval("location.origin")?;
-            if r == site {
+            let expression = format!(
+                "location.href==={} && document.readyState!=='loading'",
+                json!(url)
+            );
+            if self.eval(&expression).ok() == Some(json!(true)) {
                 break;
             };
             if start.elapsed() > Duration::from_secs(15) {
@@ -472,12 +654,121 @@ impl Browser {
             };
             std::thread::sleep(Duration::from_millis(50));
         }
+        if let Some(p) = &scope.partition_key {
+            let a = reqwest::Url::parse(&scope.origin).map_err(|_| "网站来源无效")?;
+            let top = reqwest::Url::parse(&p.top_level_site).map_err(|_| "网站分区无效")?;
+            let same_site = a.scheme() == top.scheme()
+                && (a.host_str() == top.host_str()
+                    || a.host_str().is_some_and(|h| {
+                        h.ends_with(&format!(".{}", top.host_str().unwrap_or("")))
+                    }));
+            if p.has_cross_site_ancestor && (self.firefox || same_site) {
+                self.frame(&format!(
+                    "https://nc-{}.invalid",
+                    uuid::Uuid::new_v4().simple()
+                ))?;
+            }
+            self.frame(&scope.origin)?;
+            if !self.firefox {
+                let (session, _) = self.eval_context.clone().ok_or("分区页面尚未连接")?;
+                let target = self.eval_target.clone().ok_or("分区页面尚未连接")?;
+                let actual = self.call_to(
+                    "Storage.getStorageKeyForFrame",
+                    json!({"frameId":target}),
+                    Some(&session),
+                )?;
+                let actual = super::session_storage::chromium_key(
+                    actual["storageKey"].as_str().ok_or("网站分区键无效")?,
+                )?;
+                if actual != *scope {
+                    return Err("浏览器网站分区与快照不一致，保留本机数据".into());
+                }
+            }
+        }
         let code = format!(
             "(()=>{{{};return true;}})()",
             include_str!("session_codec.js")
         );
         self.eval(&code)?;
         Ok(())
+    }
+    fn frame(&mut self, site: &str) -> Result<(), String> {
+        let url = format!(
+            "{site}/.__nodecloak_frame_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let expression=format!("(()=>{{const f=document.createElement('iframe');f.src={};document.documentElement.appendChild(f);return true;}})()",json!(url));
+        self.eval(&expression)?;
+        let started = Instant::now();
+        let parent_session = self
+            .eval_context
+            .as_ref()
+            .map(|(s, _)| s.clone())
+            .or_else(|| self.session.clone());
+        while started.elapsed() < Duration::from_secs(15) {
+            if self.firefox {
+                let tree = self.call(
+                    "browsingContext.getTree",
+                    json!({"root":self.target,"maxDepth":8}),
+                    false,
+                )?;
+                if let Some(context) = find_frame(&tree["contexts"][0], &url, true) {
+                    self.eval_target = Some(context);
+                    if self
+                        .eval(&format!(
+                            "location.href==={} && document.readyState!=='loading'",
+                            json!(url)
+                        ))
+                        .ok()
+                        == Some(json!(true))
+                    {
+                        return Ok(());
+                    }
+                }
+            } else {
+                let tree = self.call("Page.getFrameTree", json!({}), true)?;
+                let mut found = find_frame(&tree["frameTree"], &url, false).map(|id| {
+                    let s = self
+                        .frames
+                        .get(&id)
+                        .cloned()
+                        .or_else(|| parent_session.clone());
+                    (id, s)
+                });
+                if found.is_none() {
+                    for s in self.frames.values().cloned().collect::<Vec<_>>() {
+                        if let Ok(tree) = self.call_to("Page.getFrameTree", json!({}), Some(&s)) {
+                            if let Some(id) = find_frame(&tree["frameTree"], &url, false) {
+                                found = Some((id, Some(s)));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some((id, Some(s))) = found {
+                    let world=self.call_to("Page.createIsolatedWorld",json!({"frameId":id,"worldName":"nodecloak-session","grantUniveralAccess":false}),Some(&s))?;
+                    self.eval_context = Some((
+                        s,
+                        world["executionContextId"]
+                            .as_i64()
+                            .ok_or("分区执行上下文无效")?,
+                    ));
+                    self.eval_target = Some(id);
+                    if self
+                        .eval(&format!(
+                            "location.href==={} && document.readyState!=='loading'",
+                            json!(url)
+                        ))
+                        .ok()
+                        == Some(json!(true))
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        Err("无法进入隔离分区网站存储".into())
     }
     fn cookies(&mut self) -> Result<Vec<Cookie>, String> {
         let v = self.call(
@@ -511,9 +802,10 @@ impl Browser {
                 path: c["path"].as_str().ok_or("Cookie 无效")?.into(),
                 secure: c["secure"] == true,
                 http_only: c["httpOnly"] == true,
-                same_site: match c["sameSite"].as_str().unwrap_or("None") {
+                same_site: match c["sameSite"].as_str().unwrap_or("Default") {
                     "strict" | "Strict" => "Strict",
                     "lax" | "Lax" => "Lax",
+                    "default" | "Default" => "Default",
                     _ => "None",
                 }
                 .into(),
@@ -527,6 +819,8 @@ impl Browser {
                     .filter(|v| v.is_object())
                     .map(|v| serde_json::from_value(v.clone()).map_err(|_| "Cookie 分区无效"))
                     .transpose()?,
+                partitioned_attribute: true,
+                firefox_partition_key: None,
             });
         }
         Ok(result)
@@ -542,12 +836,11 @@ impl Browser {
             false,
         )?;
         if self.firefox {
-            for c in cookies {
-                if c.partition_key.is_some() {
-                    return Err("Firefox 暂不支持导入此 Cookie 分区".into());
-                };
+            for c in cookies.iter().filter(|c| c.partition_key.is_none()) {
                 let mut v = json!({"name":c.name,"value":{"type":"string","value":c.value},"domain":c.domain,"path":c.path,"secure":c.secure,"httpOnly":c.http_only,"sameSite":c.same_site.to_lowercase()});
                 if c.expires > 0. {
+                    // BiDi accepts integer seconds; the closed native database
+                    // restores its millisecond precision before final readback.
                     v["expiry"] = json!(c.expires.floor() as u64)
                 };
                 self.call("storage.setCookie", json!({"cookie":v}), false)?;
@@ -555,7 +848,14 @@ impl Browser {
         } else {
             let mut list = Vec::new();
             for c in cookies {
+                if !c.partitioned_attribute {
+                    return Err("此 Cookie 分区属性仅支持 Firefox，保留本机数据".into());
+                }
                 let mut v = serde_json::to_value(c).map_err(|_| "Cookie 无效")?;
+                v.as_object_mut().unwrap().remove("firefoxPartitionKey");
+                if c.same_site == "Default" {
+                    v.as_object_mut().unwrap().remove("sameSite");
+                }
                 if c.expires < 0. {
                     v.as_object_mut().unwrap().remove("expires");
                 }
@@ -582,7 +882,9 @@ impl Browser {
                 .try_wait()
                 .map_err(|_| "无法等待浏览器关闭")?
                 .is_some()
+                && platform::profile_process_ids(&self.path)?.is_empty()
             {
+                platform::ensure_profile_closed(&self.path)?;
                 self.closed = true;
                 return Ok(());
             };
@@ -591,13 +893,46 @@ impl Browser {
         Err("隔离浏览器未正常关闭，取消同步".into())
     }
 }
+fn browser_launch_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        // Chromium's IndexedDB SQLite backend rejects a verbatim Windows path.
+        // This changes only the CLI spelling of the same validated staged path.
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        if let Some(local) = value.strip_prefix(r"\\?\") {
+            if local.as_bytes().get(1) == Some(&b':') {
+                return local.into();
+            }
+        }
+    }
+    value.into_owned()
+}
 impl Drop for Browser {
     fn drop(&mut self) {
         if !self.closed {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            let _ = platform::force_close_profile(&self.path);
         }
     }
+}
+fn find_frame(tree: &Value, url: &str, firefox: bool) -> Option<String> {
+    let node = if firefox { tree } else { &tree["frame"] };
+    if node["url"] == url {
+        return node[if firefox { "context" } else { "id" }]
+            .as_str()
+            .map(str::to_owned);
+    }
+    tree[if firefox { "children" } else { "childFrames" }]
+        .as_array()
+        .and_then(|children| {
+            children
+                .iter()
+                .find_map(|child| find_frame(child, url, firefox))
+        })
 }
 struct Stage {
     temp: tempfile::TempDir,
@@ -735,15 +1070,26 @@ pub fn export_profile(browser: &str, profile: &Path) -> Result<Snapshot, String>
     let stage = Stage::new(browser, profile)?;
     let origins = disk_origins(browser, &stage.path)?;
     let mut b = Browser::launch(browser, &stage.path)?;
-    let cookies = b.cookies()?;
+    let mut cookies = b.cookies()?;
     let mut sites = Vec::new();
     for o in origins {
         b.site(&o)?;
         let state = b.eval("__ncSessionCodec.exportOrigin()")?;
-        sites.push(Site { origin: o, state });
+        if state["local"].as_array().is_some_and(|v| !v.is_empty())
+            || state["databases"].as_array().is_some_and(|v| !v.is_empty())
+        {
+            sites.push(Site {
+                origin: o.origin,
+                partition_key: o.partition_key,
+                state,
+            });
+        }
     }
     b.close()?;
-    Snapshot::parse(json!({"schema":1,"cookies":cookies,"origins":sites}))
+    if browser == "firefox" {
+        cookies = super::session_storage::firefox_cookies(&stage.path)?;
+    }
+    Snapshot::from_parts(cookies, sites)
 }
 pub fn restore_profile(
     browser: &str,
@@ -754,7 +1100,11 @@ pub fn restore_profile(
     recover(profile)?;
     let stage = Stage::new(browser, profile)?;
     let mut origins = disk_origins(browser, &stage.path)?;
-    origins.extend(snapshot.origins.iter().map(|s| s.origin.clone()));
+    if browser == "firefox" {
+        // Reject unknown Cookie-only containers before BiDi can clear them.
+        super::session_storage::firefox_cookies(&stage.path)?;
+    }
+    origins.extend(snapshot.origins.iter().map(Site::key));
     let mut b = Browser::launch(browser, &stage.path)?;
     for o in origins {
         b.site(&o)?;
@@ -762,7 +1112,7 @@ pub fn restore_profile(
         let state = snapshot
             .origins
             .iter()
-            .find(|s| s.origin == o)
+            .find(|s| s.key() == o)
             .map(|s| &s.state)
             .unwrap_or(&empty);
         let expression = format!(
@@ -773,12 +1123,61 @@ pub fn restore_profile(
     }
     b.set_cookies(&snapshot.cookies)?;
     let cookies = b.cookies()?;
-    for c in snapshot
+    let expected = snapshot
         .cookies
+        .iter()
+        .filter(|c| browser != "firefox" || c.partition_key.is_none())
+        .map(|c| {
+            let mut c = c.clone();
+            if browser != "firefox" {
+                c.firefox_partition_key = None;
+            }
+            c
+        })
+        .collect::<Vec<_>>();
+    verify_cookies(&expected, &cookies)?;
+    let mut sites = Vec::new();
+    for site in &snapshot.origins {
+        b.site(&site.key())?;
+        let mut state = b.eval("__ncSessionCodec.exportOrigin()")?;
+        canonical_storage(&mut state)?;
+        if state != site.state {
+            return Err("网站存储写入复检不一致，取消导入并保留本机数据".into());
+        };
+        sites.push(Site {
+            origin: site.origin.clone(),
+            partition_key: site.partition_key.clone(),
+            state,
+        });
+    }
+    b.close()?;
+    let mut cookies = cookies;
+    if browser == "firefox" {
+        super::session_storage::write_firefox_partitioned_cookies(&stage.path, &snapshot.cookies)?;
+        // Reopen the isolated profile so Firefox validates and loads its native
+        // cookie records before trusting the persisted partition identities.
+        let mut check = Browser::launch(browser, &stage.path)?;
+        let _ = check.cookies()?;
+        check.close()?;
+        cookies = super::session_storage::firefox_cookies(&stage.path)?;
+        let keys = disk_origins(browser, &stage.path)?;
+        for site in &snapshot.origins {
+            if !keys.contains(&site.key()) {
+                return Err("Firefox 未保留全部网站存储分区，保留本机数据".into());
+            }
+        }
+        verify_cookies(&snapshot.cookies, &cookies)?;
+    }
+    let actual = Snapshot::from_parts(cookies, sites)?;
+    stage.commit(profile)?;
+    Ok(actual)
+}
+fn verify_cookies(expected: &[Cookie], actual: &[Cookie]) -> Result<(), String> {
+    for c in expected
         .iter()
         .filter(|c| c.expires < 0. || c.expires > chrono::Utc::now().timestamp() as f64)
     {
-        if !cookies.iter().any(|v| {
+        if !actual.iter().any(|v| {
             v.name == c.name
                 && v.value == c.value
                 && v.domain == c.domain
@@ -787,33 +1186,307 @@ pub fn restore_profile(
                 && v.http_only == c.http_only
                 && v.same_site == c.same_site
                 && v.partition_key == c.partition_key
+                && v.partitioned_attribute == c.partitioned_attribute
+                && (c.firefox_partition_key.is_none()
+                    || v.firefox_partition_key == c.firefox_partition_key)
+                && (if c.expires < 0. {
+                    v.expires < 0.
+                } else {
+                    v.expires > 0. && (v.expires - c.expires).abs() < 1.
+                })
         }) {
             return Err("浏览器未保留全部 Cookie，取消导入并保留本机数据".into());
         }
     }
-    let mut sites = Vec::new();
-    for site in &snapshot.origins {
-        b.site(&site.origin)?;
-        let mut state = b.eval("__ncSessionCodec.exportOrigin()")?;
-        canonical_storage(&mut state)?;
-        if state != site.state {
-            return Err("网站存储写入复检不一致，取消导入并保留本机数据".into());
-        };
-        sites.push(Site {
-            origin: site.origin.clone(),
-            state,
-        });
-    }
-    let actual = Snapshot::parse(json!({"schema":1,"cookies":cookies,"origins":sites}))?;
-    b.close()?;
-    stage.commit(profile)?;
-    Ok(actual)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn cookie_readback_rejects_changed_expiry_and_native_partition_attributes() {
+        let input=Snapshot::parse(json!({"schema":2,"cookies":[{"name":"session","value":"token","domain":"login.example","path":"/","secure":true,"httpOnly":true,"sameSite":"None","expires":chrono::Utc::now().timestamp()+604800,"partitionKey":{"topLevelSite":"https://shop.example","hasCrossSiteAncestor":true},"firefoxPartitionKey":"^partitionKey=%28https%2Cshop.example%29"}],"origins":[]})).unwrap();
+        for change in 0..3 {
+            let mut actual = input.cookies.clone();
+            match change {
+                0 => actual[0].expires += 86400.,
+                1 => actual[0].partitioned_attribute = false,
+                _ => actual[0].firefox_partition_key = None,
+            }
+            assert!(
+                verify_cookies(&input.cookies, &actual).is_err(),
+                "changed field {change}"
+            );
+        }
+        assert!(verify_cookies(&input.cookies, &input.cookies).is_ok());
+    }
+    #[test]
+    fn partitioned_snapshot_preserves_same_origin_in_distinct_top_level_sites() {
+        let value = json!({"schema":2,"cookies":[],"origins":[
+            {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://shop.example","hasCrossSiteAncestor":true},"state":{"local":[["session","shop"]],"databases":[]}},
+            {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://work.example","hasCrossSiteAncestor":true},"state":{"local":[["session","work"]],"databases":[]}},
+            {"origin":"https://login.example","state":{"local":[["session","direct"]],"databases":[]}}
+        ]});
+        let snapshot = Snapshot::parse(value).unwrap();
+        let output: Value = serde_json::from_slice(&snapshot.bytes().unwrap()).unwrap();
+        assert_eq!(output["origins"].as_array().unwrap().len(), 3);
+        assert!(output["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |s| s["partitionKey"]["topLevelSite"] == "https://shop.example"
+                    && s["state"]["local"][0][1] == "shop"
+            ));
+        assert!(output["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |s| s["partitionKey"]["topLevelSite"] == "https://work.example"
+                    && s["state"]["local"][0][1] == "work"
+            ));
+        assert!(Snapshot::parse(json!({"schema":1,"cookies":[],"origins":[]})).is_ok());
+        let root = super::super::crypto::random_key().unwrap();
+        let ctx = super::super::crypto::Context {
+            account: "synthetic-account",
+            object: "synthetic-profile",
+            kind: "session",
+            revision: 1,
+            epoch: 1,
+            deleted: false,
+            generation: 1,
+            writer: "synthetic-device",
+        };
+        let envelope = super::super::crypto::seal(&root, &ctx, &snapshot.bytes().unwrap()).unwrap();
+        let plain = super::super::crypto::open(&root, &ctx, &envelope).unwrap();
+        let recovered = Snapshot::parse(serde_json::from_slice(&plain).unwrap()).unwrap();
+        assert_eq!(recovered.bytes().unwrap(), snapshot.bytes().unwrap());
+    }
+    #[test]
+    fn partitioned_firefox_storage_discovery_keeps_top_level_sites_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "https+++login.example",
+            "https+++login.example^partitionKey=%28https%2Cshop.example%29",
+            "https+++login.example^partitionKey=%28https%2Cwork.example%29",
+        ] {
+            std::fs::create_dir_all(dir.path().join("storage/default").join(name)).unwrap();
+        }
+        let found = serde_json::to_value(disk_origins("firefox", dir.path()).unwrap()).unwrap();
+        assert_eq!(
+            found,
+            json!([
+                {"origin":"https://login.example"},
+                {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://shop.example","hasCrossSiteAncestor":true}},
+                {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://work.example","hasCrossSiteAncestor":true}}
+            ])
+        );
+    }
+    #[test]
+    #[ignore = "Offline installed-browser partition migration using synthetic temporary profiles only"]
+    fn installed_browsers_preserve_partitioned_cookie_localstorage_and_indexeddb() {
+        for browser in ["chrome", "edge", "firefox"].into_iter().filter(|name| {
+            std::env::var("NODECLOAK_TEST_BROWSER")
+                .map(|v| v == *name)
+                .unwrap_or(true)
+        }) {
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+            let part = |top: &str| json!({"topLevelSite":top,"hasCrossSiteAncestor":true});
+            let state = |value: &str| json!({"local":[["session",value]],"databases":[{"name":"session-db","version":1,"stores":[{"name":"tokens","keyPath":null,"autoIncrement":false,"indexes":[],"rows":[[{"root":"session","nodes":[]},{"root":value,"nodes":[]}]]}]}]});
+            let cookie = |value: &str, partition: Value| {
+                let mut c = json!({"name":"session","value":value,"domain":"login.example","path":"/","secure":true,"httpOnly":true,"sameSite":"None","expires":chrono::Utc::now().timestamp()+604800});
+                if !partition.is_null() {
+                    if browser == "firefox" {
+                        let host = partition["topLevelSite"]
+                            .as_str()
+                            .unwrap()
+                            .strip_prefix("https://")
+                            .unwrap();
+                        c["firefoxPartitionKey"] = json!(format!(
+                            "^partitionKey=%28https%2C{host}{}%29",
+                            if value == "bounce" { "%2Cf" } else { "" }
+                        ));
+                        if value == "work" {
+                            c["partitionedAttribute"] = json!(false);
+                        }
+                    }
+                    c["partitionKey"] = partition;
+                }
+                c
+            };
+            let mut input=Snapshot::parse(json!({"schema":2,"cookies":[cookie("direct",Value::Null),cookie("shop",part("https://shop.example")),cookie("work",part("https://work.example"))],"origins":[
+                {"origin":"https://login.example","state":state("direct")},
+                {"origin":"https://login.example","partitionKey":part("https://shop.example"),"state":state("shop")},
+                {"origin":"https://login.example","partitionKey":part("https://work.example"),"state":state("work")}
+            ]})).unwrap();
+            let bounce = part("https://login.example");
+            input
+                .cookies
+                .push(serde_json::from_value(cookie("bounce", bounce.clone())).unwrap());
+            input.origins.push(serde_json::from_value(json!({"origin":"https://login.example","partitionKey":bounce,"state":state("bounce")})).unwrap());
+            let mut idb_only = state("idb-only");
+            idb_only["local"] = json!([]);
+            input.origins.push(serde_json::from_value(json!({"origin":"https://db.example","partitionKey":part("https://work.example"),"state":idb_only})).unwrap());
+            let visible = input
+                .cookies
+                .iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    c.name = "visible".into();
+                    c.http_only = false;
+                    c
+                })
+                .collect::<Vec<_>>();
+            input.cookies.extend(visible);
+            let mut default_cookie: Cookie =
+                serde_json::from_value(cookie("default-policy", Value::Null)).unwrap();
+            default_cookie.name = "default-policy".into();
+            default_cookie.same_site = "Default".into();
+            input.cookies.push(default_cookie);
+            input = Snapshot::parse(serde_json::to_value(input).unwrap()).unwrap();
+            let source = dir.path().join("source");
+            restore_profile(browser, &source, &input)
+                .unwrap_or_else(|e| panic!("{browser} initial partition import: {e}"));
+            let exported = export_profile(browser, &source)
+                .unwrap_or_else(|e| panic!("{browser} partition export: {e}"));
+            assert_eq!(
+                exported.cookies.len(),
+                input.cookies.len(),
+                "{browser} cookie count"
+            );
+            for site in &input.origins {
+                let actual = exported.origins.iter().find(|s| s.key() == site.key());
+                assert!(
+                    actual.is_some(),
+                    "{browser} missing namespace {}",
+                    serde_json::to_value(site.key()).unwrap()
+                );
+                assert_eq!(
+                    actual.unwrap().state,
+                    site.state,
+                    "{browser} namespace {}",
+                    serde_json::to_value(site.key()).unwrap()
+                );
+            }
+            assert_eq!(
+                exported.bytes().unwrap().as_slice(),
+                input.bytes().unwrap().as_slice(),
+                "{browser} initial partition readback"
+            );
+            let target = dir.path().join("target");
+            restore_profile(browser, &target, &exported)
+                .unwrap_or_else(|e| panic!("{browser} second-profile restore: {e}"));
+            let second = export_profile(browser, &target).unwrap();
+            assert_eq!(
+                second.bytes().unwrap().as_slice(),
+                input.bytes().unwrap().as_slice(),
+                "{browser} partition isolation across restart"
+            );
+            // Native document visibility must agree with the persisted metadata.
+            let stage = Stage::new(browser, &target).unwrap();
+            let mut check = Browser::launch(browser, &stage.path).unwrap();
+            for site in input
+                .origins
+                .iter()
+                .filter(|s| s.origin == "https://login.example")
+            {
+                check.site(&site.key()).unwrap();
+                let visible = check.eval("document.cookie").unwrap();
+                let raw = visible.as_str().unwrap();
+                let expected = site.state["local"][0][1].as_str().unwrap();
+                assert!(
+                    raw.split("; ").any(|s| s == format!("visible={expected}")),
+                    "{browser} {expected} native Cookie visibility: {raw}"
+                );
+                // Native policies may expose unpartitioned cookies as well.
+                // Other partitions must remain isolated from this document.
+                for other in ["shop", "work", "bounce"]
+                    .into_iter()
+                    .filter(|v| *v != expected)
+                {
+                    assert!(
+                        !raw.split("; ").any(|s| s == format!("visible={other}")),
+                        "{browser} leaked {other} into {expected}"
+                    );
+                }
+            }
+            check.close().unwrap();
+            drop(stage);
+            let mut invalid = input.clone();
+            invalid.origins[0].state["local"] = json!([["session", "changed-before-failure"]]);
+            invalid.origins.last_mut().unwrap().state["databases"][0]["stores"][0]["rows"][0][1] =
+                json!({"root":{"r":99},"nodes":[]});
+            assert!(
+                restore_profile(browser, &target, &invalid).is_err(),
+                "{browser} invalid structured clone accepted"
+            );
+            assert_eq!(
+                export_profile(browser, &target).unwrap().bytes().unwrap(),
+                input.bytes().unwrap(),
+                "{browser} failed staged import changed original profile"
+            );
+            input.origins.retain(|s| {
+                s.partition_key
+                    .as_ref()
+                    .is_none_or(|p| p.top_level_site != "https://shop.example")
+            });
+            input.cookies.retain(|c| {
+                c.partition_key
+                    .as_ref()
+                    .is_none_or(|p| p.top_level_site != "https://shop.example")
+            });
+            restore_profile(browser, &target, &input).unwrap();
+            let removed = export_profile(browser, &target).unwrap();
+            assert_eq!(
+                removed.bytes().unwrap().as_slice(),
+                input.bytes().unwrap().as_slice(),
+                "{browser} deleted partition cleared without changing other partitions"
+            );
+            println!("{browser}: partitioned Cookie, LocalStorage and IndexedDB migration/isolated deletion passed");
+        }
+    }
+    #[test]
+    fn partitioned_chromium_local_storage_discovery_keeps_top_level_sites_separate() {
+        use rusty_leveldb::{Options, DB};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Default/Local Storage/leveldb");
+        std::fs::create_dir_all(&path).unwrap();
+        {
+            let mut db = DB::open(&path, Options::default()).unwrap();
+            for key in [
+                "META:https://login.example/",
+                "META:https://login.example/^0https://shop.example",
+                "META:https://login.example/^0https://work.example",
+            ] {
+                db.put(key.as_bytes(), b"metadata").unwrap();
+            }
+            db.flush().unwrap();
+        }
+        let found = serde_json::to_value(disk_origins("chrome", dir.path()).unwrap()).unwrap();
+        assert_eq!(
+            found,
+            json!([
+                {"origin":"https://login.example"},
+                {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://shop.example","hasCrossSiteAncestor":true}},
+                {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://work.example","hasCrossSiteAncestor":true}}
+            ])
+        );
+    }
+    #[test]
+    #[ignore = "Installed Firefox fractional-expiry contract using only synthetic temporary Cookies"]
+    fn installed_firefox_preserves_fractional_cookie_expiry() {
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let expiry = chrono::Utc::now().timestamp() as f64 + 604800.125;
+        let input=Snapshot::parse(json!({"schema":2,"cookies":[{"name":"fractional","value":"synthetic","domain":"login.example","path":"/","secure":true,"httpOnly":true,"sameSite":"None","expires":expiry}],"origins":[]})).unwrap();
+        let path = dir.path().join("profile");
+        let actual = restore_profile("firefox", &path, &input).unwrap();
+        assert_eq!(actual.cookies[0].expires, expiry);
+        let exported = export_profile("firefox", &path).unwrap();
+        assert_eq!(exported.cookies[0].expires, expiry);
+    }
     #[test]
     fn interrupted_replacement_recovers_at_each_rename_boundary() {
         for phase in 0..4 {

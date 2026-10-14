@@ -3,6 +3,20 @@ vi.mock('./bridge',()=>({native:false}));
 const storage=new Map<string,string>();
 beforeEach(()=>{vi.resetModules();storage.clear();vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});});
 describe('browser profiles',()=>{
+  it('uses Firefox native concurrency preferences without enabling its automation interface',async()=>{
+    const api=await import('./browser-profiles');const prefs=api.defaults().preferences;prefs.fingerprint=undefined;prefs.advanced.hardwareConcurrency=4;
+    expect(api.requiresBrowserControl('firefox',prefs)).toBe(false);expect(api.requiresBrowserControl('chrome',prefs)).toBe(true);prefs.advanced.viewportWidth=1280;expect(api.requiresBrowserControl('firefox',prefs)).toBe(true);
+  });
+  it('requires bounded hardware and viewport values and preserves them through save/copy',async()=>{
+    const api=await import('./browser-profiles');const d=api.defaults();d.name='hardware';Object.assign(d.preferences.advanced,{hardwareConcurrency:4,viewportWidth:1280,viewportHeight:800});
+    const first=await api.saveProfile(d);const copy=await api.saveProfile({...d,name:'copy'},undefined,first.id);
+    expect(copy.preferences.advanced).toMatchObject({hardwareConcurrency:4,viewportWidth:1280,viewportHeight:800});expect(api.needsRegionalControl(copy.preferences)).toBe(true);
+    Object.assign(d.preferences.advanced,{hardwareConcurrency:3});expect(api.validateDraft(d)).toBeTruthy();Object.assign(d.preferences.advanced,{hardwareConcurrency:0,viewportWidth:10});expect(api.validateDraft(d)).toBeTruthy();
+  });
+  it('validates independent privacy settings for all engines and rejects unsupported canvas modes',async()=>{
+    const api=await import('./browser-profiles');
+    for(const browser of ['chrome','edge','firefox'] as const){const d=api.defaults();d.name='privacy';d.browser=browser;d.preferences.fingerprint=undefined;Object.assign(d.preferences.advanced,{doNotTrack:'on',webRtc:'public',blockWebgl:true,blockWebgpu:true,blockSpeech:true,blockBattery:browser==='firefox',canvasProtection:browser==='firefox'});expect(api.validateDraft(d)).toBeNull();Object.assign(d.preferences.advanced,{webRtc:'invalid'});expect(api.validateDraft(d)).toBeTruthy();}
+  });
   it('uses browser names and migrates only generated default names',async()=>{
     const api=await import('./browser-profiles');
     const profiles=await api.listProfiles();expect(profiles.map(p=>p.name)).toEqual(['Chrome','Edge','Firefox']);
@@ -45,7 +59,7 @@ describe('browser profiles',()=>{
     expect(p.preferences.language).toBe(preferences.language);expect(p.running).toBe(false);
   });
   it('copies advanced settings independently, defers running edits and rejects unsupported browser options',async()=>{
-    const api=await import('./browser-profiles');const d=api.defaults();d.name='strict';
+    const api=await import('./browser-profiles');const d=api.defaults();d.name='strict';d.preferences.fingerprint=undefined;
     d.preferences.advanced.resistFingerprinting=true;d.preferences.advanced.notifications='block';
     const first=await api.saveProfile(d);const copy=await api.saveProfile({...d,name:'copy'},undefined,first.id);
     expect(copy.preferences.advanced).toEqual(d.preferences.advanced);
@@ -56,20 +70,20 @@ describe('browser profiles',()=>{
     expect(api.validateDraft({...d,browser:'chrome'})).toContain('Firefox');
     expect(api.validateDraft({...d,preferences:{...d.preferences,advanced:{...d.preferences.advanced,notifications:'allow' as never}}})).toBeTruthy();
   });
-  it('removes legacy timezone and coordinate sources when loading saved profiles',async()=>{
+  it('preserves explicitly enabled timezone and coordinate sources when loading saved profiles',async()=>{
     const api=await import('./browser-profiles');const d=api.defaults();d.name='existing';
-    Object.assign(d.preferences.regional,{timezoneMode:'custom',timezone:'America/Los_Angeles',locationMode:'ip',latitude:35.68,longitude:139.69});
+    Object.assign(d.preferences.regional,{enabled:true,timezoneMode:'custom',timezone:'America/Los_Angeles',locationMode:'ip',latitude:35.68,longitude:139.69});
     d.preferences.advanced.location='allow';d.proxy.mode='direct';
     storage.set('claudedone.profiles-demo.v1',JSON.stringify([{...d,id:'legacy-firefox',running:false}]));
     const [p]=await api.listProfiles();
-    expect(p.preferences.regional.timezoneMode).toBe('system');
-    expect(p.preferences.regional.locationMode).toBe('system');
-    expect(p.preferences.advanced.location).toBe('ask');
+    expect(p.preferences.regional.timezoneMode).toBe('custom');
+    expect(p.preferences.regional.locationMode).toBe('ip');
+    expect(p.preferences.advanced.location).toBe('allow');
     expect(p.preferences.language).toBe('en-US,en');expect(p.proxy.mode).toBe('direct');
-    expect(api.needsRegionalControl(p.preferences)).toBe(false);
+    expect(api.needsRegionalControl(p.preferences)).toBe(true);
   });
   it('supports native location permission without requiring an emulated position',async()=>{
-    const api=await import('./browser-profiles');const d=api.defaults();d.name='native permissions';
+    const api=await import('./browser-profiles');const d=api.defaults();d.name='native permissions';d.preferences.fingerprint=undefined;
     d.preferences.advanced.location='allow';
     expect(api.validateDraft(d)).toBeNull();expect(api.needsRegionalControl(d.preferences)).toBe(false);
     d.preferences.advanced.resistFingerprinting=true;expect(api.validateDraft(d)).toBeNull();

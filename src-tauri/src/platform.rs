@@ -672,6 +672,30 @@ mod profile_tests {
             path
         ));
     }
+    #[cfg(windows)]
+    #[test]
+    fn staged_profile_process_matching_accepts_windows_extended_path_spelling() {
+        let processes = vec![
+            (
+                42,
+                vec![
+                    "chrome.exe".into(),
+                    "--user-data-dir=C:\\temp\\profile".into(),
+                ],
+            ),
+            (
+                43,
+                vec![
+                    "chrome.exe".into(),
+                    "--user-data-dir=C:\\temp\\profile-other".into(),
+                ],
+            ),
+        ];
+        assert_eq!(
+            profile_ids_from(&processes, Path::new(r"\\?\C:\temp\profile")),
+            vec![42]
+        );
+    }
 }
 
 pub fn spawn_browser(browser: &str, profile: &Path, url: &str) -> Result<(), String> {
@@ -713,6 +737,37 @@ fn spawn_browser_impl(
 ) -> Result<(), String> {
     let exe = browser_path(browser)?;
     let mut cmd = command(exe.to_str().ok_or("浏览器路径格式无效")?);
+    // Installed-browser integration fixtures opt into the browser's real
+    // headless mode on desktops that suspend background geolocation.
+    #[cfg(test)]
+    if std::env::var_os("NODECLOAK_TEST_HEADLESS_BROWSERS").is_some() {
+        cmd.arg(if browser == "firefox" {
+            "--headless"
+        } else {
+            "--headless=new"
+        });
+    }
+    if browser != "firefox" {
+        let file = profile.join("nodecloak-runtime-settings.json");
+        if file.exists() {
+            crate::profiles::guard_tree(&file)?;
+            let bytes = std::fs::read(&file).map_err(|_| "无法读取浏览器运行设置")?;
+            if bytes.len() > 16384 {
+                return Err("浏览器运行设置过大".into());
+            }
+            let options: crate::profiles::AdvancedSettings =
+                serde_json::from_slice(&bytes).map_err(|_| "浏览器运行设置无效")?;
+            if options.block_webgl {
+                cmd.args(["--disable-webgl", "--disable-webgl2"]);
+            }
+            if options.block_webgpu {
+                cmd.arg("--disable-features=WebGPUService");
+            }
+            if options.block_speech {
+                cmd.arg("--disable-blink-features=ScriptedSpeechSynthesis");
+            }
+        }
+    }
     if controlled {
         cmd.arg("--remote-debugging-port=0");
         if browser != "firefox" {
@@ -828,7 +883,12 @@ pub fn browser_processes() -> Vec<BrowserProcess> {
 pub fn profile_ids_from(processes: &[BrowserProcess], profile: &Path) -> Vec<u32> {
     let normalize = |s: &str| {
         if cfg!(windows) {
-            s.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+            let path = s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+            if let Some(unc) = path.strip_prefix(r"\\?\unc\") {
+                format!(r"\\{unc}")
+            } else {
+                path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()
+            }
         } else {
             s.trim_end_matches('/').to_owned()
         }
