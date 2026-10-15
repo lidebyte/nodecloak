@@ -213,6 +213,7 @@ impl BrowserControl {
                         self.advanced.clone(),
                         self.fingerprint.clone(),
                         self.download_lease.is_some(),
+                        self.plan,
                     )
                     .map_err(|new_error| format!("{error}；Firefox 会话恢复失败：{new_error}"))?;
                     next.configure()?;
@@ -245,6 +246,7 @@ impl BrowserControl {
                 self.advanced.clone(),
                 self.fingerprint.clone(),
                 self.download_lease.is_some(),
+                self.plan,
             )?;
             next.configure()?;
             next.drain()?;

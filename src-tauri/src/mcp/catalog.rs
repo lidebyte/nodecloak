@@ -86,7 +86,7 @@ pub fn tools() -> Vec<Value> {
             vec!["profile_id"],
         );
     }
-    let fields = json!({"name":s(),"browser":{"type":"string","enum":["chrome","edge","firefox"]},"notes":{"type":"string","maxLength":4000},"tags":{"type":"array","maxItems":30,"items":s()},"startup_url":s(),"proxy":{"type":"object","properties":{"mode":{"type":"string","enum":["system","direct","http","https","socks5"]},"host":s(),"port":{"type":"integer","minimum":1,"maximum":65535},"username":s()},"required":["mode"],"additionalProperties":false}});
+    let fields = json!({"name":s(),"browser":{"type":"string","enum":["chrome","edge","firefox"]},"notes":{"type":"string","maxLength":4000},"tags":{"type":"array","maxItems":30,"items":s()},"startup_url":s(),"proxy":{"type":"object","properties":{"mode":{"type":"string","enum":["system","direct","http","https","socks5"]},"host":s(),"port":{"type":"integer","minimum":1,"maximum":65535},"username":s(),"apiUrl":{"type":"string","minLength":1,"maxLength":4096},"preProxy":{"type":"object","properties":{"mode":{"type":"string","enum":["http","https","socks5"]},"host":s(),"port":{"type":"integer","minimum":1,"maximum":65535}},"required":["mode","host","port"],"additionalProperties":false}},"required":["mode"],"additionalProperties":false}});
     add(
         "profiles_create",
         "Create a new profile with an independent stable fingerprint",
@@ -343,6 +343,15 @@ mod tests {
         .is_ok());
         assert!(validate("sync_resolve", &json!({"profile_ids":["one"],"profile_id":"one","preview_id":"state","kind":"config","choice":"cloud"})).is_ok());
         assert!(validate("sync_resolve", &json!({"profile_ids":["one"],"profile_id":"one","preview_id":"state","kind":"config","choice":"overwrite-everything"})).is_err());
+    }
+    #[test]
+    fn chain_proxy_schema_accepts_endpoint_and_rejects_hidden_credentials_or_unknown_fields() {
+        let mut args=json!({"profile_id":"one","proxy":{"mode":"http","host":"remote.invalid","port":8080,
+            "preProxy":{"mode":"socks5","host":"127.0.0.1","port":7890}}});
+        assert!(validate("profiles_update",&args).is_ok());
+        args["proxy"]["preProxy"]["credentialRef"]=json!("other-secret");assert!(validate("profiles_update",&args).is_err());
+        args["proxy"]["preProxy"]=json!({"mode":"system","host":"127.0.0.1","port":7890});assert!(validate("profiles_update",&args).is_err());
+        args["proxy"]["preProxy"]=json!("http://127.0.0.1:7890");assert!(validate("profiles_update",&args).is_err());
     }
     #[test]
     fn rejects_credential_references_unknown_fields_and_unbounded_requests() {

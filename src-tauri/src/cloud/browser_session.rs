@@ -347,7 +347,9 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<SiteKey>, String>
                 };
                 if let Ok(s) = std::str::from_utf8(raw) {
                     if s.starts_with("https://") || s.starts_with("http://") {
-                        out.insert(super::session_storage::chromium_key(s)?);
+                        if let Some(key) = super::session_storage::chromium_web_key(s)? {
+                            out.insert(key);
+                        }
                     }
                 }
             }
@@ -357,6 +359,23 @@ fn disk_origins(browser: &str, path: &Path) -> Result<BTreeSet<SiteKey>, String>
         return Err("副本网站数量超过限制".into());
     };
     Ok(out)
+}
+fn isolated_transport_error(method: &str, error: &tungstenite::Error) -> String {
+    // Protocol bodies, URLs and browser messages can contain login secrets.
+    let detail = match error {
+        tungstenite::Error::Io(error) => format!("I/O kind={:?}, os_code={:?}", error.kind(), error.raw_os_error()),
+        tungstenite::Error::Protocol(_) => "WebSocket protocol error".into(),
+        tungstenite::Error::Http(response) => format!("HTTP status={}", response.status().as_u16()),
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => "WebSocket closed".into(),
+        _ => "WebSocket transport error".into(),
+    };
+    format!("隔离浏览器连接中断（操作 {method}，{detail}）")
+}
+pub(super) fn capture_transport_failure(error: &str) -> bool {
+    ["隔离浏览器连接中断", "隔离浏览器连接已关闭", "无法启动隔离浏览器", "无法连接隔离浏览器", "隔离浏览器未正常关闭，取消同步"].contains(&error)
+        || error.starts_with("隔离浏览器连接中断（")
+        || error.starts_with("隔离浏览器连接已关闭（")
+        || error.starts_with("浏览器登录数据操作 ") && error.ends_with(" 超时")
 }
 struct Browser {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
@@ -385,9 +404,9 @@ impl Browser {
                 .arg(path)
                 .args(["--remote-debugging-port", "0", "about:blank"]);
         } else {
+            cmd.arg("--headless=new");
             cmd.arg(format!("--user-data-dir={}", browser_launch_path(path)))
                 .args([
-                    "--headless=new",
                     "--remote-debugging-address=127.0.0.1",
                     "--remote-debugging-port=0",
                     "--no-first-run",
@@ -403,11 +422,11 @@ impl Browser {
         let mut child = cmd.spawn().map_err(|_| "无法启动隔离浏览器")?;
         let endpoint = match crate::browser_control::endpoint(browser, path) {
             Ok(v) => v,
-            Err(e) => {
+            Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = platform::force_close_profile(path);
-                return Err(e);
+                return Err("无法连接隔离浏览器".into());
             }
         };
         let (mut socket, _) = match tungstenite::connect(endpoint.as_str()) {
@@ -476,11 +495,7 @@ impl Browser {
                 json!({"bypass":true}),
                 true,
             )?;
-            b.call(
-                "Fetch.enable",
-                json!({"patterns":[{"urlPattern":"*"}]}),
-                true,
-            )?;
+            b.call("Fetch.enable", json!({"patterns":[{"urlPattern":"*"}]}), true)?;
             b.call("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"exclude":true}]}),true)?;
         }
         Ok(b)
@@ -502,7 +517,7 @@ impl Browser {
         }
         self.socket
             .send(Message::Text(v.to_string().into()))
-            .map_err(|_| "隔离浏览器连接中断")?;
+            .map_err(|error| isolated_transport_error(method, &error))?;
         Ok(self.next)
     }
     fn call(&mut self, method: &str, params: Value, target: bool) -> Result<Value, String> {
@@ -579,14 +594,14 @@ impl Browser {
                         self.send("network.provideResponse",json!({"request":v["params"]["request"]["request"],"statusCode":200,"headers":[{"name":"Content-Type","value":{"type":"string","value":"text/html"}}],"body":{"type":"base64","value":B64.encode(b"<!doctype html><title>NodeCloak sync</title>")}}),false)?;
                     }
                 }
-                Ok(Message::Close(_)) => return Err("隔离浏览器连接已关闭".into()),
+                Ok(Message::Close(frame)) => return Err(format!("隔离浏览器连接已关闭（操作 {method}，code={}）", frame.map(|f| u16::from(f.code)).unwrap_or(1005))),
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e))
                     if matches!(
                         e.kind(),
                         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                     ) => {}
-                Err(_) => return Err("隔离浏览器连接中断".into()),
+                Err(error) => return Err(isolated_transport_error(method, &error)),
             }
         }
         Err(format!("浏览器登录数据操作 {method} 超时"))
@@ -1067,14 +1082,44 @@ pub fn recover(profile: &Path) -> Result<(), String> {
 }
 pub fn export_profile(browser: &str, profile: &Path) -> Result<Snapshot, String> {
     recover(profile)?;
+    capture_with_retry(|| export_staged_profile(browser, profile), |attempt, error| {
+        crate::browser_control::log_capture_failure(profile, browser, attempt, error);
+    })
+}
+fn capture_with_retry(
+    mut capture: impl FnMut() -> Result<Snapshot, String>,
+    mut failed: impl FnMut(usize, &str),
+) -> Result<Snapshot, String> {
+    for attempt in 1..=2 {
+        match capture() {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) => {
+                failed(attempt, &error);
+                if attempt == 2 || !capture_transport_failure(&error) { return Err(error); }
+            }
+        }
+    }
+    unreachable!()
+}
+fn export_staged_profile(browser: &str, profile: &Path) -> Result<Snapshot, String> {
     let stage = Stage::new(browser, profile)?;
     let origins = disk_origins(browser, &stage.path)?;
+    let mut local = std::collections::BTreeMap::new();
+    if browser != "firefox" {
+        for key in &origins {
+            if super::session_local::eligible(&stage.path, key)? {
+                local.insert(key.clone(), super::session_local::read(&stage.path, key)?);
+            }
+        }
+    }
     let mut b = Browser::launch(browser, &stage.path)?;
     let mut cookies = b.cookies()?;
     let mut sites = Vec::new();
     for o in origins {
-        b.site(&o)?;
-        let state = b.eval("__ncSessionCodec.exportOrigin()")?;
+        let state = if let Some(state) = local.remove(&o) { state } else {
+            b.site(&o)?;
+            b.eval("__ncSessionCodec.exportOrigin()")?
+        };
         if state["local"].as_array().is_some_and(|v| !v.is_empty())
             || state["databases"].as_array().is_some_and(|v| !v.is_empty())
         {
@@ -1105,19 +1150,22 @@ pub fn restore_profile(
         super::session_storage::firefox_cookies(&stage.path)?;
     }
     origins.extend(snapshot.origins.iter().map(Site::key));
+    let mut local = Vec::new();
+    let mut documents = Vec::new();
+    for key in origins {
+        let state = snapshot.origins.iter().find(|s| s.key() == key)
+            .map(|s| s.state.clone()).unwrap_or_else(|| json!({"local":[],"databases":[]}));
+        if browser != "firefox" && state["databases"].as_array().is_some_and(Vec::is_empty)
+            && super::session_local::eligible(&stage.path, &key)? {
+            local.push((key, state));
+        } else { documents.push((key, state)); }
+    }
     let mut b = Browser::launch(browser, &stage.path)?;
-    for o in origins {
+    for (o, state) in documents {
         b.site(&o)?;
-        let empty = json!({"local":[],"databases":[]});
-        let state = snapshot
-            .origins
-            .iter()
-            .find(|s| s.key() == o)
-            .map(|s| &s.state)
-            .unwrap_or(&empty);
         let expression = format!(
             "__ncSessionCodec.importOrigin({})",
-            serde_json::to_string(state).map_err(|_| "网站存储无效")?
+            serde_json::to_string(&state).map_err(|_| "网站存储无效")?
         );
         b.eval(&expression)?;
     }
@@ -1138,6 +1186,7 @@ pub fn restore_profile(
     verify_cookies(&expected, &cookies)?;
     let mut sites = Vec::new();
     for site in &snapshot.origins {
+        if local.iter().any(|(key, _)| *key == site.key()) { continue; }
         b.site(&site.key())?;
         let mut state = b.eval("__ncSessionCodec.exportOrigin()")?;
         canonical_storage(&mut state)?;
@@ -1151,6 +1200,18 @@ pub fn restore_profile(
         });
     }
     b.close()?;
+    // Native DB handles are opened only after every browser process has closed.
+    // All changes remain staged until both native and browser readback succeed.
+    for (key, expected) in local {
+        super::session_local::write(&stage.path, &key, &expected)?;
+        let actual = super::session_local::read(&stage.path, &key)?;
+        if actual != expected {
+            return Err("网站存储写入复检不一致，取消导入并保留本机数据".into());
+        }
+        if snapshot.origins.iter().any(|s| s.key() == key) {
+            sites.push(Site { origin: key.origin, partition_key: key.partition_key, state: actual });
+        }
+    }
     let mut cookies = cookies;
     if browser == "firefox" {
         super::session_storage::write_firefox_partitioned_cookies(&stage.path, &snapshot.cookies)?;
@@ -1205,6 +1266,60 @@ fn verify_cookies(expected: &[Cookie], actual: &[Cookie]) -> Result<(), String> 
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn export_retries_transport_failure_once_without_retrying_invalid_storage() {
+        for error in ["隔离浏览器连接中断", "无法读取网站存储"] {
+            let mut calls = 0;
+            let mut failures = vec![];
+            let result = capture_with_retry(|| {
+                calls += 1;
+                if calls == 1 { Err(error.into()) } else { Ok(Snapshot::empty()) }
+            }, |attempt, message| failures.push((attempt, message.to_owned())));
+            if capture_transport_failure(error) {
+                assert!(result.is_ok());
+                assert_eq!(calls, 2);
+            } else {
+                assert_eq!(result.err().as_deref(), Some(error));
+                assert_eq!(calls, 1);
+            }
+            assert_eq!(failures, vec![(1, error.to_owned())]);
+        }
+        let mut calls = 0;
+        assert!(capture_with_retry(|| { calls += 1; Err("隔离浏览器连接中断".into()) }, |_, _| {}).is_err());
+        assert_eq!(calls, 2);
+    }
+    #[test]
+    fn isolated_transport_diagnostics_do_not_expose_browser_payloads() {
+        let error = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "secret-browser-payload");
+        let message = isolated_transport_error("Storage.getCookies", &error.into());
+        assert!(message.contains("Storage.getCookies"));
+        assert!(message.contains("ConnectionReset"));
+        assert!(!message.contains("secret-browser-payload"));
+    }
+    #[test]
+    #[ignore = "Read-only source profile diagnostic; launches only a staged copy, never prints website data"]
+    fn staged_profile_capture_diagnostic() {
+        let browser = std::env::var("NODECLOAK_DIAGNOSTIC_BROWSER").unwrap();
+        let source = PathBuf::from(std::env::var_os("NODECLOAK_DIAGNOSTIC_PROFILE").unwrap());
+        let stage = Stage::new(&browser, &source).unwrap();
+        let discovered = disk_origins(&browser, &stage.path).unwrap();
+        println!("discovery complete: {} website namespaces", discovered.len());
+        if browser != "firefox" {
+            for (index, key) in discovered.iter().enumerate() {
+                if super::super::session_local::eligible(&stage.path, key).unwrap() {
+                    super::super::session_local::read(&stage.path, key).unwrap_or_else(|error| panic!("native namespace {index}: {error}"));
+                    println!("native namespace {index} decoded");
+                }
+            }
+        }
+        drop(stage);
+        let snapshot = export_profile(&browser, &source).unwrap();
+        println!("complete export: {} cookies, {} nonempty website namespaces", snapshot.cookies.len(), snapshot.origins.len());
+        assert!(snapshot.origins.iter().all(|site| discovered.contains(&site.key())));
+        if browser == "edge" && discovered.iter().any(|key| key.origin == "https://ntp.msn.com") {
+            assert!(snapshot.origins.iter().any(|site| site.origin == "https://ntp.msn.com"), "NTP storage was dropped");
+        }
+    }
     #[test]
     fn cookie_readback_rejects_changed_expiry_and_native_partition_attributes() {
         let input=Snapshot::parse(json!({"schema":2,"cookies":[{"name":"session","value":"token","domain":"login.example","path":"/","secure":true,"httpOnly":true,"sameSite":"None","expires":chrono::Utc::now().timestamp()+604800,"partitionKey":{"topLevelSite":"https://shop.example","hasCrossSiteAncestor":true},"firefoxPartitionKey":"^partitionKey=%28https%2Cshop.example%29"}],"origins":[]})).unwrap();
@@ -1449,6 +1564,46 @@ mod tests {
         }
     }
     #[test]
+    fn browser_internal_partitions_do_not_block_website_storage_discovery() {
+        for source in ["quota", "local_storage"] {
+            let dir = tempfile::tempdir().unwrap();
+            let keys = [
+                "https://assistant.example/",
+                "https://login.example/^0https://shop.example",
+                "https://assistant.example/^0edge://copilot-ntp",
+                "https://assistant.example/^0edge://discover-chat-v2",
+                "https://assistant.example/^0chrome://new-tab-page",
+                "https://assistant.example/^0chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ];
+            if source == "quota" {
+                std::fs::create_dir_all(dir.path().join("Default/WebStorage")).unwrap();
+                let db = rusqlite::Connection::open(dir.path().join("Default/WebStorage/QuotaManager")).unwrap();
+                db.execute_batch("CREATE TABLE buckets(storage_key TEXT NOT NULL,name TEXT NOT NULL)").unwrap();
+                for key in keys {
+                    db.execute("INSERT INTO buckets VALUES(?1,'_default')", [key]).unwrap();
+                }
+                db.execute("INSERT INTO buckets VALUES(?1,'internal-named')", ["https://assistant.example/^0edge://copilot-ntp"]).unwrap();
+            } else {
+                let path = dir.path().join("Default/Local Storage/leveldb");
+                std::fs::create_dir_all(&path).unwrap();
+                let mut db = rusty_leveldb::DB::open(&path, rusty_leveldb::Options::default()).unwrap();
+                for key in keys {
+                    db.put(format!("META:{key}").as_bytes(), b"synthetic metadata").unwrap();
+                }
+                db.flush().unwrap();
+            }
+            for browser in ["chrome", "edge"] {
+                let found = serde_json::to_value(disk_origins(browser, dir.path())
+                    .unwrap_or_else(|error| panic!("{browser}: {source}: {error}"))).unwrap();
+                assert_eq!(found, json!([
+                    {"origin":"https://assistant.example"},
+                    {"origin":"https://login.example","partitionKey":{"topLevelSite":"https://shop.example","hasCrossSiteAncestor":true}}
+                ]), "{browser}: {source}: browser-internal partitions must not be flattened into website state");
+            }
+        }
+        assert!(Snapshot::parse(json!({"schema":2,"cookies":[],"origins":[{"origin":"https://assistant.example","partitionKey":{"topLevelSite":"edge://copilot-ntp","hasCrossSiteAncestor":true},"state":{"local":[],"databases":[]}}]})).is_err());
+    }
+    #[test]
     fn partitioned_chromium_local_storage_discovery_keeps_top_level_sites_separate() {
         use rusty_leveldb::{Options, DB};
         let dir = tempfile::tempdir().unwrap();
@@ -1578,6 +1733,65 @@ mod tests {
     }
     #[cfg(windows)]
     use std::os::windows::fs::OpenOptionsExt;
+    #[test]
+    #[ignore = "launches installed browsers against synthetic, temporary profiles only"]
+    fn installed_edge_sync_ntp_origin_roundtrip() {
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let profile = dir.path().join("edge-ntp-fixture");
+        let input = Snapshot::parse(json!({"schema":1,"cookies":[],"origins":[{
+            "origin":"https://ntp.msn.com",
+            "state":{"local":[["sync-probe","synthetic"]],"databases":[]}
+        }]})).unwrap();
+        restore_profile("edge", &profile, &input).unwrap();
+        let exported = export_profile("edge", &profile).unwrap();
+        assert_eq!(exported.origins.len(), 1);
+        assert_eq!(exported.origins[0].state, input.origins[0].state);
+    }
+    #[test]
+    #[ignore = "launches installed browsers against synthetic, temporary profiles only"]
+    fn installed_chromium_reads_native_localstorage_writes() {
+        for engine in ["chrome", "edge"] {
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+            let profile = dir.path().join("native-local-fixture");
+            std::fs::create_dir(&profile).unwrap();
+            let key = SiteKey { origin: "https://localhost:18443".into(), partition_key: None };
+            let expected = json!({"local":[["", ""],["latin", "café"],["汉字😀", "a\u{0000}b😀"]],"databases":[]});
+            super::super::session_local::write(&profile, &key, &expected).unwrap();
+            let mut browser = Browser::launch(engine, &profile).unwrap();
+            browser.site(&key).unwrap();
+            let mut actual = browser.eval("__ncSessionCodec.exportOrigin()").unwrap();
+            canonical_storage(&mut actual).unwrap();
+            assert_eq!(actual, expected, "{engine}: native storage differs from browser API");
+            browser.eval("localStorage.setItem('browser-written','真实值😀'); true").unwrap();
+            browser.close().unwrap();
+            let actual = super::super::session_local::read(&profile, &key).unwrap();
+            assert!(actual["local"].as_array().unwrap().contains(&json!(["browser-written", "真实值😀"])), "{engine}: browser storage differs from native reader");
+        }
+    }
+    #[test]
+    #[ignore = "launches installed browsers against synthetic, temporary profiles only"]
+    fn installed_edge_internal_partitions_preserve_website_and_internal_data() {
+        use rusty_leveldb::{Options, DB};
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let profile = dir.path().join("synthetic-edge");
+        let input = Snapshot::parse(json!({"schema":1,"cookies":[],"origins":[{
+            "origin":"https://localhost:18443",
+            "state":{"local":[["session","synthetic-login"]],"databases":[]}
+        }]})).unwrap();
+        restore_profile("edge", &profile, &input).unwrap();
+        let db_path = profile.join("Default/Local Storage/leveldb");
+        let internal = b"META:https://assistant.example/^0edge://copilot-ntp";
+        {
+            let mut db = DB::open(&db_path, Options::default()).unwrap();
+            db.put(internal, b"synthetic-internal-metadata").unwrap();
+            db.flush().unwrap();
+        }
+        let exported = export_profile("edge", &profile).unwrap();
+        assert_eq!(exported.origins.len(), 1);
+        assert_eq!(exported.origins[0].state, input.origins[0].state);
+        let mut db = DB::open(&db_path, Options::default()).unwrap();
+        assert_eq!(db.get(internal).as_deref(), Some(b"synthetic-internal-metadata".as_slice()));
+    }
     #[test]
     #[ignore = "launches installed browsers against synthetic, temporary profiles only"]
     fn installed_browsers_roundtrip_cookie_localstorage_and_indexeddb() {

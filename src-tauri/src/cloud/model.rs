@@ -13,6 +13,10 @@ pub struct PortableProxy {
     pub port: u16,
     pub username: String,
     pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_proxy: Option<crate::proxy::LocalProxy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -46,7 +50,11 @@ impl Document {
             || advanced.web_rtc != profiles::WebRtcPolicy::Inherit
             || (advanced.block_webgl && p.browser != "firefox");
         Ok(Self {
-            schema: if prefs.fingerprint.is_some() {
+            schema: if p.proxy.api_url.is_some() {
+                5
+            } else if p.proxy.pre_proxy.is_some() {
+                4
+            } else if prefs.fingerprint.is_some() {
                 3
             } else if enhanced {
                 2
@@ -63,6 +71,8 @@ impl Document {
                 port: p.proxy.port,
                 username: p.proxy.username.clone(),
                 password: upstream.password.clone(),
+                pre_proxy: p.proxy.pre_proxy.clone(),
+                api_url: p.proxy.api_url.clone(),
             },
             preferences: prefs,
             deleted: p.deleted_at.is_some(),
@@ -80,6 +90,8 @@ impl Document {
                 port: self.proxy.port,
                 username: self.proxy.username.clone(),
                 credential_ref: None,
+                pre_proxy: self.proxy.pre_proxy.clone(),
+                api_url: self.proxy.api_url.clone(),
             },
             password: Some(self.proxy.password.clone()),
             clear_password: self.proxy.password.is_empty(),
@@ -88,9 +100,15 @@ impl Document {
     }
     pub fn parse(v: Value) -> Result<Self, String> {
         let mut doc: Self = serde_json::from_value(v).map_err(|_| "云端副本格式无效")?;
-        if ![1, 2, 3].contains(&doc.schema) {
+        if ![1, 2, 3, 4, 5].contains(&doc.schema) {
             return Err("不支持的云端副本版本".into());
         };
+        if doc.schema < 5 && doc.proxy.api_url.is_some() {
+            return Err("API 代理需要新版副本配置".into());
+        }
+        if doc.schema < 4 && doc.proxy.pre_proxy.is_some() {
+            return Err("链式代理需要新版副本配置".into());
+        }
         if doc.schema < 3 && doc.preferences.fingerprint.is_some() {
             return Err("稳定指纹需要新版副本配置".into());
         }
@@ -286,6 +304,7 @@ mod tests {
         for key in [
             "relayPort",
             "activeProxy",
+            "activeProxyEndpoint",
             "lastTest",
             "legacy",
             "credentialRefs",
@@ -322,4 +341,32 @@ mod tests {
         assert!(state.can_attach("second", "legacy-chrome").is_err());
         assert!(state.can_attach("first", "legacy-chrome").is_ok());
     }
+    #[test]
+    fn chain_proxy_round_trips_through_encrypted_document_schema_and_draft() {
+        let dir=tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let mut profile=profiles::load(dir.path()).unwrap().remove(0);
+        profile.proxy=serde_json::from_value(serde_json::json!({"mode":"socks5","host":"remote.invalid","port":1080,
+            "preProxy":{"mode":"http","host":"127.0.0.1","port":7890}})).unwrap();
+        let exported=Document::export(&profile).unwrap();
+        assert_eq!(exported.schema,4,"required chain must not be silently dropped by older clients");
+        let value=serde_json::to_value(exported).unwrap();
+        assert_eq!(value["proxy"]["preProxy"]["port"],7890);
+        let parsed=Document::parse(value.clone()).unwrap();
+        assert_eq!(parsed.draft().proxy,profile.proxy);
+        let mut legacy=value.clone();legacy["schema"]=serde_json::json!(3);
+        assert!(Document::parse(legacy).is_err());
+        let mut malformed=value;malformed["proxy"]["preProxy"]["port"]=serde_json::json!(0);
+        assert!(Document::parse(malformed).is_err());
+    }
+    #[test]
+    fn api_proxy_source_round_trips_without_runtime_endpoint_and_requires_schema5() {
+        let root=tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let mut p=profiles::load(root.path()).unwrap().remove(0);
+        p.proxy=serde_json::from_value(serde_json::json!({"mode":"http","apiUrl":"https://provider.invalid/extract?token=synthetic"})).unwrap();
+        let doc=Document::export(&p).unwrap();assert_eq!(doc.schema,5);
+        let value=serde_json::to_value(doc).unwrap();let parsed=Document::parse(value.clone()).unwrap();
+        assert_eq!(parsed.draft().proxy,p.proxy);
+        let mut old=value;old["schema"]=serde_json::json!(4);assert!(Document::parse(old).is_err());
+    }
+
 }

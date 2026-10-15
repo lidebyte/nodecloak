@@ -1,3 +1,4 @@
+mod api;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,6 +25,44 @@ pub struct ProxyConfig {
     pub username: String,
     #[serde(default)]
     pub credential_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_proxy: Option<LocalProxy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+impl ProxyEndpoint {
+    pub fn validate(&self)->Result<(),String> {
+        if self.port==0||self.host.parse::<IpAddr>().is_err(){return Err("已提取的代理地址无效，请重新启动副本".into());}
+        Ok(())
+    }
+}
+/// Optional first hop on this computer or another reachable host (e.g. a LAN router).
+/// Profile credentials belong exclusively
+/// to the second hop and are never sent to this endpoint.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalProxy {
+    pub mode: String,
+    pub host: String,
+    pub port: u16,
+}
+impl LocalProxy {
+    pub fn validate(&self) -> Result<(), String> {
+        if !["http", "https", "socks5"].contains(&self.mode.as_str()) {
+            return Err("前置代理协议应为 HTTP、HTTPS 或 SOCKS5".into());
+        }
+        // Use the same endpoint validation as the second hop. The serialized
+        // LocalProxy/preProxy names remain compatible with existing profiles.
+        ProxyConfig { mode: self.mode.clone(), host: self.host.clone(), port: self.port,
+            ..Default::default() }.validate()
+            .map_err(|_| "前置代理请填写有效的 IP 或域名及端口，不要包含协议或路径".into())
+    }
 }
 fn system_mode() -> String {
     "system".into()
@@ -39,18 +78,26 @@ impl ProxyConfig {
         if !["direct", "system", "http", "https", "socks5"].contains(&self.mode.as_str()) {
             return Err("不支持的代理协议".into());
         }
+        if let Some(local) = &self.pre_proxy {
+            if !self.custom() { return Err("链式代理需要先配置副本代理".into()); }
+            local.validate()?;
+        }
+        if let Some(url)=&self.api_url {
+            if !self.custom(){return Err("API 提取需要先选择代理协议".into());}
+            api::validate_url(url)?;
+        }
         if self.custom() {
-            if self.port == 0
+            if self.api_url.is_none() && (self.port == 0
                 || self.host.is_empty()
                 || self.host.len() > 253
                 || self
                     .host
                     .chars()
                     .any(|c| c.is_whitespace() || c.is_control() || "/\\@?#".contains(c))
-            {
+            ) {
                 return Err("请填写有效的代理地址和端口".into());
             }
-            if self.host.parse::<IpAddr>().is_err()
+            if self.api_url.is_none() && self.host.parse::<IpAddr>().is_err()
                 && !self.host.split('.').all(|label| {
                     !label.is_empty()
                         && label.len() <= 63
@@ -117,24 +164,37 @@ async fn header(stream: &mut (impl AsyncRead + Unpin + ?Sized)) -> Result<Vec<u8
     }
     Err("代理响应头过大".into())
 }
+async fn tls_socket(socket: Socket, host: &str) -> Result<Socket, String> {
+    let connector = tokio_native_tls::native_tls::TlsConnector::new()
+        .map_err(|_| "无法初始化代理 TLS")?;
+    let socket = tokio_native_tls::TlsConnector::from(connector)
+        .connect(host, socket).await
+        .map_err(|_| "代理 TLS 校验失败，请检查证书和代理协议")?;
+    Ok(Box::new(socket))
+}
 async fn upstream_socket(up: &Upstream) -> Result<Socket, String> {
-    let socket = TcpStream::connect((up.config.host.as_str(), up.config.port))
-        .await
-        .map_err(|_| "无法连接代理地址，请检查节点和端口")?;
-    if up.config.mode == "https" {
-        let connector =
-            tokio_native_tls::native_tls::TlsConnector::new().map_err(|_| "无法初始化代理 TLS")?;
-        let socket = tokio_native_tls::TlsConnector::from(connector)
-            .connect(&up.config.host, socket)
-            .await
-            .map_err(|_| "代理 TLS 校验失败，请检查证书和代理协议")?;
-        Ok(Box::new(socket))
+    let socket: Socket = if let Some(local) = &up.config.pre_proxy {
+        let connection = async {
+            let socket: Socket = Box::new(TcpStream::connect((local.host.as_str(), local.port))
+                .await.map_err(|_| "无法连接地址，请检查前置代理是否运行及监听端口")?);
+            let socket = if local.mode == "https" { tls_socket(socket, &local.host).await? } else { socket };
+            let first = Upstream {
+                config: ProxyConfig { mode: local.mode.clone(), host: local.host.clone(), port: local.port, ..Default::default() },
+                password: String::new(),
+            };
+            proxy_tunnel(socket, &first, &up.config.host, up.config.port).await
+        };
+        connection.await.map_err(|error| format!("前置代理连接失败：{error}"))?
     } else {
-        Ok(Box::new(socket))
-    }
+        Box::new(TcpStream::connect((up.config.host.as_str(), up.config.port))
+            .await.map_err(|_| "无法连接代理地址，请检查节点和端口")?)
+    };
+    if up.config.mode == "https" { tls_socket(socket, &up.config.host).await } else { Ok(socket) }
 }
 async fn tunnel(up: &Upstream, host: &str, port: u16) -> Result<Socket, String> {
-    let mut socket = upstream_socket(up).await?;
+    proxy_tunnel(upstream_socket(up).await?, up, host, port).await
+}
+async fn proxy_tunnel(mut socket: Socket, up: &Upstream, host: &str, port: u16) -> Result<Socket, String> {
     if up.config.mode == "socks5" {
         let auth = !up.config.username.is_empty();
         socket
@@ -355,6 +415,7 @@ async fn serve(
 }
 pub struct Relay {
     pub port: u16,
+    pub endpoint: Option<ProxyEndpoint>,
     stop: watch::Sender<bool>,
     failure: Arc<Mutex<Option<String>>>,
 }
@@ -365,6 +426,9 @@ impl Drop for Relay {
 }
 pub async fn start(up: Upstream, port: u16) -> Result<Relay, String> {
     up.validate()?;
+    let extracted=up.config.api_url.is_some();
+    let up=api::resolve(up).await?;
+    let endpoint=extracted.then(||ProxyEndpoint {host:up.config.host.clone(),port:up.config.port});
     if !up.config.custom() {
         return Err("本地转发需要自定义代理".into());
     }
@@ -391,6 +455,7 @@ pub async fn start(up: Upstream, port: u16) -> Result<Relay, String> {
     });
     Ok(Relay {
         port,
+        endpoint,
         stop,
         failure,
     })
@@ -966,3 +1031,9 @@ mod tests {
         assert!(reply.starts_with(b"HTTP/1.1 502"));
     }
 }
+
+#[cfg(test)]
+mod chain_tests;
+
+#[cfg(test)]
+mod api_tests;

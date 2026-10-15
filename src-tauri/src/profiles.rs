@@ -101,6 +101,8 @@ pub struct Profile {
     pub relay_port: u16,
     #[serde(default)]
     pub active_proxy: Option<ProxyConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_proxy_endpoint: Option<proxy::ProxyEndpoint>,
     #[serde(default)]
     pub active_preferences: Option<Preferences>,
     #[serde(default)]
@@ -155,6 +157,11 @@ pub struct Runtime(
     pub Mutex<HashMap<String, Relay>>,
     pub crate::browser_control::Runtime,
 );
+impl Runtime {
+    pub fn proxy_endpoint(&self,id:&str)->Result<Option<proxy::ProxyEndpoint>,String> {
+        Ok(self.0.lock().map_err(|_|"代理管理器不可用")?.get(id).and_then(|r|r.endpoint.clone()))
+    }
+}
 impl Default for Runtime {
     fn default() -> Self {
         Self(
@@ -325,6 +332,7 @@ pub fn load(root: &Path) -> Result<Vec<Profile>, String> {
                 legacy: true,
                 relay_port: 0,
                 active_proxy: None,
+                active_proxy_endpoint: None,
                 active_preferences: None,
                 preferences_managed: false,
                 preferences_dirty: false,
@@ -472,14 +480,20 @@ pub fn upstream(p: &Profile, active: bool) -> Result<Upstream, String> {
     } else {
         &p.proxy
     };
-    Ok(Upstream {
+    let mut up=Upstream {
         config: config.clone(),
         password: if config.custom() && !config.username.is_empty() {
             password(&p.id, config)?
         } else {
             String::new()
         },
-    })
+    };
+    if active && config.api_url.is_some() {
+        let endpoint=p.active_proxy_endpoint.as_ref().ok_or("运行中的 API 代理地址未保存，请关闭并重新启动副本")?;
+        endpoint.validate()?;
+        up.config.host=endpoint.host.clone();up.config.port=endpoint.port;up.config.api_url=None;
+    }
+    Ok(up)
 }
 // A stored proxy secret belongs to one authentication destination. Callers may
 // change profile settings without knowing it, but must explicitly supply a new
@@ -492,6 +506,7 @@ fn same_proxy_credentials(previous: &ProxyConfig, next: &ProxyConfig) -> bool {
         && previous.host.eq_ignore_ascii_case(&next.host)
         && previous.port == next.port
         && previous.username == next.username
+        && previous.api_url == next.api_url
 }
 pub fn draft_upstream(root: &Path, id: Option<&str>, draft: &Draft) -> Result<Upstream, String> {
     if let Some(id) = id {
@@ -679,6 +694,7 @@ fn create_with_id(
         legacy: false,
         relay_port: 0,
         active_proxy: None,
+        active_proxy_endpoint: None,
         active_preferences: None,
         preferences_managed: true,
         preferences_dirty: true,
@@ -936,7 +952,8 @@ pub(crate) fn apply_preferences_for_control(root: &Path, p: &Profile, force_cont
                 fields.push(("remote.prefs.recommended", serde_json::json!(false)));
             }
         }
-        if force_control {fields.push(("remote.prefs.recommended", serde_json::json!(false)));fields.push(("dom.file.createInChild",serde_json::json!(true)));}
+        if force_control {fields.push(("remote.prefs.recommended", serde_json::json!(false)));}
+        fields.push(("dom.file.createInChild", if force_control { serde_json::json!(true) } else { serde_json::Value::Null }));
         // We keep Firefox recommended automation prefs off to preserve profile privacy
         // settings. Apply only its first-run notification override: otherwise the chrome
         // onboarding modal blocks tab activation even though BiDi can read the page.
@@ -1102,6 +1119,7 @@ pub fn remove(root: &Path, id: &str, purge: bool, runtime: &Runtime) -> Result<(
     } else {
         profiles[index].deleted_at = Some(stamp());
         profiles[index].active_proxy = None;
+        profiles[index].active_proxy_endpoint = None;
     }
     save(root, &profiles)
 }
@@ -1126,8 +1144,9 @@ pub fn views(root: &Path, runtime: &Runtime) -> Result<Vec<ProfileView>, String>
             continue;
         }
         let running = platform::profile_ids_from(&processes, &path(root, p)?).len() > 0;
-        if !running && p.active_proxy.is_some() {
+        if !running && (p.active_proxy.is_some() || p.active_proxy_endpoint.is_some()) {
             p.active_proxy = None;
+            p.active_proxy_endpoint = None;
             p.active_preferences = None;
             relays.remove(&p.id);
             changed = true;
@@ -1201,12 +1220,15 @@ pub async fn prepare_relay(
         .insert(p.id.clone(), relay);
     Ok(Some(port))
 }
-pub fn mark_started(root: &Path, id: &str, port: Option<u16>) -> Result<(), String> {
+pub fn mark_started(root: &Path, id: &str, port: Option<u16>, endpoint: Option<proxy::ProxyEndpoint>) -> Result<(), String> {
     let mut profiles = load(root)?;
     let p = profiles
         .iter_mut()
         .find(|p| p.id == id)
         .ok_or("副本不存在")?;
+    p.active_proxy_endpoint=if p.proxy.api_url.is_some() {
+        let endpoint=endpoint.ok_or("API 代理尚未提取有效地址")?;endpoint.validate()?;Some(endpoint)
+    }else{None};
     p.active_proxy = Some(p.proxy.clone());
     p.preferences_dirty = false;
     p.active_preferences = Some(p.preferences.clone());
@@ -1786,11 +1808,13 @@ mod tests {
         std::fs::write(dir.join("user.js"), "user_pref(\"termsofuse.acceptedVersion\", 0);\nuser_pref(\"privacy.trackingprotection.enabled\", true);\n").unwrap();
         apply_preferences_for_control(root.path(), &profile, true).unwrap();
         assert_eq!(crate::firefox::snapshot(&dir, "termsofuse.bypassNotification").unwrap()["user"], true);
+        assert_eq!(crate::firefox::snapshot(&dir, "dom.file.createInChild").unwrap()["user"], true);
         let contents = std::fs::read_to_string(dir.join("user.js")).unwrap();
         assert!(contents.contains("user_pref(\"termsofuse.acceptedVersion\", 0);"));
         assert!(contents.contains("user_pref(\"privacy.trackingprotection.enabled\", true);"));
         apply_preferences_for_control(root.path(), &profile, false).unwrap();
         assert!(crate::firefox::snapshot(&dir, "termsofuse.bypassNotification").unwrap()["user"].is_null());
+        assert!(crate::firefox::snapshot(&dir, "dom.file.createInChild").unwrap()["user"].is_null());
     }
     fn test_dir() -> tempfile::TempDir {
         // macOS /var is a system symlink; fixtures use its real path while
@@ -1836,7 +1860,7 @@ mod tests {
         let old_port = prepare_relay(root.path(), &p, &runtime, false)
             .await
             .unwrap();
-        mark_started(root.path(), &p.id, old_port).unwrap();
+        mark_started(root.path(), &p.id, old_port, None).unwrap();
         let mut d = draft("relay lifecycle");
         d.proxy = ProxyConfig {
             mode: "http".into(),
@@ -1974,7 +1998,7 @@ mod tests {
             "en-US,en"
         );
         apply_preferences(root.path(), &updated).unwrap();
-        mark_started(root.path(), &p.id, None).unwrap();
+        mark_started(root.path(), &p.id, None, None).unwrap();
         assert_eq!(
             existing_preferences(&base(root.path(), &p).unwrap(), "chrome").language,
             "en-GB,en"
@@ -2085,6 +2109,61 @@ mod tests {
         assert!(path(root.path(), &other).unwrap().exists());
         assert!(get(root.path(), &other.id, false).is_ok());
     }
+    #[tokio::test]
+    async fn api_proxy_active_endpoint_is_pinned_across_recovery_and_refetched_only_on_fresh_start() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();
+        let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let observed=calls.clone();
+        let provider=tokio::spawn(async move {loop {
+            let (mut stream,_)=listener.accept().await.unwrap();let count=observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
+            let mut request=[0;4096];let _=stream.read(&mut request).await;
+            let body=format!("192.0.2.{count}:{}",8000+count);
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        }});
+        let root=test_dir();let mut input=draft("API pin");
+        input.proxy=serde_json::from_value(serde_json::json!({"mode":"http","apiUrl":format!("http://127.0.0.1:{port}/api")})).unwrap();
+        let p=create(root.path(),input.clone(),None).unwrap();let runtime=Runtime::default();
+        let relay_port=prepare_relay(root.path(),&p,&runtime,false).await.unwrap();
+        mark_started(root.path(),&p.id,relay_port,runtime.proxy_endpoint(&p.id).unwrap()).unwrap();
+        let saved=get(root.path(),&p.id,false).unwrap();
+        let active=upstream(&saved,true).unwrap();
+        assert_eq!(active.config.host,"192.0.2.1","active API endpoint was lost after launch");
+        assert!(active.config.api_url.is_none(),"live tests must not refetch API");
+        runtime.0.lock().unwrap().remove(&p.id);
+        // Model a completed process exit: Relay Drop signals its async accept
+        // loop, whereas a real app exit has already released the listener.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+        loop {
+            if let Ok(listener)=tokio::net::TcpListener::bind(("127.0.0.1",relay_port.unwrap())).await {drop(listener);break;}
+            assert!(std::time::Instant::now()<deadline,"old fixture relay did not stop");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        prepare_relay(root.path(),&saved,&runtime,true).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),1,"recovery changed running IP");
+        prepare_relay(root.path(),&saved,&runtime,false).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),2);
+        provider.abort();
+    }
+    #[test]
+    fn chain_settings_survive_copy_edit_and_preserve_second_hop_credential_identity() {
+        let root=test_dir();let mut input=draft("chain");
+        input.proxy=serde_json::from_value(serde_json::json!({"mode":"http","host":"remote.invalid","port":8080,"username":"user",
+            "preProxy":{"mode":"http","host":"127.0.0.1","port":7890}})).unwrap();
+        let original=create(root.path(),input.clone(),None).unwrap();
+        let copy=create(root.path(),input.clone(),Some(&original.id)).unwrap();
+        assert_eq!(get(root.path(),&copy.id,false).unwrap().proxy.pre_proxy,input.proxy.pre_proxy);
+        let mut all=load(root.path()).unwrap();
+        let p=all.iter_mut().find(|p|p.id==original.id).unwrap();
+        p.proxy.credential_ref=Some(identifier());let reference=p.proxy.credential_ref.clone();
+        p.active_proxy=Some(p.proxy.clone());save(root.path(),&all).unwrap();
+        input.proxy.pre_proxy.as_mut().unwrap().port=1081;
+        let changed=update(root.path(),&original.id,input.clone()).unwrap();
+        assert_eq!(changed.proxy.credential_ref,reference,"changing only the local route lost remote credentials");
+        assert_eq!(changed.active_proxy.unwrap().pre_proxy.unwrap().port,7890,"running route changed before restart");
+        assert_eq!(changed.proxy.pre_proxy.unwrap().port,1081);
+        input.proxy.pre_proxy=None;let off=update(root.path(),&original.id,input).unwrap();
+        assert!(off.proxy.pre_proxy.is_none());assert_eq!(off.proxy.credential_ref,reference);
+    }
     #[test]
     fn proxy_edits_do_not_reuse_credentials_for_a_different_destination() {
         let root = test_dir();
@@ -2095,6 +2174,8 @@ mod tests {
             port: 8080,
             username: "original-user".into(),
             credential_ref: None,
+            pre_proxy: None,
+            api_url: None,
         };
         let mut original = create(root.path(), initial.clone(), None).unwrap();
         // A missing secret must never be read when the destination changes.
@@ -2103,7 +2184,7 @@ mod tests {
         *stored.iter_mut().find(|p| p.id == original.id).unwrap() = original.clone();
         save(root.path(), &stored).unwrap();
         for field in [
-            "host", "port", "mode", "username", "direct", "system", "clear",
+            "host", "port", "mode", "username", "direct", "system", "clear", "api",
         ] {
             let mut changed = initial.clone();
             match field {
@@ -2114,6 +2195,7 @@ mod tests {
                 "direct" => changed.proxy.mode = "direct".into(),
                 "system" => changed.proxy.mode = "system".into(),
                 "clear" => changed.clear_password = true,
+                "api" => changed.proxy.api_url = Some("https://provider.invalid/extract".into()),
                 _ => unreachable!(),
             }
             let outbound = draft_upstream(root.path(), Some(&original.id), &changed)
@@ -2145,6 +2227,8 @@ mod tests {
             port: 8080,
             username: "original-user".into(),
             credential_ref: None,
+            pre_proxy: None,
+            api_url: None,
         };
         original_draft.password = Some("synthetic-original-secret".into());
         let original = create(root.path(), original_draft.clone(), None).unwrap();
@@ -2171,7 +2255,7 @@ mod tests {
             "synthetic-original-secret"
         );
         assert_ne!(copied.proxy.credential_ref, original.proxy.credential_ref);
-        mark_started(root.path(), &original.id, None).unwrap();
+        mark_started(root.path(), &original.id, None, None).unwrap();
         let mut changed = original_draft;
         changed.proxy.host = "different.example".into();
         assert!(draft_upstream(root.path(), Some(&original.id), &changed)
@@ -2233,6 +2317,8 @@ mod tests {
             port: 8080,
             username: "user".into(),
             credential_ref: Some(identifier()),
+            pre_proxy: None,
+            api_url: None,
         };
         let bytes = serde_json::to_string(&config).unwrap();
         assert!(!bytes.contains("password"));

@@ -21,6 +21,32 @@ mod downloads;
 mod recovery;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod separation_tests;
+
+pub(crate) fn log_capture_failure(path: &Path, browser: &str, attempt: usize, error: &str) {
+    recovery::log(path, browser, "session_capture_failed", attempt, error);
+}
+
+/// The caller opts into automation explicitly; profile settings never grant it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchPurpose {
+    Manual,
+    Mcp,
+}
+#[derive(Clone, Copy, Debug)]
+struct ControlPlan {
+    profile_settings: bool,
+    automation: bool,
+}
+impl ControlPlan {
+    fn new(browser: &str, preferences: &crate::profiles::Preferences, purpose: LaunchPurpose) -> Self {
+        Self {
+            profile_settings: regional::needs_control_for(browser, preferences),
+            automation: purpose == LaunchPurpose::Mcp,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Runtime(Mutex<HashMap<String, Control>>);
@@ -47,6 +73,11 @@ impl From<&str> for OpenError {
     }
 }
 impl Runtime {
+    pub(crate) fn automation_ready(&self, id: &str) -> bool {
+        self.0.lock().ok().and_then(|m| {
+            m.get(id).map(|c| c.automation && c.alive.load(Ordering::SeqCst))
+        }).unwrap_or(false)
+    }
     pub fn ready(&self, id: &str) -> bool {
         self.0
             .lock()
@@ -97,6 +128,7 @@ enum Request {
     ExitBrowser(mpsc::Sender<()>),
 }
 pub struct Control {
+    automation: bool,
     sender: mpsc::Sender<Request>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -133,8 +165,23 @@ impl Control {
             .map_err(|_| "浏览器页面打开超时")?
     }
 }
+#[derive(PartialEq)]
+enum StartupBarrier { None, Arming, Removing, Resuming, Disabling }
+struct DocumentSetup {
+    pending: HashMap<u64, &'static str>,
+    resume: Option<Value>,
+    started: Instant,
+    delayed: bool,
+    ready: bool,
+    error: Option<String>,
+    barrier: StartupBarrier,
+    breakpoint: Option<String>,
+    deferred: Option<Vec<(&'static str, Value)>>,
+}
 struct Protocol {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    document_setups: HashMap<String, DocumentSetup>,
+    barrier_owner: Option<String>,
     next: u64,
     events: VecDeque<Value>,
     last_error: Option<String>,
@@ -142,11 +189,156 @@ struct Protocol {
     reconnect_endpoint: Option<String>,
 }
 impl Protocol {
+    // Initial empty targets can exist before a renderer is allocated. Queue
+    // setup per session and keep pumping other targets instead of waiting here.
+    fn configure_document(&mut self, session: &str, commands: Vec<(&'static str, Value)>) -> Result<(), String> {
+        if let Some(error) = self.document_setups.get(session).and_then(|s|s.error.clone()) { return Err(error); }
+        if let Some(setup) = self.document_setups.get_mut(session) {
+            if setup.barrier != StartupBarrier::None {
+                // Main-thread overrides cannot acknowledge during an instrumentation
+                // pause (including while earlier replies are still unread). Finish
+                // releasing this generation before applying the latest
+                // desired settings; document readiness also waits for that next batch.
+                setup.deferred = Some(commands);
+                return Ok(());
+            }
+        }
+        let updating = self.document_pending(session);
+        let mut setup = if updating { self.document_setups.remove(session).unwrap() } else { DocumentSetup {
+            pending: HashMap::new(), resume: None, started: Instant::now(),
+            delayed: false, ready: false, error: None,
+            barrier: StartupBarrier::None, breakpoint: None, deferred: None,
+        } };
+        for (method, params) in commands {
+            if method == "Runtime.runIfWaitingForDebugger" {
+                if !updating { setup.resume = Some(params); }
+                continue;
+            }
+            // Final resolved settings can arrive while provisional startup
+            // settings are pending. Append their acknowledgements to the same
+            // gate so the target cannot resume with the provisional settings.
+            self.next += 1;
+            setup.pending.insert(self.next, method);
+            self.socket.send(Message::Text(json!({"id":self.next,"method":method,"params":params,"sessionId":session}).to_string().into()))
+                .map_err(|e| format!("无法写入浏览器区域设置 {method}（{}）", recovery::transport_error(&e)))?;
+        }
+        self.document_setups.insert(session.into(), setup);
+        self.advance_document(session)
+    }
+    fn document_pending(&self, session: &str) -> bool {
+        self.document_setups.get(session).is_some_and(|setup| !setup.ready)
+    }
+    fn setup_command(&mut self, session: &str, method: &'static str, params: Value) -> Result<(), String> {
+        self.next += 1;
+        self.document_setups.get_mut(session).unwrap().pending.insert(self.next,method);
+        self.socket.send(Message::Text(json!({"id":self.next,"method":method,"params":params,"sessionId":session}).to_string().into()))
+            .map_err(|e|format!("无法写入浏览器初始化命令 {method}（{}）",recovery::transport_error(&e)))
+    }
+    fn advance_document(&mut self, session: &str) -> Result<(), String> {
+        let setup = &self.document_setups[session];
+        if setup.error.is_some() || setup.ready { return Ok(()); }
+        let protection_ready = setup.pending.values().all(|method| *method == "Page.enable");
+        if setup.resume.is_some() && !protection_ready && setup.started.elapsed() >= Duration::from_millis(150)
+            && setup.barrier == StartupBarrier::None && self.barrier_owner.is_none() {
+            // New noopener windows cannot allocate their renderer until startup
+            // resumes. Arm a native first-script breakpoint in the queued CDP
+            // batch before releasing that browser-side navigation throttle.
+            // Serialize these barriers: debugger pauses can span page sessions
+            // sharing a renderer, so another target must never release this one.
+            self.barrier_owner = Some(session.into());
+            self.document_setups.get_mut(session).unwrap().barrier = StartupBarrier::Arming;
+            self.setup_command(session,"Debugger.enable",json!({}))?;
+            self.setup_command(session,"Debugger.setInstrumentationBreakpoint",json!({"instrumentation":"beforeScriptExecution"}))?;
+        }
+        let setup = &mut self.document_setups.get_mut(session).unwrap();
+        if setup.resume.is_some() && (protection_ready || setup.barrier == StartupBarrier::Arming) {
+            let params = setup.resume.take().unwrap();
+            self.setup_command(session,"Runtime.runIfWaitingForDebugger",params)?;
+        }
+        let setup = &self.document_setups[session];
+        if setup.resume.is_none() && setup.pending.is_empty() {
+            match setup.barrier {
+                StartupBarrier::Arming => {
+                    let breakpoint = setup.breakpoint.clone().ok_or("页面初始化保护断点无效")?;
+                    self.document_setups.get_mut(session).unwrap().barrier = StartupBarrier::Removing;
+                    self.setup_command(session,"Debugger.removeBreakpoint",json!({"breakpointId":breakpoint}))?;
+                }
+                StartupBarrier::Removing => {
+                    self.document_setups.get_mut(session).unwrap().barrier = StartupBarrier::Resuming;
+                    self.setup_command(session,"Debugger.resume",json!({}))?;
+                }
+                StartupBarrier::Resuming => {
+                    // A page instrumentation pause only processes IO commands.
+                    // Resume it before sending Debugger.disable on the main lane.
+                    self.document_setups.get_mut(session).unwrap().barrier = StartupBarrier::Disabling;
+                    self.setup_command(session,"Debugger.disable",json!({}))?;
+                }
+                StartupBarrier::Disabling => {
+                    self.document_setups.get_mut(session).unwrap().barrier = StartupBarrier::None;
+                    self.barrier_owner = None;
+                }
+                StartupBarrier::None => {},
+            }
+            let setup = self.document_setups.get_mut(session).unwrap();
+            if setup.pending.is_empty() && setup.barrier == StartupBarrier::None {
+                setup.ready = true;
+                if let Some(commands) = setup.deferred.take() {
+                    let delayed = setup.delayed;
+                    self.configure_document(session, commands)?;
+                    self.document_setups.get_mut(session).unwrap().delayed |= delayed;
+                } else if setup.delayed {
+                    self.events.push_back(json!({"method":"NodeCloak.documentSetupReady","sessionId":session}));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn route_document_reply(&mut self, value: &Value) -> Result<bool, String> {
+        let Some(id) = value["id"].as_u64() else { return Ok(false) };
+        let Some(session) = self.document_setups.iter().find_map(|(session, setup)| setup.pending.contains_key(&id).then(||session.clone())) else { return Ok(false) };
+        let setup = self.document_setups.get_mut(&session).unwrap();
+        let method = setup.pending.remove(&id).unwrap();
+        if method == "Debugger.setInstrumentationBreakpoint" && value.get("error").is_none() {
+            setup.breakpoint = value["result"]["breakpointId"].as_str().map(str::to_owned);
+            if setup.breakpoint.is_none() {
+                setup.error = Some("页面初始化保护断点无效".into());
+                self.events.push_back(json!({"method":"NodeCloak.documentSetupFailed","sessionId":session,"params":{"error":"页面初始化保护断点无效"}}));
+            }
+        }
+        let error = if let Some(error) = value.get("error") {
+            let message = error["message"].as_str().unwrap_or("");
+            let inherited = (method == "Debugger.resume" && message.trim_end_matches('.') == "Can only perform operation while paused")
+                || (method == "Emulation.setLocaleOverride" && message == "Another locale override is already in effect")
+                || (method == "Emulation.setTimezoneOverride" && message.trim_end_matches('.') == "Timezone override is already in effect");
+            (!inherited).then(|| format!("浏览器拒绝控制命令 {method}（code={}）", error["code"].as_i64().map(|v|v.to_string()).unwrap_or_else(||"unknown".into())))
+        } else if value["result"].get("exceptionDetails").is_some() {
+            Some(format!("浏览器区域设置执行失败：{method}"))
+        } else { None };
+        if let Some(error) = error {
+            if setup.error.is_none() {
+                setup.error = Some(error.clone());
+                self.events.push_back(json!({"method":"NodeCloak.documentSetupFailed","sessionId":session,"params":{"error":error}}));
+            }
+        }
+        self.advance_document(&session)?;
+        Ok(true)
+    }
+    fn check_document_delays(&mut self) {
+        for (session, setup) in &mut self.document_setups {
+            if !setup.ready && setup.error.is_none() && !setup.delayed && setup.started.elapsed() >= Duration::from_secs(15) {
+                setup.delayed = true;
+                let mut pending: Vec<_> = setup.pending.values().copied().collect();
+                pending.sort_unstable();
+                self.events.push_back(json!({"method":"NodeCloak.documentSetupDelayed","sessionId":session,"params":{"pending":pending}}));
+            }
+        }
+    }
     fn read(&mut self) -> Result<Option<Value>, String> {
-        match self.socket.read() {
-            Ok(Message::Text(text)) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|_| "浏览器控制响应格式无效".into()),
+        let result = match self.socket.read() {
+            Ok(Message::Text(text)) => {
+                let value: Value = serde_json::from_str(&text).map_err(|_| "浏览器控制响应格式无效")?;
+                if self.route_document_reply(&value)? { Ok(None) } else { Ok(Some(value)) }
+            },
             Ok(Message::Close(frame)) => Err(format!("浏览器控制连接关闭（WebSocket Close，code={}）", frame.map(|f| u16::from(f.code)).unwrap_or(1005))),
             Ok(_) => Ok(None),
             Err(tungstenite::Error::Io(e))
@@ -158,7 +350,13 @@ impl Protocol {
                 Ok(None)
             }
             Err(e) => Err(format!("浏览器控制连接中断（{}）", recovery::transport_error(&e))),
+        };
+        if result.is_ok() {
+            for session in self.document_setups.keys().cloned().collect::<Vec<_>>() {
+                self.advance_document(&session)?;
+            }
         }
+        result
     }
     // UI activation can wait indefinitely for OS visibility in Firefox background windows.
     // It is independent of the acknowledged region settings and navigation commands.
@@ -263,6 +461,8 @@ pub(crate) fn endpoint(browser: &str, path: &Path) -> Result<String, String> {
     Err("无法连接此副本的本地区域控制接口；请更新浏览器并重新启动".into())
 }
 struct BrowserControl {
+    diagnostic: Option<(PathBuf, String)>,
+    plan: ControlPlan,
     protocol: Protocol,
     firefox: bool,
     region: ResolvedRegion,
@@ -296,12 +496,15 @@ impl BrowserControl {
         advanced: crate::profiles::AdvancedSettings,
         fingerprint: Option<crate::fingerprint::Settings>,
         deny_downloads: bool,
+        plan: ControlPlan,
     ) -> Result<Self, String> {
         let endpoint = endpoint(browser, path)?;
         let socket = recovery::connect_socket(&endpoint)?;
         let mut this = Self {
+            diagnostic: Some((path.to_path_buf(), browser.to_owned())),
+            plan,
             protocol: Protocol {
-                socket,
+                document_setups:HashMap::new(),barrier_owner:None,socket,
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,
@@ -340,7 +543,9 @@ impl BrowserControl {
                 this.protocol.reconnect_endpoint = Some(format!("{endpoint}/{id}"));
             }
             if deny_downloads { this.download_policy_after_reconnect()?; }
-            this.protocol.call("session.subscribe",json!({"events":["browsingContext.userPromptOpened","browsingContext.contextCreated"]}),None)?;
+            if this.plan.automation {
+                this.protocol.call("session.subscribe",json!({"events":["browsingContext.userPromptOpened","browsingContext.userPromptClosed","browsingContext.contextCreated"]}),None)?;
+            }
             if let Some(settings) = this.fingerprint.as_ref().filter(|f| f.enabled) {
                 this.protocol.call("script.addPreloadScript",json!({"functionDeclaration":crate::fingerprint::preload(settings)?,"userContexts":["default"]}),None)?;
             }
@@ -353,10 +558,13 @@ impl BrowserControl {
                 .into();
         } else {
             if deny_downloads { this.download_policy_after_reconnect()?; }
-            this.protocol.call("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"page","exclude":false},{"type":"iframe","exclude":false},{"type":"worker","exclude":false},{"type":"shared_worker","exclude":false},{"type":"service_worker","exclude":false},{"exclude":true}]}),None)?;
+            this.protocol.call("Target.setAutoAttach",this.auto_attach(true),None)?;
             this.drain()?;
-            if this.primary.is_empty() {
-                return Err("Chrome / Edge 初始页面尚未就绪".into());
+            let started = Instant::now();
+            while this.primary.is_empty() {
+                if started.elapsed() >= Duration::from_secs(15) { return Err("Chrome / Edge 初始页面尚未就绪".into()); }
+                if let Some(event) = this.protocol.read()? { this.protocol.events.push_back(event); }
+                this.drain()?;
             }
         }
         if match_ip {
@@ -383,6 +591,14 @@ impl BrowserControl {
         Ok(this)
     }
     fn apply(&mut self, session: Option<&str>) -> Result<(), String> {
+        if !self.plan.profile_settings {
+            return Ok(());
+        }
+        if !self.firefox {
+            if let Some(session) = session.filter(|s| !self.workers.contains(*s)) {
+                return self.apply_document(session);
+            }
+        }
         if !self.firefox {
             if let (Some(session), Some(settings)) =
                 (session, self.fingerprint.as_ref().filter(|f| f.enabled))
@@ -390,8 +606,6 @@ impl BrowserControl {
                 if !self.fingerprint_sessions.contains(session) {
                     let script = crate::fingerprint::script(settings)?;
                     if !self.workers.contains(session) {
-                        self.protocol
-                            .call("Page.enable", json!({}), Some(session))?;
                         self.protocol.call(
                             "Page.addScriptToEvaluateOnNewDocument",
                             json!({"source":script}),
@@ -451,12 +665,10 @@ impl BrowserControl {
             if self.advanced.viewport_width > 0 && session.is_some_and(|s| self.pages.contains(s)) {
                 self.protocol.call("Emulation.setDeviceMetricsOverride",json!({"width":self.advanced.viewport_width,"height":self.advanced.viewport_height,"deviceScaleFactor":1,"mobile":false}),session)?;
             }
-            let current = if session.is_some_and(|s| self.workers.contains(s)) {
-                Value::Null
-            } else {
-                match self.protocol.call("Runtime.evaluate",json!({"expression":"Intl.DateTimeFormat().resolvedOptions()","returnByValue":true}),session) {Ok(result)=>result["result"]["value"].clone(),Err(_) if self.protocol.last_error.as_deref()==Some("Cannot find default execution context")=>Value::Null,Err(e)=>return Err(e)}
-            };
-            if current["locale"] != locale {
+            // A popup's initial about:blank inherits the opener's Intl values,
+            // but those are not persistent overrides for this target. Configure
+            // every target directly without executing JS in a paused renderer.
+            {
                 if let Err(error) = self.protocol.call(
                     "Emulation.setLocaleOverride",
                     json!({"locale":locale}),
@@ -472,7 +684,7 @@ impl BrowserControl {
                 }
             }
             if let Some(timezone) = &self.region.timezone {
-                if current["timeZone"] != *timezone {
+                {
                     if let Err(error) = self.protocol.call(
                         "Emulation.setTimezoneOverride",
                         json!({"timezoneId":timezone}),
@@ -501,7 +713,38 @@ impl BrowserControl {
         }
         Ok(())
     }
+    fn apply_document(&mut self, session: &str) -> Result<(), String> {
+        let mut commands = Vec::new();
+        let preload = self.fingerprint.as_ref().filter(|f| f.enabled)
+            .filter(|_| !self.fingerprint_sessions.contains(session));
+        if let Some(settings) = preload {
+            commands.push(("Page.enable", json!({})));
+            commands.push(("Page.addScriptToEvaluateOnNewDocument", json!({"source":crate::fingerprint::script(settings)?})));
+        }
+        if self.advanced.hardware_concurrency > 0 {
+            commands.push(("Emulation.setHardwareConcurrencyOverride", json!({"hardwareConcurrency":self.advanced.hardware_concurrency})));
+        }
+        if self.advanced.viewport_width > 0 && self.pages.contains(session) {
+            commands.push(("Emulation.setDeviceMetricsOverride",json!({"width":self.advanced.viewport_width,"height":self.advanced.viewport_height,"deviceScaleFactor":1,"mobile":false})));
+        }
+        let locale = self.region.language.split(',').next().unwrap_or("en-US");
+        commands.push(("Emulation.setLocaleOverride", json!({"locale":locale})));
+        if let Some(timezone) = &self.region.timezone {
+            commands.push(("Emulation.setTimezoneOverride", json!({"timezoneId":timezone})));
+        }
+        if let (Some(latitude), Some(longitude)) = (self.region.latitude.filter(|_| self.pages.contains(session)), self.region.longitude) {
+            commands.push(("Emulation.setGeolocationOverride",json!({"latitude":latitude,"longitude":longitude,"accuracy":self.region.accuracy})));
+        }
+        commands.push(("Target.setAutoAttach", self.auto_attach(false)));
+        commands.push(("Runtime.runIfWaitingForDebugger", json!({})));
+        self.protocol.configure_document(session, commands)?;
+        if preload.is_some() { self.fingerprint_sessions.insert(session.into()); }
+        Ok(())
+    }
     fn configure(&mut self) -> Result<(), String> {
+        if !self.plan.profile_settings {
+            return Ok(());
+        }
         if self.firefox {
             self.apply(None)
         } else {
@@ -509,14 +752,26 @@ impl BrowserControl {
             for session in self.sessions.clone() {
                 self.apply(Some(&session))?;
             }
+            let started = Instant::now();
+            loop {
+                if self.primary.is_empty() || !self.pages.contains(&self.primary) { return Err("浏览器初始页面已关闭，请重新启动副本".into()); }
+                if !self.protocol.document_pending(&self.primary) { break; }
+                if let Some(error) = self.protocol.document_setups.get(&self.primary).and_then(|s|s.error.clone()) { return Err(error); }
+                if started.elapsed() >= Duration::from_secs(15) { return Err("浏览器初始页面设置尚未就绪".into()); }
+                if let Some(event) = self.protocol.read()? { self.protocol.events.push_back(event); }
+                self.drain()?;
+            }
             Ok(())
         }
     }
     fn drain(&mut self) -> Result<(), String> {
+        self.protocol.check_document_delays();
         while let Some(event) = self.protocol.events.pop_front() {
-            self.download_event(&event);
-            if event["method"]=="Page.javascriptDialogClosed"||event["method"]=="browsingContext.userPromptClosed"{self.forget_dialog(&event);continue;}
-            if event["method"]=="Page.javascriptDialogOpening"||event["method"]=="browsingContext.userPromptOpened"{self.remember_dialog(&event);continue;}
+            if self.plan.automation {
+                self.download_event(&event);
+                if event["method"]=="Page.javascriptDialogClosed"||event["method"]=="browsingContext.userPromptClosed"{self.forget_dialog(&event);continue;}
+                if event["method"]=="Page.javascriptDialogOpening"||event["method"]=="browsingContext.userPromptOpened"{self.remember_dialog(&event);continue;}
+            }
             if event["method"] == "Debugger.paused" {
                 if let Some(session) = event["sessionId"].as_str() {
                     if event["params"]["reason"] == "instrumentation"
@@ -581,24 +836,44 @@ impl BrowserControl {
                     if self.primary.is_empty() && params["targetInfo"]["type"] == "page" {
                         self.primary = session.clone();
                     }
-                    if let Err(error)=self.apply(Some(&session)){
-                        let gone=self.protocol.last_error.as_deref()==Some("TARGET_GONE");
-                        let closed=if gone{true}else if let Some(target)=params["targetInfo"]["targetId"].as_str(){self.protocol.call("Target.closeTarget",json!({"targetId":target}),None).is_ok_and(|v|v["success"]==true)}else{false};
-                        if !closed{return Err(error);}
-                        self.sessions.remove(&session);self.pages.remove(&session);self.workers.remove(&session);self.fingerprint_sessions.remove(&session);self.fingerprint_workers.remove(&session);self.internal_workers.remove(&session);self.targets.retain(|_,s|s!=&session);self.automation_dialogs.remove(&session);
-                        if self.primary==session{self.primary=self.pages.iter().next().cloned().unwrap_or_default();}
-                        if self.automation_warnings.len()<16{self.automation_warnings.push("A new browser target could not be initialized and was closed; existing protected tabs remain available.".into());}
-                        continue;
+                    // Documents initialize asynchronously; Worker commands can
+                    // observe a normal detach at any point in this sequence.
+                    let setup: Result<(), String> = (|| {
+                        self.apply(Some(&session))?;
+                        if !self.plan.profile_settings || self.workers.contains(&session) {
+                            self.protocol.call("Target.setAutoAttach",self.auto_attach(false),Some(&session))?;
+                            if self.plan.profile_settings {
+                                self.protocol.call("Runtime.runIfWaitingForDebugger", json!({}), Some(&session))?;
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = setup {
+                        // Protocol::call queues the confirmed detach event. Let
+                        // the common handler clean up this target, preserving
+                        // the other pages and their protection state.
+                        if error == "TARGET_GONE" { continue; }
+                        return Err(error);
                     }
-                    self.protocol.call("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"type":"worker","exclude":false},{"type":"shared_worker","exclude":false},{"type":"service_worker","exclude":false},{"exclude":true}]}),Some(&session))?;
-                    self.protocol.call(
-                        "Runtime.runIfWaitingForDebugger",
-                        json!({}),
-                        Some(&session),
-                    )?;
                 }
+            } else if event["method"].as_str().is_some_and(|method| method.starts_with("NodeCloak.documentSetup")) {
+                let method = event["method"].as_str().unwrap();
+                let detail = if method == "NodeCloak.documentSetupDelayed" {
+                    format!("renderer setup pending; tab retained and protection pause preserved; commands={}", event["params"]["pending"])
+                } else if method == "NodeCloak.documentSetupFailed" {
+                    format!("{}; tab retained without releasing protection pause", event["params"]["error"].as_str().unwrap_or("setup rejected"))
+                } else { "delayed renderer initialized; original settings applied".into() };
+                if let Some((path, browser)) = &self.diagnostic {
+                    recovery::log(path, browser, match method {
+                        "NodeCloak.documentSetupDelayed"=>"target_setup_delayed",
+                        "NodeCloak.documentSetupFailed"=>"target_setup_failed", _=>"target_setup_ready",
+                    }, 0, &detail);
+                }
+                if method == "NodeCloak.documentSetupFailed" && self.automation_warnings.len() < 16 { self.automation_warnings.push(detail); }
             } else if event["method"] == "Target.detachedFromTarget" {
                 if let Some(session) = event["params"]["sessionId"].as_str() {
+                    self.protocol.document_setups.remove(session);
+                    if self.protocol.barrier_owner.as_deref() == Some(session) { self.protocol.barrier_owner = None; }
                     self.sessions.remove(session);
                     self.workers.remove(session);
                     self.pages.remove(session);
@@ -606,10 +881,29 @@ impl BrowserControl {
                     self.fingerprint_workers.remove(session);
                     self.internal_workers.remove(session);
                     self.targets.retain(|_, attached| attached != session);
+                    self.automation_dialogs.remove(session);
+                    if self.primary == session {
+                        self.primary = self.pages.iter().filter(|s| !self.protocol.document_pending(s)).next()
+                            .or_else(||self.pages.iter().next()).cloned().unwrap_or_default();
+                    }
                 }
             }
         }
         Ok(())
+    }
+    fn auto_attach(&self, include_pages: bool) -> Value {
+        let mut filter = vec![];
+        if include_pages {
+            filter.push(json!({"type":"page","exclude":false}));
+        }
+        filter.push(json!({"type":"iframe","exclude":false}));
+        if self.plan.profile_settings {
+            for kind in ["worker", "shared_worker", "service_worker"] {
+                filter.push(json!({"type":kind,"exclude":false}));
+            }
+        }
+        filter.push(json!({"exclude":true}));
+        json!({"autoAttach":true,"waitForDebuggerOnStart":self.plan.profile_settings,"flatten":true,"filter":filter})
     }
     fn handle_open(
         &mut self,
@@ -748,13 +1042,16 @@ pub(crate) fn start_with_lookup(
     preferences: crate::profiles::Preferences,
     initial: ResolvedRegion,
     lookup_url: String,
+    purpose: LaunchPurpose,
 ) -> Result<(Control, ResolvedRegion), String> {
+    let plan = ControlPlan::new(&browser, &preferences, purpose);
     let (sender, requests) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let alive = Arc::new(AtomicBool::new(false));
     let error = Arc::new(Mutex::new(None));
     let mut control = Control {
+        automation: plan.automation,
         sender,
         stop: stop.clone(),
         alive: alive.clone(),
@@ -772,6 +1069,7 @@ pub(crate) fn start_with_lookup(
             preferences.advanced.clone(),
             preferences.fingerprint.clone(),
             false,
+            plan,
         )
         .and_then(|mut state| {
             state.region = regional::resolve(&preferences, state.region.ip_region.clone())?;
@@ -841,7 +1139,7 @@ pub(crate) fn start_with_lookup(
                     }
                 }
                 state.drain()?;
-                state.cleanup_closed_dialogs();
+                if state.plan.automation { state.cleanup_closed_dialogs(); }
                 if state.download_lease.is_some() && state.download_checked.elapsed() >= Duration::from_secs(1) {
                     state.download_checked = Instant::now();
                     let _ = state.maintain_downloads(&AtomicBool::new(false));
@@ -921,6 +1219,10 @@ mod tests {
         1
     }
     fn navigation_fixture(fail: bool) -> (BrowserControl, std::thread::JoinHandle<()>) {
+        navigation_fixture_with_worker(fail, None)
+    }
+    fn navigation_fixture_with_worker(fail: bool, detach_at: Option<&str>) -> (BrowserControl, std::thread::JoinHandle<()>) {
+        let detach_at = detach_at.map(str::to_owned);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -944,6 +1246,22 @@ mod tests {
                     ))
                     .unwrap();
                 }
+                return;
+            }
+            if let Some(detach_at) = detach_at {
+                ws.send(Message::Text(json!({"method":"Target.attachedToTarget","params":{"sessionId":"short-worker","targetInfo":{"targetId":"worker","type":"worker"},"waitingForDebugger":true}}).to_string().into())).unwrap();
+                let mut detached = false;
+                while let Ok(Message::Text(raw)) = ws.read() {
+                    let command: Value = serde_json::from_str(&raw).unwrap();
+                    if !detached && command["method"] == detach_at {
+                        ws.send(Message::Text(json!({"method":"Target.detachedFromTarget","params":{"sessionId":"short-worker"}}).to_string().into())).unwrap();
+                        ws.send(Message::Text(json!({"id":navigation["id"],"result":{"frameId":"main"}}).to_string().into())).unwrap();
+                        detached = true;
+                    } else {
+                        ws.send(Message::Text(json!({"id":command["id"],"result":{"breakpointId":"worker-first-script"}}).to_string().into())).unwrap();
+                    }
+                }
+                assert!(detached, "worker stage not reached: {detach_at}");
                 return;
             }
             ws.send(Message::Text(json!({"method":"Target.attachedToTarget","params":{"sessionId":"child","targetInfo":{"targetId":"frame","type":"iframe"},"waitingForDebugger":true}}).to_string().into())).unwrap();
@@ -983,8 +1301,9 @@ mod tests {
         }
         (
             BrowserControl {
+                diagnostic:None,plan: ControlPlan { profile_settings: true, automation: false },
                 protocol: Protocol {
-                    socket,
+                    document_setups:HashMap::new(),barrier_owner:None,socket,
                     next: 0,
                     events: VecDeque::new(),
                     last_error: None,
@@ -1016,12 +1335,42 @@ mod tests {
         )
     }
     #[test]
+    fn terminated_worker_during_setup_does_not_interrupt_browser_control() {
+        for method in ["Debugger.enable", "Emulation.setLocaleOverride", "Target.setAutoAttach", "Runtime.runIfWaitingForDebugger"] {
+            let (mut state, server) = navigation_fixture_with_worker(false, Some(method));
+            state.fingerprint = Some(crate::fingerprint::fresh().unwrap());
+            let result = state.open("https://example.invalid/", false);
+            let drained = state.drain();
+            let alive = state.protocol.call("Runtime.evaluate", json!({"expression":"1"}), Some("main"));
+            let worker_removed = !state.sessions.contains("short-worker") && !state.workers.contains("short-worker") && !state.targets.contains_key("worker");
+            drop(state);
+            server.join().unwrap();
+            assert!(result.is_ok(), "{method}: {result:?}");
+            assert!(drained.is_ok() && alive.is_ok() && worker_removed, "{method}: worker cleanup or surviving page failed");
+        }
+    }
+    #[test]
     fn navigation_resumes_new_frames_before_waiting_for_navigation_acknowledgement() {
         let (mut state, server) = navigation_fixture(false);
         let result = state.open("https://example.invalid/", false);
         drop(state);
         server.join().unwrap();
         assert!(result.is_ok(), "{result:?}");
+    }
+    #[test]
+    fn detached_primary_reselects_a_surviving_page() {
+        let (mut state, server) = navigation_fixture(false);
+        state.open("https://example.invalid/", false).unwrap();
+        state.sessions.extend(["main".into(),"replacement".into()]);
+        state.pages.extend(["main".into(),"replacement".into()]);
+        state.protocol.events.push_back(json!({"method":"Target.detachedFromTarget","params":{"sessionId":"main"}}));
+        state.drain().unwrap();
+        assert_eq!(state.primary, "replacement");
+        state.protocol.events.push_back(json!({"method":"Target.detachedFromTarget","params":{"sessionId":"replacement"}}));
+        state.drain().unwrap();
+        assert!(state.primary.is_empty());
+        drop(state);
+        server.join().unwrap();
     }
     #[test]
     fn navigation_reports_browser_network_errors_instead_of_claiming_success() {
@@ -1070,8 +1419,9 @@ mod tests {
         });
         let (socket, _) = tungstenite::connect(format!("ws://{address}")).unwrap();
         let mut state = BrowserControl {
+            diagnostic:None,plan: ControlPlan { profile_settings: true, automation: false },
             protocol: Protocol {
-                socket,
+                document_setups:HashMap::new(),barrier_owner:None,socket,
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,
@@ -1259,6 +1609,7 @@ mod tests {
                 prefs.clone(),
                 regional::initial(&prefs).unwrap(),
                 fixture.url("/region"),
+                LaunchPurpose::Manual,
             )
             .unwrap();
             control.open(fixture.url(route), false).unwrap();
@@ -1350,6 +1701,11 @@ mod tests {
                             )
                         });
                         let route = normalized.as_deref().unwrap_or(route);
+                        if route.starts_with("/popup-redirect") {
+                            let response = format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/popup-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            let _ = stream.write_all(response.as_bytes());
+                            return;
+                        }
                         let (kind, body) = if route.starts_with("/region") {
                             ("application/json",json!({"success":true,"ip":"203.0.113.12","country_code":"JP","city":"Tokyo","latitude":35.68,"longitude":139.69,"timezone":{"id":"Asia/Tokyo"}}).to_string())
                         } else if route.starts_with("/report?") {
@@ -1370,6 +1726,29 @@ mod tests {
                                 .unwrap_or(""));
                             let _ = tx.send(data);
                             ("text/plain", "ok".into())
+                        } else if route.starts_with("/popup-opener") {
+                            let action = if route.contains("?write") {
+                                r#"const child=window.open('about:blank','_blank');child.document.write('<script>location.replace("/popup-redirect")</'+'script>');child.document.close();"#
+                            } else if route.contains("?noopener") { "window.open('/popup-redirect','_blank','noopener')" }
+                            else { "window.open('/popup-redirect','_blank')" };
+                            ("text/html", format!("<!doctype html><title>Popup opener</title><button id=login onclick=\"{}\">Sign in</button><script>fetch('/report?data='+encodeURIComponent(JSON.stringify({{stage:'opener'}})))</script>", action.replace('"', "&quot;")))
+                        } else if route.starts_with("/popup-final") {
+                            ("text/html", r#"<!doctype html><title>Login popup fixture</title><script>
+                            const first={stage:'popup-first',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),webdriver:navigator.webdriver};
+                            fetch('/report?data='+encodeURIComponent(JSON.stringify(first)));
+                            setTimeout(()=>fetch('/report?data='+encodeURIComponent(JSON.stringify({stage:'popup-alive',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone}))),8000);
+                            </script>"#.into())
+                        } else if route.starts_with("/separation-worker") {
+                            ("application/javascript", "postMessage({timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])});".into())
+                        } else if route.starts_with("/separation-frame") {
+                            ("text/html", "<script>parent.postMessage({frame:{timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])}},'*')</script>".into())
+                        } else if route.starts_with("/separation") {
+                            ("text/html", r#"<!doctype html><title>Manual settings test</title><script>
+                            const main={webdriver:navigator.webdriver,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])};
+                            const worker=new Promise(resolve=>{const w=new Worker('/separation-worker');w.onmessage=e=>{w.terminate();resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'worker timeout'}),10000)});
+                            const frame=new Promise(resolve=>{addEventListener('message',e=>{if(e.data.frame)resolve(e.data.frame)});const f=document.createElement('iframe');f.src=location.origin.replace('127.0.0.1','localhost')+'/separation-frame';document.documentElement.append(f);setTimeout(()=>resolve({error:'frame timeout'}),10000)});
+                            Promise.all([worker,frame]).then(([worker,frame])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({main,worker,frame}))));
+                            </script>"#.into())
                         } else if route.starts_with("/fingerprint-worker") {
                             ("application/javascript",r#"const c=new OffscreenCanvas(64,32);const x=c.getContext('2d');x.fillStyle='#735941';x.fillRect(0,0,64,32);x.font='14px serif';x.fillText('NodeCloak',2,19);const bytes=x.getImageData(0,0,64,32).data;let h=2166136261;for(const v of bytes)h=Math.imul(h^v,16777619);postMessage({marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),first:h>>>0,font:x.measureText('NodeCloak').width});self.close();"#.into())
                         } else if route.starts_with("/fingerprint-frame") {
@@ -1389,7 +1768,8 @@ mod tests {
                     Promise.all([worker,frame,geo,permission,privacy]).then(([worker,frame,geo,permission])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({...first,worker,frame,geo,permission:permission.state})))).catch(e=>fetch('/report?data='+encodeURIComponent(JSON.stringify({error:String(e)}))));
                     </script>"#.into())
                         };
-                        let response=format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nCache-Control: no-store\r\n\r\n{body}",body.len());
+                        let coop = if route.starts_with("/popup-final") { "Cross-Origin-Opener-Policy: same-origin\r\n" } else { "" };
+                        let response=format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nCache-Control: no-store\r\n{coop}\r\n{body}",body.len());
                         let _ = stream.write_all(response.as_bytes());
                     });
                 }
@@ -1445,8 +1825,10 @@ mod tests {
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
         let done=Arc::new(AtomicBool::new(false));let stop=done.clone();listener.set_nonblocking(true).unwrap();
         let server=std::thread::spawn(move||{while !stop.load(Ordering::SeqCst){if let Ok((mut stream,_))=listener.accept(){let _=stream.set_read_timeout(Some(Duration::from_secs(2)));let mut request=[0u8;4096];let n=stream.read(&mut request).unwrap_or(0);let req=String::from_utf8_lossy(&request[..n]);let body=if req.starts_with("GET /frame"){r#"<html><body>Frame ready<button onclick="this.textContent='Frame clicked'">Frame button</button></body></html>"#.to_string()}else{format!(r#"<html><head><title>MCP Fixture</title></head><body><p id="result">Ready</p><input aria-label="Name" oninput="document.getElementById('nameValue').textContent='Name:'+this.value"><span id="nameValue"></span><select aria-label="Color" onchange="document.getElementById('colorValue').textContent='Color:'+this.value"><option value="a">A</option><option value="b">B</option></select><span id="colorValue"></span><input type="file" aria-label="Upload" onchange="document.getElementById('uploadValue').textContent=this.files[0]?.name"><span id="uploadValue"></span><button onclick="document.getElementById('result').textContent='Clicked'">Save</button><button onclick="alert('Hello')">Dialog</button><a href="/file" download="fixture.txt">Download</a><iframe src="/frame?local"></iframe><iframe src="http://localhost:{}/frame"></iframe></body></html>"#,address.port())};let data=if req.starts_with("GET /file"){"HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=fixture.txt\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfixture!".to_string()}else{format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body)};let _=stream.write_all(data.as_bytes());}else{std::thread::sleep(Duration::from_millis(15));}}});
-        for engine in ["chrome","edge","firefox"].into_iter().filter(|e|std::env::var("CLAUDE_DONE_TEST_BROWSER").map(|s|s==*e).unwrap_or(true)){
-            let mut prefs=Preferences::default();prefs.startup_url="about:blank".into();prefs.fingerprint=Some(crate::fingerprint::fresh().unwrap());
+        for (engine, stable) in ["chrome","edge","firefox"].into_iter().filter(|e|std::env::var("CLAUDE_DONE_TEST_BROWSER").map(|s|s==*e).unwrap_or(true)).flat_map(|engine| [(engine, false), (engine, true)]){
+            println!("{engine}: MCP operations with stable fingerprint={stable}");
+            let mut prefs=Preferences::default();prefs.startup_url="about:blank".into();
+            if stable { prefs.fingerprint=Some(crate::fingerprint::fresh().unwrap()); }
             let browser=browser(engine,prefs,"");let files=tempfile::tempdir().unwrap();let file=files.path().join("input.txt");std::fs::write(&file,"fixture upload").unwrap();
             let grant=crate::mcp::policy::Grant{id:uuid::Uuid::new_v4().to_string(),name:"Fixture".into(),profile_ids:vec!["test".into()],permissions:vec!["read".into(),"manage".into(),"page_read".into(),"page_write".into(),"files".into()],origins:vec![],expires_at:chrono::Utc::now().timestamp()+600,confirm_interactions:false,file_roots:vec![files.path().to_string_lossy().into()],revoked:false,token_hash:String::new()};
             let call=|tool:&str,mut args:Value|{args["profile_id"]=json!("test");let(tx,rx)=mpsc::channel();browser.control.sender.send(Request::Automation(tool.into(),args,grant.clone(),Arc::new(AtomicBool::new(false)),tx)).unwrap();rx.recv_timeout(Duration::from_secs(45)).unwrap_or_else(|e|panic!("{engine}: {tool}: {e}; {:?}",browser.control.error.lock().unwrap()))};
@@ -1501,7 +1883,10 @@ mod tests {
     fn browser(browser: &str, prefs: Preferences, lookup: &str) -> TempBrowser {
         browser_with_setup(browser, prefs, lookup, |_| {})
     }
-    fn browser_with_setup(browser: &str, mut prefs: Preferences, lookup: &str, setup: impl FnOnce(&Path)) -> TempBrowser {
+    fn browser_with_setup(browser: &str, prefs: Preferences, lookup: &str, setup: impl FnOnce(&Path)) -> TempBrowser {
+        browser_for_purpose(browser, prefs, lookup, LaunchPurpose::Mcp, setup)
+    }
+    fn browser_for_purpose(browser: &str, mut prefs: Preferences, lookup: &str, purpose: LaunchPurpose, setup: impl FnOnce(&Path)) -> TempBrowser {
         prefs.regional.enabled = true;
         let root = tempfile::tempdir().unwrap();
         let canonical = root.path().canonicalize().unwrap();
@@ -1519,7 +1904,7 @@ mod tests {
             preferences: prefs.clone(),
         };
         let p = profiles::create(&canonical, draft, None).unwrap();
-        profiles::apply_preferences_for_control(&canonical,&p,true).unwrap();
+        profiles::apply_preferences_for_control(&canonical,&p,purpose == LaunchPurpose::Mcp).unwrap();
         let path = profiles::path(&canonical, &p).unwrap();
         let ip=regional::uses_ip(&prefs).then(||regional::parse_ip_region(&json!({"success":true,"ip":"203.0.113.12","country_code":"JP","city":"Tokyo","latitude":35.68,"longitude":139.69,"timezone":{"id":"Asia/Tokyo"}})).unwrap());
         if browser == "firefox" {
@@ -1530,13 +1915,18 @@ mod tests {
             .unwrap();
         }
         setup(&path);
-        platform::spawn_controlled_browser(browser, &path, "direct", None).unwrap();
+        if purpose == LaunchPurpose::Manual {
+            platform::spawn_settings_browser(browser, &path, "direct", None).unwrap();
+        } else {
+            platform::spawn_controlled_browser(browser, &path, "direct", None).unwrap();
+        }
         let result = start_with_lookup(
             browser.into(),
             path.clone(),
             prefs.clone(),
             regional::resolve(&prefs, ip).unwrap(),
             lookup.into(),
+            purpose,
         );
         if result.is_err() {
             let _ = platform::force_close_profile(&path);
@@ -1550,6 +1940,149 @@ mod tests {
         };
         browser.show();
         browser
+    }
+    #[test]
+    #[ignore = "Starts isolated installed browsers to verify manual fingerprint startup"]
+    fn native_manual_fingerprint_startup_is_separate_from_mcp() {
+        let fixture = Fixture::new();
+        for engine in ["chrome", "edge", "firefox"].into_iter().filter(|engine|
+            std::env::var("CLAUDE_DONE_TEST_BROWSER").map(|s| s == *engine).unwrap_or(true)) {
+            let mut prefs = Preferences::default();
+            prefs.startup_url = "about:blank".into();
+            prefs.fingerprint = Some(crate::fingerprint::fresh().unwrap());
+            prefs.regional.timezone_mode = "custom".into();
+            prefs.regional.timezone = "Asia/Tokyo".into();
+            prefs.advanced.location = PermissionMode::Block;
+            let browser = browser_for_purpose(engine, prefs, "", LaunchPurpose::Manual, |_| {});
+            assert!(!browser.control.automation, "{engine}: manual launch opted into MCP");
+            browser.control.open(fixture.url("/separation"), false).unwrap();
+            let report = fixture.report(&browser);
+            for context in [&report["main"], &report["frame"], &report["worker"]] {
+                assert_eq!(context["timezone"], "Asia/Tokyo", "{engine}: manual settings not applied: {report}");
+            }
+            assert_eq!(report["main"]["marker"], true, "{engine}: main fingerprint missing");
+            if engine != "firefox" {
+                assert_eq!(report["main"]["webdriver"], false, "{engine}: manual settings startup advertises automation");
+            }
+            assert_eq!(report["frame"]["marker"], true, "{engine}: iframe fingerprint missing");
+            if engine != "firefox" {
+                assert_eq!(report["worker"]["marker"], true, "{engine}: Worker fingerprint missing");
+            }
+            assert!(browser.control.alive.load(Ordering::SeqCst), "{engine}: settings controller stopped");
+            println!("{engine}: manual fingerprint/timezone startup remains independent of MCP");
+        }
+    }
+    #[test]
+    #[ignore = "Starts temporary Chrome/Edge to verify manual login popups across origin and opener-policy changes"]
+    fn native_manual_login_popup_survives_cross_origin_redirect() {
+        for engine in ["chrome", "edge"].into_iter().filter(|engine|
+            std::env::var("CLAUDE_DONE_TEST_BROWSER").map(|s| s == *engine).unwrap_or(true)) {
+            let fixture = Fixture::new();
+            let mut prefs = Preferences::default();
+            prefs.startup_url = "about:blank".into();
+            prefs.fingerprint = Some(crate::fingerprint::fresh().unwrap());
+            prefs.regional.timezone_mode = "custom".into();
+            prefs.regional.timezone = "Europe/London".into();
+            let browser = browser_for_purpose(engine, prefs, "", LaunchPurpose::Manual, |_| {});
+            let opener_route = if std::env::var_os("NODECLOAK_POPUP_NOOPENER").is_some() { "/popup-opener?noopener" }
+                else if std::env::var_os("NODECLOAK_POPUP_WRITE").is_some() { "/popup-opener?write" } else { "/popup-opener" };
+            browser.control.open(fixture.url(opener_route), false).unwrap();
+            assert_eq!(fixture.reports.recv_timeout(Duration::from_secs(20)).unwrap()["stage"], "opener");
+            // A second connection drives only this disposable test profile, as
+            // a native user gesture; the settings controller handles the popup.
+            let socket = recovery::connect_socket(&endpoint(engine, &browser.path).unwrap()).unwrap();
+            let mut driver = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
+            if std::env::var_os("NODECLOAK_POPUP_DORMANT").is_some() {
+                let target = driver.call("Target.createTarget", json!({"url":"","background":true}), None).unwrap()["targetId"].clone();
+                // Longer than the old 15-second destructive initialization deadline.
+                std::thread::sleep(Duration::from_secs(18));
+                let targets = driver.call("Target.getTargets", json!({}), None).unwrap();
+                assert!(targets["targetInfos"].as_array().unwrap().iter().any(|t|t["targetId"] == target), "{engine}: delayed blank tab was closed");
+                let attached = driver.call("Target.attachToTarget", json!({"targetId":target,"flatten":true}), None).unwrap();
+                driver.call("Page.navigate", json!({"url":fixture.url("/popup-final")}), attached["sessionId"].as_str()).unwrap();
+            } else {
+                let targets = driver.call("Target.getTargets", json!({}), None).unwrap();
+                let parent = targets["targetInfos"].as_array().unwrap().iter().find(|target|
+                    target["url"].as_str().is_some_and(|url| url.contains("/popup-opener"))).unwrap()["targetId"].clone();
+                let attached = driver.call("Target.attachToTarget", json!({"targetId":parent,"flatten":true}), None).unwrap();
+                driver.call("Runtime.evaluate", json!({"expression":"document.querySelector('#login').click(); true","userGesture":true,"returnByValue":true}), attached["sessionId"].as_str()).unwrap();
+            }
+            let first = fixture.reports.recv_timeout(Duration::from_secs(20)).unwrap_or_else(|error|
+                panic!("{engine}: login popup never ran its first document: {error}; controller={:?}; diagnostic={}", browser.control.error.lock().unwrap(), std::fs::read_to_string(browser.path.join("nodecloak-control.jsonl")).unwrap_or_default()));
+            println!("{engine}: first popup report {first}");
+            let alive = fixture.reports.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|error|
+                panic!("{engine}: login popup closed or stalled: {error}; first={first}; controller={:?}", browser.control.error.lock().unwrap()));
+            assert_eq!(alive["stage"], "popup-alive", "{engine}: {alive}");
+            assert_eq!(first["stage"], "popup-first", "{engine}: {first}");
+            assert_eq!(first["timezone"], "Europe/London", "{engine}: popup lost timezone: {first}");
+            assert_eq!(first["marker"], true, "{engine}: popup first script lost fingerprint: {first}");
+            assert_eq!(first["webdriver"], false, "{engine}: manual popup became automated");
+            let targets = driver.call("Target.getTargets", json!({}), None).unwrap();
+            assert!(targets["targetInfos"].as_array().unwrap().iter().any(|target| target["url"].as_str().is_some_and(|url| url.ends_with("/popup-final"))), "{engine}: login tab was closed");
+            assert!(browser.control.alive.load(Ordering::SeqCst), "{engine}: controller stopped");
+            println!("{engine}: manual popup remains open with fingerprint/timezone across redirect and COOP");
+        }
+    }
+    #[test]
+    #[ignore = "Starts disposable Chrome/Edge and verifies native first-script protection after a rejected preload"]
+    fn native_rejected_popup_preload_keeps_first_script_paused() {
+        for engine in ["chrome", "edge"].into_iter().filter(|engine|
+            std::env::var("CLAUDE_DONE_TEST_BROWSER").map(|s|s == *engine).unwrap_or(true)) {
+            let fixture = Fixture::new();
+            let mut prefs = Preferences::default();
+            prefs.startup_url = "about:blank".into();
+            prefs.regional.enabled = true;
+            prefs.regional.timezone_mode = "custom".into();
+            prefs.regional.timezone = "Europe/London".into();
+            prefs.fingerprint = Some(crate::fingerprint::fresh().unwrap());
+            let mut browser = browser_for_purpose(engine,prefs.clone(),"",LaunchPurpose::Manual,|_|{});
+            browser.control.stop.store(true,Ordering::SeqCst);
+            browser.control.worker.take().unwrap().join().unwrap();
+            let mut state = BrowserControl::initialize(engine,&browser.path,regional::initial(&prefs).unwrap(),
+                PermissionMode::Ask,false,"",prefs.advanced.clone(),prefs.fingerprint.clone(),false,
+                ControlPlan::new(engine,&prefs,LaunchPurpose::Manual)).unwrap();
+            state.configure().unwrap();
+            state.open(&fixture.url("/popup-opener?noopener"),false).unwrap();
+            assert_eq!(fixture.reports.recv_timeout(Duration::from_secs(20)).unwrap()["stage"],"opener");
+            let socket = recovery::connect_socket(&endpoint(engine,&browser.path).unwrap()).unwrap();
+            let mut driver = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None };
+            let targets = driver.call("Target.getTargets",json!({}),None).unwrap();
+            let parent = targets["targetInfos"].as_array().unwrap().iter().find(|t|t["url"].as_str().is_some_and(|u|u.contains("/popup-opener"))).unwrap()["targetId"].clone();
+            let attached = driver.call("Target.attachToTarget",json!({"targetId":parent,"flatten":true}),None).unwrap();
+            driver.call("Runtime.evaluate",json!({"expression":"document.querySelector('#login').click();true","userGesture":true,"returnByValue":true}),attached["sessionId"].as_str()).unwrap();
+            let mut popup = None;
+            let mut paused = false;
+            let deadline = Instant::now()+Duration::from_secs(12);
+            while Instant::now()<deadline {
+                if let Some(event) = state.protocol.read().unwrap() {
+                    if event["method"] == "Target.attachedToTarget" && event["params"]["targetInfo"]["type"] == "page" {
+                        let session = event["params"]["sessionId"].as_str().unwrap().to_owned();
+                        assert!(popup.is_none());
+                        // A real protocol type error, no production fault-injection flag.
+                        state.protocol.configure_document(&session,vec![
+                            ("Page.enable",json!({})),
+                            ("Page.addScriptToEvaluateOnNewDocument",json!({"source":42})),
+                            ("Emulation.setTimezoneOverride",json!({"timezoneId":"Europe/London"})),
+                            ("Runtime.runIfWaitingForDebugger",json!({})),
+                        ]).unwrap();
+                        state.protocol.document_setups.get_mut(&session).unwrap().started=Instant::now()-Duration::from_secs(1);
+                        state.protocol.advance_document(&session).unwrap();
+                        popup=Some(session);
+                    } else if event["method"] == "Debugger.paused" && popup.as_deref()==event["sessionId"].as_str() {
+                        paused=event["params"]["reason"]=="instrumentation";
+                    } else { state.protocol.events.push_back(event); }
+                }
+                state.drain().unwrap();
+                if paused && popup.as_ref().is_some_and(|s|state.protocol.document_setups[s].error.is_some()) { break; }
+            }
+            let popup=popup.expect("no popup attached");
+            assert!(paused,"{engine}: failed preload did not retain native first-script pause");
+            assert!(state.protocol.document_setups[&popup].error.is_some(),"{engine}: native preload rejection ignored");
+            assert_eq!(state.protocol.barrier_owner.as_deref(),Some(popup.as_str()));
+            assert!(fixture.reports.recv_timeout(Duration::from_secs(2)).is_err(),"{engine}: page script ran after rejected protection");
+            assert!(driver.call("Target.getTargets",json!({}),None).unwrap()["targetInfos"].as_array().unwrap().len()>=2);
+            println!("{engine}: real preload rejection retains first-script pause and open tab");
+        }
     }
     fn check(
         data: &Value,

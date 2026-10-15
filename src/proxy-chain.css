@@ -1,0 +1,13 @@
+.proxy-chain-card{margin-top:18px}
+.proxy-chain-card>.advanced-toggle{border:0;padding:0;margin:0}
+.proxy-chain-card .advanced-toggle strong{display:flex;align-items:center;gap:8px}
+.proxy-chain-card .proxy-chain-fields{margin-top:18px;grid-template-columns:minmax(110px,.8fr) minmax(140px,1.4fr) minmax(95px,.7fr)}
+.proxy-chain-fields .select-menu,.proxy-chain-fields .select-trigger{width:100%}
+.proxy-chain-route{list-style:none;display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:14px;margin:14px 0 0;border:1px solid var(--border);border-radius:12px;background:var(--surface-soft);color:var(--text-secondary)}
+.proxy-chain-route li{display:flex;flex-direction:column;gap:5px;min-width:0;font-size:11px}
+.proxy-chain-route code{font-size:10px;color:var(--muted);overflow-wrap:anywhere}
+.proxy-chain-route .proxy-chain-arrow{flex-shrink:0;color:var(--green)}
+@media(max-width:650px){.proxy-chain-card .proxy-chain-fields{grid-template-columns:1fr}.proxy-chain-route{gap:8px}}
+
+.proxy-source-form .proxy-api-url{grid-column:1 / -1}
+.proxy-source-form .proxy-api-url input{width:100%;min-width:0}

@@ -87,8 +87,9 @@ impl Fixture {
                 .unwrap();
         }
         let control = BrowserControl {
+            diagnostic:None,plan: ControlPlan { profile_settings: false, automation: true },
             protocol: Protocol {
-                socket,
+                document_setups:HashMap::new(),barrier_owner:None,socket,
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,

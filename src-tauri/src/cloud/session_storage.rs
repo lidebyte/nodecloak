@@ -48,6 +48,29 @@ pub(super) fn chromium_key(value: &str) -> Result<SiteKey, String> {
         partition_key,
     })
 }
+// Internal browser pages own these partitions; they are not portable website
+// sessions. Filter only during local discovery, keeping imported data web-only.
+pub(super) fn chromium_web_key(value: &str) -> Result<Option<SiteKey>, String> {
+    if value.len() > 4096 {
+        return Err("网站存储键过长".into());
+    }
+    if let Some((base, attribute)) = value.split_once('^') {
+        origin(base)?;
+        if !attribute.contains('^') {
+            if let Some(top) = attribute.strip_prefix('0')
+                .and_then(|top| reqwest::Url::parse(top).ok()) {
+                if matches!(top.scheme(), "edge" | "chrome" | "chrome-extension" | "devtools")
+                    && top.host_str().is_some()
+                    && top.username().is_empty() && top.password().is_none()
+                    && matches!(top.path(), "" | "/")
+                    && top.query().is_none() && top.fragment().is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    chromium_key(value).map(Some)
+}
 pub(super) fn firefox_partition(attributes: &str) -> Result<Option<Partition>, String> {
     let attributes = attributes.strip_prefix('^').unwrap_or(attributes);
     if attributes.is_empty() {
@@ -168,10 +191,11 @@ pub(super) fn quota_keys(path: &Path, out: &mut BTreeSet<SiteKey>) -> Result<(),
             if !key.starts_with("http://") && !key.starts_with("https://") {
                 continue;
             }
+            let Some(key) = chromium_web_key(&key)? else { continue };
             if name != "_default" {
                 return Err("此副本包含命名网站存储桶，保留本机数据".into());
             }
-            out.insert(chromium_key(&key)?);
+            out.insert(key);
         }
     }
     Ok(())
@@ -180,6 +204,25 @@ pub(super) fn quota_keys(path: &Path, out: &mut BTreeSet<SiteKey>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn internal_partition_filter_preserves_strict_website_validation() {
+        for value in [
+            "https://login.example/path/^0edge://copilot-ntp",
+            "https://user:password@login.example/^0edge://copilot-ntp",
+            "https://login.example/^0edge://user:password@copilot-ntp",
+            "https://login.example/^0edge://copilot-ntp/path",
+            "https://login.example/^0edge://copilot-ntp?query=value",
+            "https://login.example/^0edge://copilot-ntp#fragment",
+            "https://login.example/^0edge://copilot-ntp^31",
+            "https://login.example/^0file:///tmp/profile",
+            "https://login.example/^0about:blank",
+            "https://login.example/^4opaque",
+        ] {
+            assert!(chromium_web_key(value).is_err(), "{value}");
+        }
+        assert!(chromium_web_key("https://login.example/^31").unwrap().is_some());
+        assert!(chromium_web_key(&format!("https://login.example/^0edge://{}", "a".repeat(4096))).is_err());
+    }
     #[test]
     fn nonportable_namespaces_are_rejected_without_flattening() {
         for key in [

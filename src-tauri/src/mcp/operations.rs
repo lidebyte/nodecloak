@@ -11,7 +11,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tauri::Manager;
 
 pub fn projection(p: &Profile, running: bool) -> Value {
-    json!({"id":p.id,"name":p.name,"browser":p.browser,"tags":p.tags,"notes":p.notes,"running":running,"deleted_at":p.deleted_at,"updated_at":p.updated_at,"proxy":{"mode":p.proxy.mode,"host":p.proxy.host,"port":p.proxy.port,"has_credentials":p.proxy.credential_ref.is_some()},"preferences":p.preferences,"shared":p.received_share.is_some()})
+    json!({"id":p.id,"name":p.name,"browser":p.browser,"tags":p.tags,"notes":p.notes,"running":running,"deleted_at":p.deleted_at,"updated_at":p.updated_at,"proxy":{"mode":p.proxy.mode,"host":p.proxy.host,"port":p.proxy.port,"pre_proxy":p.proxy.pre_proxy,"api_source":p.proxy.api_url.is_some(),"has_credentials":p.proxy.credential_ref.is_some()},"preferences":p.preferences,"shared":p.received_share.is_some()})
 }
 pub fn execute(
     app: &tauri::AppHandle,
@@ -206,13 +206,11 @@ pub fn execute(
         "profiles_start" => {
             broker::current_grant(app, &g.id)?.origin(&p.preferences.startup_url)?;
             let was_running = profiles::running(root, &p)?;
-            let launch_result = crate::profile_commands::launch_for_control(
+            let launch_result = crate::profile_commands::launch_for_automation(
                 root,
                 id,
                 "startup",
                 &runtime,
-                crate::regional::LOOKUP_URL,
-                true,
             );
             let allowed = broker::current_grant(app, &g.id)
                 .and_then(|grant| grant.authorize("manage", Some(id), broker::now()));
@@ -357,11 +355,12 @@ mod tests {
     use super::*;
     #[test]
     fn profile_projection_omits_credentials_and_share_capabilities() {
-        let p:Profile=serde_json::from_value(json!({"id":"one","name":"Work","browser":"chrome","notes":"","tags":[],"proxy":{"mode":"http","host":"proxy.test","port":8080,"username":"private-user","credentialRef":"private-keyring"},"preferences":profiles::Preferences::default(),"createdAt":"now","updatedAt":"now","deletedAt":null,"lastTest":null,"legacy":false,"credentialRefs":["private-history-ref"],"receivedShare":"private-share-capability"})).unwrap();
+        let p:Profile=serde_json::from_value(json!({"id":"one","name":"Work","browser":"chrome","notes":"","tags":[],"proxy":{"mode":"http","host":"proxy.test","port":8080,"username":"private-user","credentialRef":"private-keyring","apiUrl":"https://provider.invalid/extract?token=private-api-key"},"preferences":profiles::Preferences::default(),"createdAt":"now","updatedAt":"now","deletedAt":null,"lastTest":null,"legacy":false,"credentialRefs":["private-history-ref"],"receivedShare":"private-share-capability"})).unwrap();
         let projected = projection(&p, false);
         let text = projected.to_string();
         for secret in [
             "private-user",
+            "private-api-key",
             "private-keyring",
             "private-history-ref",
             "private-share-capability",

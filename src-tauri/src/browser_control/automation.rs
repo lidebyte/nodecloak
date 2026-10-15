@@ -23,6 +23,9 @@ impl Runtime {
                 .get(id)
                 .filter(|c| c.alive.load(Ordering::SeqCst))
                 .ok_or("RESTART_REQUIRED: 关闭后通过 MCP 重新启动此副本")?;
+            if !c.automation {
+                return Err("RESTART_REQUIRED: 此副本仅应用指纹和区域设置，请关闭后通过 MCP 启动以启用自动化".into());
+            }
             c.sender.clone()
         };
         let (tx, rx) = mpsc::channel();
@@ -255,6 +258,9 @@ impl BrowserControl {
                 let id = t["targetId"].as_str().ok_or("TAB_NOT_FOUND")?;
                 out.push(json!({"tab_id":id,"frame_id":id,"url":t["url"],"title":t["title"],"top_level":true,"opener":t["openerId"]}));
                 if let Some(session) = self.targets.get(id).cloned() {
+                    // A rendererless/initializing tab still belongs in the tab
+                    // list, but cannot provide a frame tree until navigation.
+                    if self.protocol.document_pending(&session) { continue; }
                     let tree = match self.command("Page.getFrameTree", json!({}), Some(&session), cancel) {
                         Ok(tree) => tree,
                         // A tab may close after Target.getTargets. Its entry was just
@@ -296,6 +302,7 @@ impl BrowserControl {
                     let Some(session) = self.targets.get(id).cloned() else {
                         continue;
                     };
+                    if self.protocol.document_pending(&session) { continue; }
                     let tree = match self.command("Page.getFrameTree", json!({}), Some(&session), cancel) {
                         Ok(tree) => tree,
                         Err(error) if closed_target_error(&error) => continue,
@@ -433,6 +440,9 @@ impl BrowserControl {
         g: &Grant,
         cancel: &AtomicBool,
     ) -> Result<Value, String> {
+        if !self.plan.automation {
+            return Err("AUTOMATION_NOT_ENABLED".into());
+        }
         g.authorize(
             if tool == "__preview" || tool == "__preview_dialog" {
                 "read"
@@ -1007,7 +1017,8 @@ mod tree_tests {
                 stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
             }
             let mut controller = BrowserControl {
-                protocol: Protocol {socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None},
+                diagnostic:None,plan: ControlPlan { profile_settings: false, automation: true },
+                protocol: Protocol {document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None},
                 firefox:false,region:regional::initial(&crate::profiles::Preferences::default()).unwrap(),
                 permission:PermissionMode::Ask,primary:"live-session".into(),sessions:HashSet::new(),
                 targets:HashMap::from([("live".into(),"live-session".into()),("closing-page".into(),"closing-page-session".into()),("closing-frame".into(),"closing-frame-session".into()),("live-frame".into(),"live-frame-session".into())]),

@@ -3,6 +3,40 @@ vi.mock('./bridge',()=>({native:false}));
 const storage=new Map<string,string>();
 beforeEach(()=>{vi.resetModules();storage.clear();vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});});
 describe('browser profiles',()=>{
+  it('validates API proxy sources without requiring a manual endpoint',async()=>{
+    const api=await import('./browser-profiles');const d=api.defaults();d.name='API profile';
+    Object.assign(d.proxy,{mode:'http',host:'',port:0,apiUrl:'https://provider.invalid/extract?count=5'});
+    expect(api.validateDraft(d)).toBeNull();const saved=await api.saveProfile(d);expect(saved.proxy).toMatchObject({apiUrl:'https://provider.invalid/extract?count=5'});
+    for(const apiUrl of ['', 'file:///tmp/test','https://user:pass@provider.invalid/api','https://provider.invalid/api#fragment']){
+      Object.assign(d.proxy,{apiUrl});expect(api.validateDraft(d)).toBeTruthy();
+    }
+    Object.assign(d.proxy,{apiUrl:'https://provider.invalid/api',mode:'direct'});expect(api.validateDraft(d)).toBeTruthy();
+  });
+  it('validates and preserves the local first hop through save and copy',async()=>{
+    const api=await import('./browser-profiles');const d=api.defaults();d.name='chain';
+    Object.assign(d.proxy,{mode:'http',host:'remote.invalid',port:8080,preProxy:{mode:'socks5',host:'127.0.0.1',port:7890}});
+    expect(api.validateDraft(d)).toBeNull();
+    const first=await api.saveProfile(d);const copy=await api.saveProfile({...d,name:'chain copy'},undefined,first.id);
+    expect(copy.proxy).toMatchObject({preProxy:{mode:'socks5',host:'127.0.0.1',port:7890}});
+    Object.assign(d.proxy,{mode:'direct'});expect(api.validateDraft(d)).toBeTruthy();
+    Object.assign(d.proxy,{mode:'http',preProxy:{mode:'http',host:'http://router.invalid/path',port:7890}});expect(api.validateDraft(d)).toBeTruthy();
+    Object.assign(d.proxy,{preProxy:{mode:'http',host:'127.0.0.1',port:0}});expect(api.validateDraft(d)).toBeTruthy();
+  });
+
+  it('accepts router and LAN first hops and preserves them through save and copy',async()=>{
+    const api=await import('./browser-profiles');const d=api.defaults();d.name='router chain';
+    Object.assign(d.proxy,{mode:'http',host:'remote.invalid',port:8080});
+    for(const host of ['192.168.10.1','10.0.0.1','172.16.0.1','fd00::1','router.lan','localhost','::1']){
+      for(const mode of ['http','https','socks5']){d.proxy.preProxy={mode:mode as 'http',host,port:7890};expect(api.validateDraft(d)).toBeNull();}
+    }
+    d.proxy.preProxy={mode:'socks5',host:'192.168.10.1',port:1080};
+    const first=await api.saveProfile(d);const copy=await api.saveProfile({...d,name:'router copy'},undefined,first.id);
+    expect(copy.proxy.preProxy).toEqual(d.proxy.preProxy);
+    for(const host of ['', '192.168.10.1:7890','user@router.lan','router.lan/path','router\r\nHost: injected','[fd00::1]','bad..host']){
+      d.proxy.preProxy={mode:'http',host,port:7890};expect(api.validateDraft(d)).toBeTruthy();
+    }
+  });
+
   it('uses Firefox native concurrency preferences without enabling its automation interface',async()=>{
     const api=await import('./browser-profiles');const prefs=api.defaults().preferences;prefs.fingerprint=undefined;prefs.advanced.hardwareConcurrency=4;
     expect(api.requiresBrowserControl('firefox',prefs)).toBe(false);expect(api.requiresBrowserControl('chrome',prefs)).toBe(true);prefs.advanced.viewportWidth=1280;expect(api.requiresBrowserControl('firefox',prefs)).toBe(true);
@@ -30,6 +64,26 @@ describe('browser profiles',()=>{
     expect(parseProxyUri('socks5://user:p%40ss@[::1]:1081')).toEqual({proxy:{mode:'socks5',host:'::1',port:1081,username:'user'},password:'p@ss'});
     expect(parseProxyUri('https://proxy.example').proxy.port).toBe(443);
     for(const uri of ['file:///tmp','http://host/path','socks5://host:70000','http://host?x=1'])expect(()=>parseProxyUri(uri)).toThrow();
+  });
+  it('parses provider host:port:username:password exports using the selected protocol',async()=>{
+    const {parseProxyUri}=await import('./browser-profiles');
+    const value='gateway.example:44445:customer-zone-isp-ip-192.0.2.10:sample-pass';
+    expect(parseProxyUri(value)).toEqual({proxy:{mode:'http',host:'gateway.example',port:44445,username:'customer-zone-isp-ip-192.0.2.10'},password:'sample-pass'});
+    expect(parseProxyUri(value,'socks5').proxy.mode).toBe('socks5');
+    expect(parseProxyUri(value,'https').proxy.mode).toBe('https');
+    expect(parseProxyUri('socks5://user:secret@gateway.example:1080','https').proxy.mode).toBe('socks5');
+    expect(parseProxyUri('gateway.example:8080','http')).toEqual({proxy:{mode:'http',host:'gateway.example',port:8080,username:''},password:''});
+    expect(parseProxyUri('[::1]:1080:user:a:b@c%2F','socks5')).toEqual({proxy:{mode:'socks5',host:'::1',port:1080,username:'user'},password:'a:b@c%2F'});
+  });
+  it('rejects malformed provider exports and credentials without echoing them in errors',async()=>{
+    const {parseProxyUri}=await import('./browser-profiles');
+    for(const value of ['gateway.example:0:user:private-secret','gateway.example:65536:user:private-secret',
+      'gateway.example:8080:user','gateway.example/path:8080:user:private-secret',
+      '::1:1080:user:private-secret','gateway.example:8080:user:private-secret\nInjected',
+      'http://user:private-secret%ZZ@gateway.example:8080','http://user:private-secret%0A@gateway.example:8080']){
+      let error:unknown;try{parseProxyUri(value);}catch(e){error=e;}
+      expect(error).toBeInstanceOf(Error);expect(String(error)).not.toContain('private-secret');
+    }
   });
   it('keeps credentials out of persistent demo data and copies settings into a new identity',async()=>{
     const api=await import('./browser-profiles');const draft=api.defaults();draft.name='one';draft.proxy={mode:'http',host:'localhost',port:8080,username:'u'};draft.password='TEST-SECRET-DO-NOT-SAVE';

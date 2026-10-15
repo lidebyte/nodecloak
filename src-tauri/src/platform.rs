@@ -513,6 +513,29 @@ pub(crate) fn open_external(url: &str) -> Result<(), String> {
 mod profile_tests {
     use super::*;
     #[test]
+    fn settings_endpoint_accepts_only_the_launched_loopback_port() {
+        assert_eq!(
+            manual_endpoint_marker("DevTools listening on ws://127.0.0.1:41234/devtools/browser/abc-123", 41234),
+            Some("41234\n/devtools/browser/abc-123\n".into())
+        );
+        for endpoint in [
+            "ws://127.0.0.1:41235/devtools/browser/abc-123",
+            "ws://127.0.0.1:0/devtools/browser/abc-123",
+            "ws://localhost:41234/devtools/browser/abc-123",
+            "ws://example.com:41234/devtools/browser/abc-123",
+            "wss://127.0.0.1:41234/devtools/browser/abc-123",
+            "ws://user@127.0.0.1:41234/devtools/browser/abc-123",
+            "ws://127.0.0.1:41234/devtools/page/abc-123",
+            "ws://127.0.0.1:41234/devtools/browser/",
+            "ws://127.0.0.1:41234/devtools/browser/abc-123?extra=1",
+            "ws://127.0.0.1:41234/devtools/browser/abc-123#extra",
+            "ws://127.0.0.1:41234/devtools/browser/abc/123",
+        ] {
+            assert!(manual_endpoint_marker(&format!("DevTools listening on {endpoint}"), 41234).is_none(), "{endpoint}");
+        }
+        assert!(manual_endpoint_marker("unrelated stderr output", 41234).is_none());
+    }
+    #[test]
     fn firefox_profile_is_created_and_checked_without_changing_existing_data() {
         let directory = tempfile::tempdir().unwrap();
         let profile = directory
@@ -708,7 +731,7 @@ pub fn spawn_browser_with_proxy(
     mode: &str,
     relay: Option<u16>,
 ) -> Result<(), String> {
-    spawn_browser_impl(browser, profile, url, mode, relay, false)
+    spawn_browser_impl(browser, profile, url, mode, relay, None)
 }
 pub fn spawn_controlled_browser(
     browser: &str,
@@ -725,7 +748,36 @@ pub fn spawn_controlled_browser(
     if marker.exists() {
         std::fs::remove_file(&marker).map_err(|_| "无法清理旧的浏览器控制标记")?;
     }
-    spawn_browser_impl(browser, profile, "about:blank", mode, relay, true)
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(0))
+}
+pub fn spawn_settings_browser(browser: &str, profile: &Path, mode: &str, relay: Option<u16>) -> Result<(), String> {
+    if browser == "firefox" {
+        return spawn_controlled_browser(browser, profile, mode, relay);
+    }
+    ensure_profile_closed(profile)?;
+    let marker = profile.join("DevToolsActivePort");
+    crate::profiles::guard_tree(&marker)?;
+    if marker.exists() {
+        std::fs::remove_file(&marker).map_err(|_| "无法清理旧的浏览器控制标记")?;
+    }
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").map_err(|_| "无法分配本地浏览器配置端口")?;
+    let port = reservation.local_addr().map_err(|_| "无法读取本地配置端口")?.port();
+    drop(reservation);
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(port))
+}
+
+fn manual_endpoint_marker(line: &str, expected_port: u16) -> Option<String> {
+    let endpoint = line.trim().strip_prefix("DevTools listening on ")?;
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    let id = url.path().strip_prefix("/devtools/browser/")?;
+    if url.scheme() != "ws" || url.host_str() != Some("127.0.0.1")
+        || url.port() != Some(expected_port) || expected_port == 0
+        || !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+        || id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return None;
+    }
+    Some(format!("{expected_port}\n{}\n", url.path()))
 }
 fn spawn_browser_impl(
     browser: &str,
@@ -733,7 +785,7 @@ fn spawn_browser_impl(
     url: &str,
     mode: &str,
     relay: Option<u16>,
-    controlled: bool,
+    debug_port: Option<u16>,
 ) -> Result<(), String> {
     let exe = browser_path(browser)?;
     let mut cmd = command(exe.to_str().ok_or("浏览器路径格式无效")?);
@@ -768,8 +820,8 @@ fn spawn_browser_impl(
             }
         }
     }
-    if controlled {
-        cmd.arg("--remote-debugging-port=0");
+    if let Some(port) = debug_port {
+        cmd.arg(format!("--remote-debugging-port={port}"));
         if browser != "firefox" {
             cmd.args([
                 "--remote-debugging-address=127.0.0.1",
@@ -849,11 +901,39 @@ fn spawn_browser_impl(
                 url,
             ]);
     }
-    cmd.stdin(Stdio::null())
+    let manual_endpoint = debug_port.filter(|port| *port > 0 && browser != "firefox");
+    let mut child = cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(if manual_endpoint.is_some() { Stdio::piped() } else { Stdio::null() })
         .spawn()
         .map_err(|e| format!("无法打开浏览器：{e}"))?;
+    if let Some(port) = manual_endpoint {
+        let stderr = child.stderr.take().ok_or("无法读取浏览器配置接口")?;
+        let marker = profile.join("DevToolsActivePort");
+        // Read the endpoint from this child, never from an unverified local HTTP
+        // server. Only the validated marker is persisted; raw stderr is discarded.
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut published = false;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if !published {
+                            if let Some(value) = manual_endpoint_marker(&line, port) {
+                                if crate::profiles::guard_tree(&marker).is_ok()
+                                    && crate::engine::atomic_write(&marker, value.as_bytes()).is_ok() {
+                                    published = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
     Ok(())
 }
 

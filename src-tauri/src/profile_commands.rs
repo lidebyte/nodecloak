@@ -1,4 +1,5 @@
 use crate::{
+    browser_control::LaunchPurpose,
     data_root, engine, platform,
     profiles::{self, Draft, Profile, ProfileView, Runtime},
     proxy::{self, ProxyTest},
@@ -114,15 +115,26 @@ pub(crate) fn launch_with_lookup(
     runtime: &Runtime,
     lookup_url: &str,
 ) -> Result<(), String> {
-    launch_for_control(root,id,destination,runtime,lookup_url,false)
+    launch_with_purpose(root, id, destination, runtime, lookup_url, LaunchPurpose::Manual)
 }
-pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Runtime,lookup_url:&str,force_control:bool)->Result<(),String>{
+pub(crate) fn launch_for_automation(
+    root: &Path, id: &str, destination: &str, runtime: &Runtime,
+) -> Result<(), String> {
+    launch_with_purpose(root, id, destination, runtime, crate::regional::LOOKUP_URL, LaunchPurpose::Mcp)
+}
+fn launch_with_purpose(
+    root: &Path, id: &str, destination: &str, runtime: &Runtime,
+    lookup_url: &str, purpose: LaunchPurpose,
+) -> Result<(), String> {
+    let automation = purpose == LaunchPurpose::Mcp;
     crate::cloud::sharing::before_launch(root, id)?;
     let p = profiles::get(root, id, false)?;
     let path = profiles::path(root, &p)?;
     crate::cloud::browser_session::recover(&path)?;
     if profiles::running(root, &p)? {
-        if force_control && !runtime.1.ready(id){return Err("RESTART_REQUIRED: 此副本正在运行，请关闭后通过 MCP 启动".into());}
+        if automation && !runtime.1.automation_ready(id) {
+            return Err("RESTART_REQUIRED: 此副本未启用 MCP 自动化，请关闭后通过 MCP 启动".into());
+        }
         if destination == "startup" || destination == "focus" {
             if crate::regional::needs_control_for(
                 &p.browser,
@@ -157,7 +169,7 @@ pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Ru
         );
     }
     crate::cloud::session_sync::before_launch(root, id)?;
-    if force_control || crate::regional::needs_control_for(&p.browser, &p.preferences) {
+    if automation || crate::regional::needs_control_for(&p.browser, &p.preferences) {
         runtime.1.stop(id);
         let mut keep_browser = false;
         let result = (|| -> Result<(), String> {
@@ -176,7 +188,7 @@ pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Ru
                     planned.preferences_managed = true;
                     planned.preferences_dirty = true;
                 }
-                profiles::apply_preferences_for_control(root, &planned,force_control)?;
+                profiles::apply_preferences_for_control(root, &planned,automation)?;
                 let mut provider_region = resolved.clone();
                 if p.browser == "firefox" {
                     if p.preferences.regional.location_mode == "custom"
@@ -187,13 +199,18 @@ pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Ru
                     }
                     crate::firefox::prepare_geolocation(&path, Some(&provider_region))?;
                 }
-                platform::spawn_controlled_browser(&p.browser, &path, &p.proxy.mode, port)?;
+                if automation {
+                    platform::spawn_controlled_browser(&p.browser, &path, &p.proxy.mode, port)?;
+                } else {
+                    platform::spawn_settings_browser(&p.browser, &path, &p.proxy.mode, port)?;
+                }
                 let (control, actual) = crate::browser_control::start_with_lookup(
                     p.browser.clone(),
                     path.clone(),
                     p.preferences.clone(),
                     resolved.clone(),
                     lookup_url.into(),
+                    purpose,
                 )?;
                 if (p.preferences.regional.language_mode == "ip"
                     && actual.language != resolved.language)
@@ -217,7 +234,7 @@ pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Ru
                     continue;
                 }
                 runtime.1.insert(id.to_owned(), control)?;
-                profiles::mark_started(root, id, port)?;
+                profiles::mark_started(root, id, port, runtime.proxy_endpoint(id)?)?;
                 profiles::remember_region(root, id, actual)?;
                 return match runtime
                     .1
@@ -246,7 +263,7 @@ pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Ru
     }
     let port = tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
     let url = destination_url(root, &p, destination)?;
-    profiles::mark_started(root, id, port)?;
+    profiles::mark_started(root, id, port, runtime.proxy_endpoint(id)?)?;
     if let Err(error) =
         platform::spawn_browser_with_proxy(&p.browser, &path, &url, &p.proxy.mode, port)
     {

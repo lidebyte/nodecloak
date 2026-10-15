@@ -4,7 +4,8 @@ import type {BrowserId,Check} from './domain';
 import type {SharedProfileGrant} from './profile-sharing';
 import {fingerprintDefaults,type FingerprintSettings} from './profile-fingerprint';
 export type ProxyMode='direct'|'system'|'http'|'https'|'socks5';
-export interface ProxyConfig {mode:ProxyMode;host:string;port:number;username:string;credentialRef?:string|null}
+export interface LocalProxy {mode:'http'|'https'|'socks5';host:string;port:number}
+export interface ProxyConfig {mode:ProxyMode;host:string;port:number;username:string;credentialRef?:string|null;preProxy?:LocalProxy|null;apiUrl?:string|null}
 export type PermissionMode='ask'|'block';
 export interface RegionalSettings {enabled:boolean;languageMode:'ip'|'custom';timezoneMode:'system'|'ip'|'custom';timezone:string;locationMode:'system'|'ip'|'custom';latitude:number;longitude:number;accuracy:number}
 export interface IpRegion {ip:string;country:string;city:string;language:string;timezone:string;latitude:number;longitude:number;checkedAt:string}
@@ -22,15 +23,36 @@ export function normalizePreferences(value:Partial<Preferences>):Preferences {
   return {...defaults().preferences,...value,fingerprint:value.fingerprint,advanced,regional:value.regional?.enabled?{...regionalDefaults(),...value.regional}:{...regionalDefaults(),languageMode:value.regional?.languageMode??'custom'}};
 }
 export interface ProxyTest {ip:string|null;country:string|null;latency:number;checkedAt:string;connection:string;target:string;clock?:Check|null}
-export interface BrowserProfile {id:string;name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;preferences:Preferences;createdAt:string;updatedAt:string;deletedAt:string|null;lastTest:ProxyTest|null;legacy:boolean;running:boolean;pendingRestart:boolean;browserAvailable:boolean;hasPassword:boolean;proxyReady:boolean;lastRegion?:ResolvedRegion|null;regionalReady?:boolean;regionalError?:string|null;sharing?:SharedProfileGrant|null}
+export interface BrowserProfile {id:string;name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;preferences:Preferences;createdAt:string;updatedAt:string;deletedAt:string|null;lastTest:ProxyTest|null;legacy:boolean;running:boolean;pendingRestart:boolean;browserAvailable:boolean;hasPassword:boolean;proxyReady:boolean;activeProxyEndpoint?:{host:string;port:number}|null;lastRegion?:ResolvedRegion|null;regionalReady?:boolean;regionalError?:string|null;sharing?:SharedProfileGrant|null}
 export interface ProfileDraft {name:string;browser:BrowserId;notes:string;tags:string[];proxy:ProxyConfig;password?:string;clearPassword:boolean;preferences:Preferences}
 export const defaults=():ProfileDraft=>({name:'',browser:'firefox',notes:'',tags:[],proxy:{mode:'system',host:'',port:8080,username:''},password:'',clearPassword:false,preferences:{language:'en-US,en',privacy:true,fontRestriction:false,startupUrl:'https://claude.ai',advanced:advancedDefaults(),regional:regionalDefaults(),fingerprint:fingerprintDefaults()}});
-export function parseProxyUri(input:string):{proxy:ProxyConfig;password:string} {
-  let url:URL;try{url=new URL(input.trim());}catch{throw new Error('请粘贴 http://、https:// 或 socks5:// 代理地址');}
-  const mode=url.protocol.slice(0,-1);if(!['http','https','socks5'].includes(mode)||!url.hostname||url.pathname!=='/'&&url.pathname!==''||url.search||url.hash)throw new Error('代理链接协议或格式无效');
-  const port=Number(url.port||({http:80,https:443,socks5:1080}[mode]));
+export function parseProxyUri(input:string,fallbackMode:ProxyMode='http'):{proxy:ProxyConfig;password:string} {
+  const value=input.trim(),invalid=()=>new Error('代理链接协议或格式无效');
+  if(!value||value.length>8192||/[\x00-\x1f\x7f]/.test(value))throw invalid();
+  let mode:ProxyMode,host:string,port:number,username:string,password:string;
+  if(/^[a-z][a-z0-9+.-]*:\/\//i.test(value)){
+    let url:URL;try{url=new URL(value);}catch{throw invalid();}
+    const protocol=url.protocol.slice(0,-1);
+    if(!['http','https','socks5'].includes(protocol)||!url.hostname||url.pathname!=='/'&&url.pathname!==''||url.search||url.hash)throw invalid();
+    mode=protocol as ProxyMode;host=url.hostname.replace(/^\[|\]$/g,'');
+    port=Number(url.port||({http:80,https:443,socks5:1080}[protocol]));
+    try{username=decodeURIComponent(url.username);password=decodeURIComponent(url.password);}catch{throw invalid();}
+  }else{
+    // Split host/port/user once, retaining the complete raw password (including
+    // colons, @ and percent signs). Brackets disambiguate IPv6 from field separators.
+    const parts=/^(?:\[([^\]]+)\]|([^:[\]\s]+)):(\d+)(?::([^:]*):(.*))?$/s.exec(value);
+    if(!parts)throw new Error('请粘贴代理链接或 主机:端口:用户名:密码');
+    host=parts[1]??parts[2];port=Number(parts[3]);username=parts[4]??'';password=parts[5]??'';
+    if(parts[1]&&!host.includes(':'))throw invalid();
+    mode=['http','https','socks5'].includes(fallbackMode)?fallbackMode:'http';
+  }
   if(!Number.isInteger(port)||port<1||port>65535)throw new Error('代理端口必须在 1–65535 之间');
-  return {proxy:{mode:mode as ProxyMode,host:url.hostname.replace(/^\[|\]$/g,''),port,username:decodeURIComponent(url.username)},password:decodeURIComponent(url.password)};
+  if(!host||host.length>253||/[\s/\\@?#]/.test(host))throw invalid();
+  if(host.includes(':')){try{new URL(`http://[${host}]/`);}catch{throw invalid();}}
+  else if(!host.split('.').every(label=>label.length>0&&label.length<=63&&/^[a-z0-9-]+$/i.test(label)))throw invalid();
+  if(new TextEncoder().encode(username).length>255||/[:\x00-\x1f\x7f]/.test(username))throw new Error('代理用户名格式无效');
+  if(new TextEncoder().encode(password).length>255||/[\x00-\x1f\x7f]/.test(password))throw new Error('代理密码格式无效或超过 255 字节');
+  return {proxy:{mode,host,port,username},password};
 }
 export function validateDraft(draft:ProfileDraft):string|null {
   draft={...draft,preferences:normalizePreferences(draft.preferences)};
@@ -53,7 +75,22 @@ export function validateDraft(draft:ProfileDraft):string|null {
   if(!/^[a-zA-Z0-9-]+(?:,[a-zA-Z0-9-]+)*$/.test(draft.preferences.language))return '语言格式示例：en-US,en';
   if(draft.preferences.startupUrl.length>4096)return '启动页面地址过长';
   try {if(draft.preferences.startupUrl!=='about:blank'){const url=new URL(draft.preferences.startupUrl);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return '启动页面只支持 HTTP、HTTPS 或 about:blank';}}catch{return '请填写完整的启动页面地址';}
-  if(['http','https','socks5'].includes(draft.proxy.mode)) {if(!draft.proxy.host.trim()||/[\s/@?#\\]/.test(draft.proxy.host))return '请填写 IP 或域名，协议和端口分别填写';if(!Number.isInteger(draft.proxy.port)||draft.proxy.port<1||draft.proxy.port>65535)return '端口必须在 1–65535 之间';if(new TextEncoder().encode(draft.proxy.username).length>255||/[:\x00-\x1f\x7f]/.test(draft.proxy.username))return '代理用户名不能包含冒号或换行';}
+  const local=draft.proxy.preProxy;
+  if(local){
+    if(!['http','https','socks5'].includes(draft.proxy.mode))return '链式代理需要先配置副本代理';
+    if(!['http','https','socks5'].includes(local.mode))return '前置代理协议应为 HTTP、HTTPS 或 SOCKS5';
+    let hostValid=local.host.length>0&&local.host.length<=253&&!/[\s\x00-\x1f\x7f/\\@?#\[\]]/.test(local.host);
+    if(local.host.includes(':')){try{new URL(`http://[${local.host}]/`);}catch{hostValid=false;}}
+    else hostValid=hostValid&&local.host.split('.').every(label=>label.length>0&&label.length<=63&&/^[a-z0-9-]+$/i.test(label));
+    if(!hostValid||!Number.isInteger(local.port)||local.port<1||local.port>65535)return '前置代理请填写有效的 IP 或域名及端口，不要包含协议或路径';
+  }
+  const apiUrl=draft.proxy.apiUrl;
+  if(apiUrl!=null){
+    if(!['http','https','socks5'].includes(draft.proxy.mode))return 'API 提取需要先选择代理协议';
+    if(!apiUrl||apiUrl.length>4096||/\s|[\x00-\x1f\x7f]/.test(apiUrl))return '请填写有效的代理 API 地址';
+    try{const url=new URL(apiUrl);if(!['http:','https:'].includes(url.protocol)||!url.hostname||url.username||url.password||url.hash)return '代理 API 仅支持不含用户名密码和片段的 HTTP / HTTPS 地址';}catch{return '请填写有效的代理 API 地址';}
+  }
+  if(['http','https','socks5'].includes(draft.proxy.mode)) {if(apiUrl==null&&(!draft.proxy.host.trim()||/[\s/@?#\\]/.test(draft.proxy.host)))return '请填写 IP 或域名，协议和端口分别填写';if(apiUrl==null&&(!Number.isInteger(draft.proxy.port)||draft.proxy.port<1||draft.proxy.port>65535))return '端口必须在 1–65535 之间';if(new TextEncoder().encode(draft.proxy.username).length>255||/[:\x00-\x1f\x7f]/.test(draft.proxy.username))return '代理用户名不能包含冒号或换行';}
   if(new TextEncoder().encode(draft.password||'').length>255||/[\x00-\x1f\x7f]/.test(draft.password||''))return '密码不能包含控制字符，且最多 255 字节';
   return null;
 }

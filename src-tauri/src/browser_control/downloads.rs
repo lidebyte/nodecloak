@@ -210,7 +210,7 @@ impl BrowserControl {
 impl Runtime {
     pub(crate) fn invalidate_downloads(&self, client: Option<&str>) {
         if let Ok(controls) = self.0.lock() {
-            for control in controls.values() {
+            for control in controls.values().filter(|c| c.automation) {
                 let _ = control
                     .sender
                     .send(Request::InvalidateDownloads(client.map(str::to_owned)));

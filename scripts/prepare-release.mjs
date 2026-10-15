@@ -20,9 +20,12 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "终端的时区、语言（LANG）和区域格式（LC_ALL）支持搜索下拉选择，提供常用选项、自定义输入和继承已有值。 / Terminal timezone, language (LANG) and regional format (LC_ALL) now offer searchable dropdowns with common choices, custom values and inheritance.",
-  "新建和编辑 Chrome、Edge、Firefox 副本时，可通过搜索下拉选择浏览器语言和时区，并保留自定义语言顺序与原有配置。 / Choose browser languages and timezones from searchable dropdowns when creating or editing Chrome, Edge and Firefox profiles, preserving custom language order and existing settings.",
-  "统一下拉菜单与搜索框样式，搜索图标置于输入框内，优化选项显示与文字间距。 / Refines dropdowns and search fields, placing the search icon inside the input and improving option labels and spacing."
+  "新增链式代理：可通过本机代理或软路由连接副本代理，支持 HTTP、HTTPS 和 SOCKS5 前置代理。 / Adds proxy chaining through a local proxy or LAN router, with HTTP, HTTPS and SOCKS5 first hops.",
+  "新增 API 提取代理：支持返回 IP:端口 的接口，每次启动提取代理，并在本次运行中保持地址一致。 / Adds API proxy sources returning IP:port, extracting an endpoint at startup and keeping it consistent during the session.",
+  "扩展代理导入：支持 主机:端口:用户名:密码 格式，方便粘贴代理商提供的连接信息。 / Accepts host:port:username:password proxy exports for convenient provider configuration.",
+  "优化 Chrome、Edge、Firefox 的手动启动与 MCP 自动化协作，改善稳定指纹及区域设置的登录兼容性。 / Improves manual startup and MCP automation coordination across Chrome, Edge and Firefox, including login compatibility with stable fingerprints and regional settings.",
+  "修复登录新标签页自动关闭及持续加载问题，增强连接恢复、网站登录状态同步与错误提示。 / Fixes login tabs closing or remaining loading, and improves connection recovery, website-session sync and error messages.",
+  "启动浏览器副本时显示加载状态，便于查看启动进度。 / Shows a loading state while browser profiles start."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

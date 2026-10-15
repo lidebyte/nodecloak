@@ -238,6 +238,21 @@ pub(super) fn one(
     reconcile(c, p, b, remote, false).map(|_| ())
 }
 
+fn local_launch_snapshot(
+    result: Result<Snapshot, String>, allow_local_launch: bool, owner: bool,
+    last_error: &mut Option<String>,
+) -> Result<Option<Snapshot>, String> {
+    match result {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(error) if allow_local_launch && owner && (error == browser_session::PARTITIONED_STORAGE_ERROR
+            || browser_session::capture_transport_failure(&error)) => {
+            *last_error = Some(error);
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 enum SessionPreparation {
     Complete,
     LocalOnly,
@@ -298,19 +313,13 @@ fn reconcile(
             .retain(|x| x.local_id != p.id || x.kind != "session");
         return Ok(SessionPreparation::Complete);
     }
-    let local = match browser_session::export_profile(&p.browser, &path) {
-        Ok(local) => local,
-        Err(error)
-            if allow_local_launch
-                && p.received_share.is_none()
-                && error == browser_session::PARTITIONED_STORAGE_ERROR =>
-        {
-            // Migration capability is not a prerequisite for using an owner's
-            // original profile. Keep both baselines and pending data untouched.
-            c.disk.accounts.get_mut(&account).unwrap().last_error = Some(error);
-            return Ok(SessionPreparation::LocalOnly);
-        }
-        Err(error) => return Err(error),
+    let Some(local) = local_launch_snapshot(
+        browser_session::export_profile(&p.browser, &path),
+        allow_local_launch, p.received_share.is_none(),
+        &mut c.disk.accounts.get_mut(&account).unwrap().last_error,
+    )? else {
+        // Never upload partial data or overwrite either side after capture fails.
+        return Ok(SessionPreparation::LocalOnly);
     };
     c.disk
         .accounts
@@ -571,6 +580,19 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             (None, None) => true,
             _ => false,
         };
+        if let Some(config) = config.filter(|o|o.deleted) {
+            // An equal tombstone revision is current, but it still cannot accept
+            // live session uploads. Preserve both sides for an explicit choice.
+            let state = c.disk.accounts.get_mut(&account).unwrap();
+            state.conflicts.retain(|x|x.local_id != id || x.kind != "config");
+            state.conflicts.push(Conflict {
+                local_id:id.into(), cloud_id:b.cloud_id.clone(), name:p.name.clone(),
+                kind:"config".into(), fields:vec!["deletion_vs_edit".into()],
+                remote_revision:config.revision,
+            });
+            b.generation = 0;
+            return Err("云端已删除此副本，本机配置和登录数据已保留。请在管理同步的待处理冲突中选择保留本地，或取消云端关联后再启动。".into());
+        }
         if !config_current || config_conflicted(c, &account, id) {
             return Err("云端配置已变化，请先同步副本配置后再打开浏览器".into());
         }
@@ -622,7 +644,9 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
     if offline {
         Ok(())
     } else {
-        result
+        result.map_err(|error| if error.contains("config_conflict") {
+            "副本配置在同步期间发生变化，本机数据已保留。请在管理同步中重新同步配置并处理冲突后再启动。".into()
+        } else { error })
     }
 }
 pub(super) fn copy_with_session(
@@ -736,7 +760,7 @@ mod launch_tests {
         }
     }
 
-    fn fixture() -> (
+    fn fixture(deleted_config: bool) -> (
         tempfile::TempDir,
         Connection,
         profiles::Profile,
@@ -785,6 +809,12 @@ mod launch_tests {
         state.epoch = 1;
         let mut binding = Binding::new(&uuid::Uuid::new_v4().to_string());
         binding.generation = 42;
+        let remote_config = deleted_config.then(|| Object {
+            id:binding.cloud_id.clone(), kind:"config".into(), revision:7, epoch:1,
+            deleted:true, payload:String::new(), writer:c.device.id.clone(), generation:0,
+            updated_at:chrono::Utc::now().to_rfc3339(),
+        });
+        binding.baseline = remote_config.clone();
         state.bindings.insert(p.id.clone(), binding);
         c.disk.save(dir.path()).unwrap();
         let info = json!({"epoch":1,"approved":true,
@@ -796,7 +826,7 @@ mod launch_tests {
             for (route, body) in [
                 ("/v1/account", json!(account)),
                 ("/v1/vault", info),
-                ("/v1/objects", json!({"objects":[]})),
+                ("/v1/objects", json!({"objects":remote_config.into_iter().collect::<Vec<_>>()})),
             ] {
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -832,7 +862,7 @@ mod launch_tests {
 
     #[test]
     fn owner_can_launch_with_unsupported_storage_without_publishing_or_replacing_sessions() {
-        let (dir, mut c, p, _credentials, server) = fixture();
+        let (dir, mut c, p, _credentials, server) = fixture(false);
         assert!(super::super::sharing::before_launch(dir.path(), &p.id).is_ok());
         let result = prepare_launch(&mut c, &p.id);
         server.join().unwrap();
@@ -906,8 +936,23 @@ mod launch_tests {
     }
 
     #[test]
+    fn deleted_cloud_config_is_reported_before_any_session_upload_or_capture() {
+        let (dir, mut c, p, _credentials, server) = fixture(true);
+        let result = prepare_launch(&mut c, &p.id);
+        server.join().unwrap();
+        assert!(result.unwrap_err().contains("云端已删除此副本"));
+        let disk = super::super::model::Disk::load(dir.path()).unwrap();
+        let state = &disk.accounts[&c.account_id().unwrap()];
+        assert!(state.conflicts.iter().any(|x| x.local_id == p.id && x.kind == "config" && x.fields == ["deletion_vs_edit"] && x.remote_revision == 7));
+        assert!(state.bindings[&p.id].baseline.as_ref().unwrap().deleted);
+        assert!(profiles::get(dir.path(), &p.id, false).is_ok());
+        let sentinel = profiles::path(dir.path(), &p).unwrap().join("storage/default/https+++example.invalid^userContextId=2/sentinel");
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"local-session-preserved");
+    }
+
+    #[test]
     fn unsupported_storage_does_not_bypass_configuration_conflicts() {
-        let (dir, mut c, p, _credentials, server) = fixture();
+        let (dir, mut c, p, _credentials, server) = fixture(false);
         let account = c.account_id().unwrap();
         let cloud_id = c.disk.accounts[&account].bindings[&p.id].cloud_id.clone();
         c.disk
@@ -934,5 +979,27 @@ mod launch_tests {
                 .len(),
             1
         );
+    }
+    #[test]
+    fn capture_transport_failure_only_allows_owner_local_launch() {
+        for message in [
+            "隔离浏览器连接中断", "隔离浏览器连接已关闭", "无法启动隔离浏览器", "无法连接隔离浏览器",
+            "浏览器登录数据操作 Storage.getCookies 超时",
+            "隔离浏览器连接中断（操作 Page.navigate，I/O kind=ConnectionReset, os_code=Some(10054)）",
+        ] {
+            let mut error = None;
+            assert!(matches!(local_launch_snapshot(Err(message.into()), true, true, &mut error), Ok(None)));
+            assert_eq!(error.as_deref(), Some(message));
+            for (allow, owner) in [(false, true), (true, false), (false, false)] {
+                let mut error = None;
+                assert_eq!(local_launch_snapshot(Err(message.into()), allow, owner, &mut error).err().as_deref(), Some(message));
+                assert!(error.is_none());
+            }
+        }
+        for message in ["云端配置已变化", "lease_held", "无法读取网站存储", "登录快照无效"] {
+            let mut error = None;
+            assert_eq!(local_launch_snapshot(Err(message.into()), true, true, &mut error).err().as_deref(), Some(message));
+            assert!(error.is_none());
+        }
     }
 }
