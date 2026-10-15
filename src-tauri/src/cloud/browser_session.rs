@@ -1566,7 +1566,7 @@ mod tests {
     #[test]
     fn browser_internal_partitions_do_not_block_website_storage_discovery() {
         for source in ["quota", "local_storage"] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let keys = [
                 "https://assistant.example/",
                 "https://login.example/^0https://shop.example",

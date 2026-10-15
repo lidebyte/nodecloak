@@ -303,7 +303,7 @@ mod tests {
     }
     #[test]
     fn native_local_storage_roundtrip_preserves_unicode_and_other_namespaces() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let state =
             json!({"local":[["", ""],["latin", "café"],["汉字😀", "a\u{0000}b😀"]],"databases":[]});
         assert!(eligible(dir.path(), &key()).unwrap());
@@ -331,7 +331,7 @@ mod tests {
     }
     #[test]
     fn native_path_never_handles_partitioned_or_indexeddb_namespaces() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let legacy = dir
             .path()
             .join("Default/IndexedDB/https_ntp.msn.com_0.indexeddb.leveldb");
@@ -355,7 +355,7 @@ mod tests {
     }
     #[test]
     fn unrelated_bucket_indexeddb_does_not_force_ntp_navigation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         std::fs::create_dir_all(dir.path().join("Default/WebStorage/42/IndexedDB")).unwrap();
         let db =
             rusqlite::Connection::open(dir.path().join("Default/WebStorage/QuotaManager")).unwrap();
@@ -367,7 +367,7 @@ mod tests {
     }
     #[test]
     fn sqlite_localstorage_backend_is_never_mistaken_for_empty_leveldb() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         std::fs::create_dir_all(dir.path().join("Default")).unwrap();
         std::fs::write(
             dir.path().join("Default/LocalStorage"),
@@ -378,7 +378,7 @@ mod tests {
     }
     #[test]
     fn invalid_native_input_does_not_replace_existing_state() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let original = json!({"local":[["keep","existing"]],"databases":[]});
         write(dir.path(), &key(), &original).unwrap();
         for bad in [
@@ -395,7 +395,7 @@ mod tests {
         assert!(decode(&[2, 65]).is_err());
         assert!(decode(&[0, 65]).is_err());
         assert!(decode(&[0, 0, 0xd8]).is_err());
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let state = json!({"local":[["keep","existing"]],"databases":[]});
         write(dir.path(), &key(), &state).unwrap();
         let path = dir.path().join("Default/Local Storage/leveldb");
