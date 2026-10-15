@@ -35,8 +35,6 @@ NodeCloak 在 Windows 和 macOS 上管理独立的 Chrome、Edge、Firefox 配�
 | macOS M 系列 | `_macos_arm64.dmg` | 打开 DMG，将应用拖入 Applications |
 | macOS Intel | `_macos_x64.dmg` | 打开 DMG，将应用拖入 Applications |
 
-2.0.1 的 Windows 安装版、便携版及安装后的程序已使用提供的证书做 Authenticode 签名。证书发布者为 `Anneng electronic Co. Ltd.`，已于 2014 年 5 月 6 日过期；该签名不能获得 Windows 有效证书信任，也不保证消除 SmartScreen 提示。macOS Apple Silicon 与 Intel 的 DMG 已使用 Developer ID 签名并通过 Apple 公证；三个平台的应用内更新包均已签名并通过校验。发布记录见 [2.0.1 验证记录](docs/releases/2.0.1.md)。
-
 使用浏览器副本：
 
 1. 先安装 Chrome、Edge 或 Firefox。NodeCloak 不内置浏览器；未找到 Firefox 时，应用会提供[官方下载入口](https://www.firefox.com/en-US/download/all/desktop-release/)。
@@ -120,7 +118,7 @@ LC_ALL=en_US.UTF-8
 - 界面支持简体中文和 English，默认跟随系统语言；在「偏好设置 → 界面语言」切换并保存。界面语言不改变副本语言或终端的语言变量。
 - 外观支持浅色、深色和跟随系统。
 - 关闭主窗口会收起到托盘，正在运行的副本和代理继续工作。真正退出使用托盘「退出」。
-- 0.5.9 及后续版本在启动时和每 6 小时检查更新，也可手动检查。点击「立即更新」后下载、校验更新签名、安装并重启；配置和修复记录保留。
+- 0.5.9 及后续版本在启动时和每 6 小时检查更新，也可手动检查。点击「立即更新」后下载、校验、安装并重启；配置和修复记录保留。
 - 更新前需保存浏览器中未完成的输入，并关闭专用副本。0.5.8 及更早版本需要手动下载升级一次。
 
 ## 数据保存在哪里
@@ -171,31 +169,25 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 node scripts/build-desktop.mjs
 ```
 
-Windows 上生成 NSIS 安装包和可执行文件；macOS 上生成应用与 DMG。普通本地构建不生成签名更新包。DMG 使用 macOS 构建，GitHub Actions 分别使用 Windows、Apple Silicon Mac 和 Intel Mac。
+Windows 上生成 NSIS 安装包和可执行文件；macOS 上生成应用与 DMG。DMG 使用 macOS 构建，GitHub Actions 分别使用 Windows、Apple Silicon Mac 和 Intel Mac。
 
 ## 维护者发布
 
-1. 同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 的版本，并更新 `scripts/prepare-release.mjs` 中的发布说明。更新提示只记录本版实际功能变更与修复，不包含签名、公证、未完成事项或未更新的平台。
+1. 同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 的版本，并更新 `scripts/prepare-release.mjs` 中的发布说明。更新提示只记录本版实际功能变更与修复。
 2. 执行 `node scripts/check-release-version.mjs`、`node --test scripts/release-checks.mjs` 和上述代码检查。
-3. 提交代码，创建并推送与版本一致的 `v<版本>` 标签。三个平台全部构建成功后，GitHub Actions 保存 Release 草稿；完成平台签名和验证后手动公开，已公开的 Release 不会被覆盖。
+3. 提交代码，创建并推送与版本一致的 `v<版本>` 标签。三个平台全部构建成功后，GitHub Actions 保存 Release 草稿；完成验证后手动公开，已公开的 Release 不会被覆盖。
 
-Release 包含 Windows 安装版、便携版、两种 macOS DMG、签名更新文件、`latest.json`、`SHA256SUMS.txt` 和第三方许可归档。主分支、PR 和手动运行只生成构建产物，不发布 Release；官网需单独同步和部署。
+Release 包含 Windows 安装版、便携版、两种 macOS DMG、应用更新文件、`latest.json`、`SHA256SUMS.txt` 和第三方许可归档。主分支、PR 和手动运行只生成构建产物，不发布 Release；官网需单独同步和部署。
 
-Windows 先签应用程序，再生成安装包并签安装包；更改安装包后必须重新生成 Tauri 更新签名。macOS 应用与 DMG 完成 Developer ID 签名和 Apple 公证后，再从最终应用生成更新归档及签名。未完成公证的新版不替换官网已公证的下载包。
+可在 **Actions → Desktop checks and packages → Run workflow** 选择 `main`，生成各平台构建产物。手动运行不会覆盖线上 Release。
 
-macOS 签名和公证在 GitHub Actions 的 Apple Silicon / Intel runner 上自动完成，不需要本地 Mac。推送版本标签会自动使用证书；也可在 **Actions → Desktop checks and packages → Run workflow** 选择 `main`，保持 `notarize_macos` 勾选，生成两种已公证 DMG 和签名更新归档供下载。手动运行不会覆盖线上 Release。Windows Authenticode 签名与官网同步仍按现有发布流程处理。
-
-仓库 Actions Secrets 需配置 `APPLE_CERTIFICATE`（仅 Developer ID Application 身份的加密 PKCS#12，经 base64 编码）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_ID`、`APPLE_PASSWORD`（Apple App 专用密码）、`APPLE_TEAM_ID`。每次运行会导入临时钥匙串，验证 Apple 公证凭证，完成后清理；普通主分支与 PR 构建不会导入证书。应用公证票据和更新归档中的票据都会验证，DMG 公证回执单独保存在 Actions artifact 中。
-
-签名私钥放在仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，公钥配置在 `src-tauri/tauri.conf.json`。Tauri 更新签名用于校验更新文件，不是 Windows Authenticode 签名或 Apple 公证。
-
-下载全部 Release 附件后，可以核验三端更新签名和篡改拒绝：
+下载全部 Release 附件后，可以核验三端更新文件和篡改拒绝：
 
 ```sh
 cargo run --manifest-path src-tauri/Cargo.toml --example verify-updates -- <附件目录>
 ```
 
-自行发行时，需要更换更新端点、公钥和下载链接，并在自己的仓库设置签名私钥，否则构建仍会检查本项目的更新。
+自行发行时，需要更换更新端点、公钥和下载链接，并配置自己的更新凭据，否则构建仍会检查本项目的更新。
 
 ## 许可与反馈
 

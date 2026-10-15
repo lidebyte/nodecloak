@@ -43,7 +43,7 @@ The existing Tauri development watcher rebuilt and launched the latest native ex
 
 ## Practical limits
 
-Windows runtime and Firefox cross-layer session restore were exercised. macOS runtime and a new signed installer were not exercised in this work. Existing browser-session portability restrictions still apply; browser password stores are not part of the login snapshot. New devices need a fresh invitation from the sender. NodeCloak revocation stops its own shared profile; it cannot recall downloaded information or invalidate sessions directly at third-party websites.
+Windows runtime and Firefox cross-layer session restore were exercised. macOS runtime and a new installer were not exercised in this work. Existing browser-session portability restrictions still apply; browser password stores are not part of the login snapshot. New devices need a fresh invitation from the sender. NodeCloak revocation stops its own shared profile; it cannot recall downloaded information or invalidate sessions directly at third-party websites.
 
 Ignored local artifacts contain screenshots and detailed native validation logs: `.qa/sharing-inbox-light.png`, `.qa/sharing-invite-light.png`, `.qa/sharing-confirm-dark.png`, `.qa/sharing-inbox-en.png`, `.qa/sharing-native-verification.txt`, `.qa/sharing-deployment.json`.
 
