@@ -481,6 +481,18 @@ pub fn upstream(p: &Profile, active: bool) -> Result<Upstream, String> {
         },
     })
 }
+// A stored proxy secret belongs to one authentication destination. Callers may
+// change profile settings without knowing it, but must explicitly supply a new
+// password when changing the proxy protocol, address, port, or account.
+fn same_proxy_credentials(previous: &ProxyConfig, next: &ProxyConfig) -> bool {
+    previous.custom()
+        && next.custom()
+        && !next.username.is_empty()
+        && previous.mode == next.mode
+        && previous.host.eq_ignore_ascii_case(&next.host)
+        && previous.port == next.port
+        && previous.username == next.username
+}
 pub fn draft_upstream(root: &Path, id: Option<&str>, draft: &Draft) -> Result<Upstream, String> {
     if let Some(id) = id {
         crate::cloud::sharing::editable(root, id)?;
@@ -495,6 +507,7 @@ pub fn draft_upstream(root: &Path, id: Option<&str>, draft: &Draft) -> Result<Up
         Some(value) if !value.is_empty() => value.clone(),
         _ if !draft.clear_password => old
             .as_ref()
+            .filter(|p| same_proxy_credentials(&p.proxy, &draft.proxy))
             .map(|p| password(&p.id, &p.proxy))
             .transpose()?
             .unwrap_or_default(),
@@ -596,8 +609,12 @@ fn create_with_id(
         }) {
             fingerprint.seed = crate::fingerprint::seed()?;
         }
+        // Copying settings must preserve the source's native login mode. A
+        // legacy source has no stable fingerprint; allocate a seed without
+        // enabling automation. Explicit choices in the draft still take effect.
         if draft.preferences.fingerprint.is_none()
-            && (draft.preferences.advanced.resist_fingerprinting
+            && (copy_id.is_some()
+                || draft.preferences.advanced.resist_fingerprinting
                 || draft.preferences.advanced.canvas_protection)
         {
             fingerprint.enabled = false;
@@ -631,8 +648,11 @@ fn create_with_id(
     }
     if let Some(copy) = copy_id {
         let original = get(root, copy, false)?;
-        if let Some(reference) = &original.proxy.credential_ref {
-            if proxy.credential_ref.is_none() && !draft.clear_password {
+        if original.proxy.credential_ref.is_some() {
+            if proxy.credential_ref.is_none()
+                && !draft.clear_password
+                && same_proxy_credentials(&original.proxy, &proxy)
+            {
                 let value = password(&original.id, &original.proxy)?;
                 let new = identifier();
                 secret_entry(&id, &new)?
@@ -642,7 +662,6 @@ fn create_with_id(
                 pending.references.push(new.clone());
                 refs.push(new);
             }
-            let _ = reference;
         }
     }
     let mut p = Profile {
@@ -693,7 +712,7 @@ pub fn update(root: &Path, id: &str, mut draft: Draft) -> Result<Profile, String
     }
     let old = p.proxy.clone();
     let mut proxy = draft.proxy;
-    proxy.credential_ref = if draft.clear_password || proxy.username.is_empty() {
+    proxy.credential_ref = if draft.clear_password || !same_proxy_credentials(&old, &proxy) {
         None
     } else {
         old.credential_ref
@@ -918,6 +937,11 @@ pub(crate) fn apply_preferences_for_control(root: &Path, p: &Profile, force_cont
             }
         }
         if force_control {fields.push(("remote.prefs.recommended", serde_json::json!(false)));fields.push(("dom.file.createInChild",serde_json::json!(true)));}
+        // We keep Firefox recommended automation prefs off to preserve profile privacy
+        // settings. Apply only its first-run notification override: otherwise the chrome
+        // onboarding modal blocks tab activation even though BiDi can read the page.
+        // This does not record acceptance and is removed for an ordinary profile launch.
+        fields.push(("termsofuse.bypassNotification", if force_control { serde_json::json!(true) } else { serde_json::Value::Null }));
         if p.proxy.custom() && !p.preferences_dirty {
             fields.push(("media.peerconnection.enabled", serde_json::json!(false)));
         }
@@ -1270,6 +1294,20 @@ pub fn history(root: &Path, id: Option<&str>) -> Result<Vec<engine::Record>, Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copying_legacy_defaults_keeps_native_login_mode_and_allocates_unique_seeds() {
+        let root=test_dir();
+        for engine in ["chrome","edge","firefox"] {
+            let original=get(root.path(), &format!("legacy-{engine}"), false).unwrap();
+            assert!(original.preferences.fingerprint.is_none());
+            let draft=|name:&str| Draft {name:name.into(),browser:engine.into(),notes:String::new(),tags:vec![],proxy:ProxyConfig::system(),password:None,clear_password:false,preferences:original.preferences.clone()};
+            let first=create(root.path(),draft("Copy one"),Some(&original.id)).unwrap();
+            let second=create(root.path(),draft("Copy two"),Some(&original.id)).unwrap();
+            assert!(!first.preferences.fingerprint.as_ref().unwrap().enabled, "{engine}: copying enabled automation that the source did not use");
+            assert!(!crate::regional::needs_control_for(engine,&first.preferences));
+            assert_ne!(first.preferences.fingerprint.as_ref().unwrap().seed, second.preferences.fingerprint.as_ref().unwrap().seed);
+        }
+    }
     #[test]
     fn new_profile_fingerprints_are_independent_and_survive_reload() {
         let root = test_dir();
@@ -1738,6 +1776,22 @@ mod tests {
             original["profile"]["content_settings"]["exceptions"]["notifications"]
         );
     }
+    #[test]
+    fn firefox_control_suppresses_first_run_dialog_without_changing_privacy_or_consent() {
+        let root = test_dir();
+        let mut d = draft("Firefox automation");
+        d.browser = "firefox".into();
+        let profile = create(root.path(), d, None).unwrap();
+        let dir = path(root.path(), &profile).unwrap();
+        std::fs::write(dir.join("user.js"), "user_pref(\"termsofuse.acceptedVersion\", 0);\nuser_pref(\"privacy.trackingprotection.enabled\", true);\n").unwrap();
+        apply_preferences_for_control(root.path(), &profile, true).unwrap();
+        assert_eq!(crate::firefox::snapshot(&dir, "termsofuse.bypassNotification").unwrap()["user"], true);
+        let contents = std::fs::read_to_string(dir.join("user.js")).unwrap();
+        assert!(contents.contains("user_pref(\"termsofuse.acceptedVersion\", 0);"));
+        assert!(contents.contains("user_pref(\"privacy.trackingprotection.enabled\", true);"));
+        apply_preferences_for_control(root.path(), &profile, false).unwrap();
+        assert!(crate::firefox::snapshot(&dir, "termsofuse.bypassNotification").unwrap()["user"].is_null());
+    }
     fn test_dir() -> tempfile::TempDir {
         // macOS /var is a system symlink; fixtures use its real path while
         // production profile paths still reject symlinked ancestors.
@@ -2031,6 +2085,146 @@ mod tests {
         assert!(path(root.path(), &other).unwrap().exists());
         assert!(get(root.path(), &other.id, false).is_ok());
     }
+    #[test]
+    fn proxy_edits_do_not_reuse_credentials_for_a_different_destination() {
+        let root = test_dir();
+        let mut initial = draft("credential binding");
+        initial.proxy = ProxyConfig {
+            mode: "http".into(),
+            host: "original.example".into(),
+            port: 8080,
+            username: "original-user".into(),
+            credential_ref: None,
+        };
+        let mut original = create(root.path(), initial.clone(), None).unwrap();
+        // A missing secret must never be read when the destination changes.
+        original.proxy.credential_ref = Some(identifier());
+        let mut stored = load(root.path()).unwrap();
+        *stored.iter_mut().find(|p| p.id == original.id).unwrap() = original.clone();
+        save(root.path(), &stored).unwrap();
+        for field in [
+            "host", "port", "mode", "username", "direct", "system", "clear",
+        ] {
+            let mut changed = initial.clone();
+            match field {
+                "host" => changed.proxy.host = "different.example".into(),
+                "port" => changed.proxy.port = 9090,
+                "mode" => changed.proxy.mode = "socks5".into(),
+                "username" => changed.proxy.username = "different-user".into(),
+                "direct" => changed.proxy.mode = "direct".into(),
+                "system" => changed.proxy.mode = "system".into(),
+                "clear" => changed.clear_password = true,
+                _ => unreachable!(),
+            }
+            let outbound = draft_upstream(root.path(), Some(&original.id), &changed)
+                .unwrap_or_else(|e| panic!("{field} attempted to read the previous secret: {e}"));
+            assert!(outbound.password.is_empty(), "{field}");
+            let copied = create(root.path(), changed.clone(), Some(&original.id))
+                .unwrap_or_else(|e| panic!("{field} cloned the previous secret: {e}"));
+            assert!(copied.proxy.credential_ref.is_none(), "{field}");
+            let saved = update(root.path(), &original.id, changed).unwrap();
+            assert!(saved.proxy.credential_ref.is_none(), "{field}");
+            // Reset the original for the next independently changed identity field.
+            let mut stored = load(root.path()).unwrap();
+            *stored.iter_mut().find(|p| p.id == original.id).unwrap() = original.clone();
+            save(root.path(), &stored).unwrap();
+        }
+        let same = update(root.path(), &original.id, initial).unwrap();
+        assert_eq!(same.proxy.credential_ref, original.proxy.credential_ref);
+    }
+
+    #[test]
+    #[ignore = "Uses the native OS credential store; run explicitly on Windows/macOS"]
+    fn native_proxy_credentials_stay_bound_through_edit_test_and_clone() {
+        let root = test_dir();
+        let mut cleanup = Vec::new();
+        let mut original_draft = draft("credential binding native");
+        original_draft.proxy = ProxyConfig {
+            mode: "http".into(),
+            host: "original.example".into(),
+            port: 8080,
+            username: "original-user".into(),
+            credential_ref: None,
+        };
+        original_draft.password = Some("synthetic-original-secret".into());
+        let original = create(root.path(), original_draft.clone(), None).unwrap();
+        cleanup.push(PendingCredentials {
+            id: original.id.clone(),
+            references: original.credential_refs.clone(),
+            committed: false,
+        });
+        original_draft.password = None;
+        assert_eq!(
+            draft_upstream(root.path(), Some(&original.id), &original_draft)
+                .unwrap()
+                .password,
+            "synthetic-original-secret"
+        );
+        let copied = create(root.path(), original_draft.clone(), Some(&original.id)).unwrap();
+        cleanup.push(PendingCredentials {
+            id: copied.id.clone(),
+            references: copied.credential_refs.clone(),
+            committed: false,
+        });
+        assert_eq!(
+            upstream(&copied, false).unwrap().password,
+            "synthetic-original-secret"
+        );
+        assert_ne!(copied.proxy.credential_ref, original.proxy.credential_ref);
+        mark_started(root.path(), &original.id, None).unwrap();
+        let mut changed = original_draft;
+        changed.proxy.host = "different.example".into();
+        assert!(draft_upstream(root.path(), Some(&original.id), &changed)
+            .unwrap()
+            .password
+            .is_empty());
+        let copied = create(root.path(), changed.clone(), Some(&original.id)).unwrap();
+        cleanup.push(PendingCredentials {
+            id: copied.id.clone(),
+            references: copied.credential_refs.clone(),
+            committed: false,
+        });
+        assert!(upstream(&copied, false).unwrap().password.is_empty());
+        let saved = update(root.path(), &original.id, changed.clone()).unwrap();
+        assert!(upstream(&saved, false).unwrap().password.is_empty());
+        assert_eq!(
+            upstream(&saved, true).unwrap().password,
+            "synthetic-original-secret"
+        );
+        changed.password = Some("synthetic-replacement-secret".into());
+        let replacement = update(root.path(), &original.id, changed.clone()).unwrap();
+        cleanup.push(PendingCredentials {
+            id: replacement.id.clone(),
+            references: replacement.credential_refs.clone(),
+            committed: false,
+        });
+        assert_eq!(
+            upstream(&replacement, false).unwrap().password,
+            "synthetic-replacement-secret"
+        );
+        assert_eq!(
+            draft_upstream(root.path(), Some(&original.id), &changed)
+                .unwrap()
+                .password,
+            "synthetic-replacement-secret"
+        );
+        assert_eq!(
+            upstream(&replacement, true).unwrap().password,
+            "synthetic-original-secret"
+        );
+        let references: Vec<_> = cleanup
+            .iter()
+            .flat_map(|c| c.references.iter().map(|r| (c.id.clone(), r.clone())))
+            .collect();
+        drop(cleanup);
+        for (id, reference) in references {
+            assert!(matches!(
+                secret_entry(&id, &reference).unwrap().get_password(),
+                Err(keyring::Error::NoEntry)
+            ));
+        }
+    }
+
     #[test]
     fn proxy_password_is_not_serialized() {
         let config = ProxyConfig {

@@ -346,6 +346,15 @@ async fn list_terminal_tools() -> Result<terminal::Catalog, String> {
 }
 
 #[tauri::command]
+async fn get_terminal_environment(app: tauri::AppHandle, tool: terminal::Tool) -> Result<terminal::environment::Environment, String> {
+    tauri::async_runtime::spawn_blocking(move || terminal::environment::read(&app.state::<data_root::DataRoot>().0,tool)).await.map_err(|_|"无法读取终端环境".to_string())?
+}
+#[tauri::command]
+async fn save_terminal_environment(app: tauri::AppHandle, tool: terminal::Tool, environment: terminal::environment::Environment) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || terminal::environment::save(&app.state::<data_root::DataRoot>().0,tool,&environment)).await.map_err(|_|"无法保存终端环境".to_string())?
+}
+
+#[tauri::command]
 fn open_terminal_guide(tool: terminal::Tool) -> Result<(), String> {
     terminal::open_guide(tool)
 }
@@ -425,6 +434,7 @@ async fn launch_terminal(
     app: tauri::AppHandle,
     tool: terminal::Tool,
     working_directory: String,
+    environment: Option<terminal::environment::Environment>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let guard = app.state::<OperationLock>();
@@ -433,6 +443,7 @@ async fn launch_terminal(
             &app.state::<data_root::DataRoot>().0,
             tool,
             &working_directory,
+            environment.unwrap_or_default(),
         )
     })
     .await
@@ -576,6 +587,8 @@ pub fn run() {
             launch_browser,
             launch_cli,
             list_terminal_tools,
+            get_terminal_environment,
+            save_terminal_environment,
             select_terminal_directory,
             launch_terminal,
             open_terminal_guide,

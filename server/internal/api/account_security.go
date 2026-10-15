@@ -338,6 +338,10 @@ func (s *Server) finishSecurityWrite(ctx context.Context, tx pgx.Tx, i identity)
 	if e != nil {
 		return e
 	}
+	// Remote clients cannot present the fresh security proof used by this session.
+	if e = revokeDeviceMCP(ctx, tx, i.Account, ""); e != nil {
+		return e
+	}
 	_, e = tx.Exec(ctx, "UPDATE sessions SET auth_at=now(),auth_method='password' WHERE id=$1", i.Session)
 	if e != nil {
 		return e

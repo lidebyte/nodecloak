@@ -147,6 +147,9 @@ func (s *Server) adminUserPatch(w http.ResponseWriter, r *http.Request, a adminI
 	if e == nil && disabled {
 		_, e = tx.Exec(r.Context(), "UPDATE sessions SET revoked=true WHERE account_id=$1", id)
 	}
+	if e == nil && disabled {
+		e = revokeDeviceMCP(r.Context(), tx, id, "")
+	}
 	if e == nil {
 		e = s.adminAuditTx(r.Context(), tx, a, "user.update", id, map[string]any{"role": role, "disabled": disabled, "name": name})
 	}
@@ -189,6 +192,9 @@ func (s *Server) adminRevoke(w http.ResponseWriter, r *http.Request, a adminIden
 		}
 	}
 	_, e = tx.Exec(r.Context(), "UPDATE sessions SET revoked=true WHERE account_id=$1 AND ($2='' OR device_id::text=$2)", account, device)
+	if e == nil {
+		e = revokeDeviceMCP(r.Context(), tx, account, device)
+	}
 	if e == nil && device == "" {
 		_, e = tx.Exec(r.Context(), "DELETE FROM admin_sessions WHERE account_id=$1", account)
 	}

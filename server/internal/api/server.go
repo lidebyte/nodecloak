@@ -688,10 +688,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, i identity) {
 	}
 	_, e = tx.Exec(r.Context(), "UPDATE sessions SET revoked=true WHERE account_id=$1 AND device_id=$2", i.Account, i.Device)
 	if e == nil {
-		_, e = tx.Exec(r.Context(), "UPDATE mcp_routes SET revoked=true WHERE account_id=$1 AND device_id=$2", i.Account, i.Device)
-	}
-	if e == nil {
-		_, e = tx.Exec(r.Context(), "UPDATE mcp_jobs j SET cancel_requested=true,state=CASE WHEN j.state='queued' THEN 'cancelled' ELSE j.state END,arguments_sealed='',result_sealed='' FROM mcp_routes r WHERE r.id=j.route_id AND r.account_id=$1 AND r.device_id=$2", i.Account, i.Device)
+		e = revokeDeviceMCP(r.Context(), tx, i.Account, i.Device)
 	}
 	if e == nil {
 		e = tx.Commit(r.Context())
@@ -950,6 +947,9 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request, i identity) {
 		return
 	}
 	_, e = tx.Exec(r.Context(), "UPDATE sessions SET revoked=true WHERE account_id=$1 AND device_id=$2", i.Account, id)
+	if e == nil {
+		e = revokeDeviceMCP(r.Context(), tx, i.Account, id)
+	}
 	if e == nil {
 		e = tx.Commit(r.Context())
 	}

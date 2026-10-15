@@ -20,11 +20,11 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "新增 MCP 自动化：可连接兼容的 AI 客户端，在明确授权的副本中管理配置、打开网页、读取页面、填写表单、点击、截图并访问指定文件夹。 / Adds MCP automation for compatible AI clients to manage explicitly authorized profiles, open pages, read content, fill forms, click, capture screenshots and access selected folders.",
-  "新增远程 MCP：可将已授权设备连接到远程 AI 客户端，并按副本、网站来源、文件夹和操作范围分配权限。 / Adds remote MCP access from AI clients to authorized devices, with permissions scoped by profile, website origin, folder and operation.",
-  "新增 MCP 云同步工具：可查看同步状态、预览变更、同步选定副本并处理冲突。 / Adds MCP cloud-sync tools to inspect status, preview changes, sync selected profiles and resolve conflicts.",
-  "Chrome、Edge 和 Firefox 均支持 MCP 浏览器操作；敏感操作可在 NodeCloak 中确认，调用状态和结果可在任务记录中查看。 / MCP browser actions support Chrome, Edge and Firefox; sensitive actions can be confirmed in NodeCloak, with job status and results available in task history.",
-  "改进副本页面控制与同步状态反馈，让 AI 自动化流程更易查看和恢复。 / Improves browser-page control and sync status feedback for clearer, recoverable AI automation workflows."
+  "复制副本时保留原有指纹开关，为新副本生成独立标识，保持默认配置的登录兼容性。 / Cloned profiles preserve the original fingerprint mode and receive an independent identity, retaining the login compatibility of default configurations.",
+  "浏览器控制连接中断后自动尝试恢复，正常关闭时准确更新状态，并保留具体错误记录。Firefox 在恢复失败时提示重启副本。 / Browser control retries interrupted connections, reports normal closure accurately and keeps detailed error records. Firefox prompts you to restart the profile if recovery fails.",
+  "改进 Chrome、Edge 和 Firefox 的 MCP 页面操作、跨框架点击与下载管理，授权撤销后及时停止访问。 / Improves MCP page actions, cross-frame clicks and download handling across Chrome, Edge and Firefox, with prompt access removal when authorization is revoked.",
+  "终端支持按工具保存时区、语言和自定义环境变量，可选择继承系统环境，并在启动前预览配置。 / Save timezone, language and custom environment variables for each terminal tool, inherit the system environment and preview settings before launch.",
+  "改进代理配置复制、测试与保存时的凭据匹配，提升多副本使用稳定性。 / Improves proxy credential matching when copying, testing and saving settings for more reliable profile management."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

@@ -199,6 +199,12 @@ func (s *Server) mcpApprove(w http.ResponseWriter, r *http.Request, i identity) 
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Recheck under the account lock: logout or an administrator may have
+	// revoked the desktop identity after the request passed middleware.
+	if s.authorizeTx(r.Context(), tx, i, true) != nil {
+		failure(w, 401, "unauthorized")
+		return
+	}
 	var id, cid string
 	var requested []string
 	if tx.QueryRow(r.Context(), "SELECT id::text,client_id,scopes FROM mcp_authorizations WHERE user_code=$1 AND expires_at>now() AND grant_id IS NULL FOR UPDATE", in.Code).Scan(&id, &cid, &requested) != nil {

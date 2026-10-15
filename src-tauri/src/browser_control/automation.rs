@@ -226,14 +226,14 @@ impl BrowserControl {
         self.protocol.navigation = None;
         result
     }
-    fn tree(&mut self, cancel: &AtomicBool) -> Result<Vec<Value>, String> {
+    pub(super) fn tree(&mut self, cancel: &AtomicBool) -> Result<Vec<Value>, String> {
         if self.firefox {
             let v = self.command("browsingContext.getTree", json!({}), None, cancel)?;
             let mut out = vec![];
             fn visit(v: &Value, tab: &str, out: &mut Vec<Value>) {
                 let id = v["context"].as_str().unwrap_or("");
                 let tab = if tab.is_empty() { id } else { tab };
-                out.push(json!({"tab_id":tab,"frame_id":id,"url":v["url"],"top_level":id==tab}));
+                out.push(json!({"tab_id":tab,"frame_id":id,"url":v["url"],"top_level":id==tab,"opener":v["originalOpener"]}));
                 for c in v["children"].as_array().into_iter().flatten() {
                     visit(c, tab, out);
                 }
@@ -253,10 +253,15 @@ impl BrowserControl {
                 .filter(|t| t["type"] == "page")
             {
                 let id = t["targetId"].as_str().ok_or("TAB_NOT_FOUND")?;
-                out.push(json!({"tab_id":id,"frame_id":id,"url":t["url"],"title":t["title"],"top_level":true}));
+                out.push(json!({"tab_id":id,"frame_id":id,"url":t["url"],"title":t["title"],"top_level":true,"opener":t["openerId"]}));
                 if let Some(session) = self.targets.get(id).cloned() {
-                    let tree =
-                        self.command("Page.getFrameTree", json!({}), Some(&session), cancel)?;
+                    let tree = match self.command("Page.getFrameTree", json!({}), Some(&session), cancel) {
+                        Ok(tree) => tree,
+                        // A tab may close after Target.getTargets. Its entry was just
+                        // appended, so omit only that vanished target and retain live tabs.
+                        Err(error) if closed_target_error(&error) => { out.pop(); continue; }
+                        Err(error) => return Err(error),
+                    };
                     fn visit(v: &Value, tab: &str, out: &mut Vec<Value>) {
                         let f = &v["frame"];
                         out.push(json!({"tab_id":tab,"frame_id":f["id"],"url":f["url"],"top_level":false}));
@@ -291,8 +296,11 @@ impl BrowserControl {
                     let Some(session) = self.targets.get(id).cloned() else {
                         continue;
                     };
-                    let tree =
-                        self.command("Page.getFrameTree", json!({}), Some(&session), cancel)?;
+                    let tree = match self.command("Page.getFrameTree", json!({}), Some(&session), cancel) {
+                        Ok(tree) => tree,
+                        Err(error) if closed_target_error(&error) => continue,
+                        Err(error) => return Err(error),
+                    };
                     let f = &tree["frameTree"]["frame"];
                     let parent = f["parentId"].as_str();
                     let mut owner = parent.and_then(|p| {
@@ -434,30 +442,6 @@ impl BrowserControl {
             a["profile_id"].as_str(),
             chrono::Utc::now().timestamp(),
         )?;
-        if crate::mcp::catalog_permission(tool).ok() == Some("page_write") || tool == "page_upload"
-        {
-            let permitted = g.permissions.iter().any(|p| p == "files") && !g.file_roots.is_empty();
-            if self.firefox {
-                let behavior = if permitted {
-                    json!({"type":"allowed","destinationFolder":browser_path(&download_dir(g,a["profile_id"].as_str().unwrap_or(""))?)})
-                } else {
-                    json!({"type":"denied"})
-                };
-                self.command(
-                    "browser.setDownloadBehavior",
-                    json!({"downloadBehavior":behavior,"userContexts":["default"]}),
-                    None,
-                    cancel,
-                )?;
-            } else {
-                let params = if permitted {
-                    json!({"behavior":"allow","downloadPath":browser_path(&download_dir(g,a["profile_id"].as_str().unwrap_or(""))?),"eventsEnabled":true})
-                } else {
-                    json!({"behavior":"deny","eventsEnabled":true})
-                };
-                self.command("Browser.setDownloadBehavior", params, None, cancel)?;
-            }
-        }
         if tool == "tabs_list" || tool == "frames_list" {
             let list = self.tree(cancel)?;
             let filtered: Vec<_> = list
@@ -617,6 +601,7 @@ impl BrowserControl {
             {
                 return Err("DIALOG_CHANGED: request approval again".into());
             }
+            self.claim_downloads(g,a["profile_id"].as_str().unwrap_or(""),tab,cancel)?;
             if self.firefox {
                 self.command("browsingContext.handleUserPrompt",json!({"context":context,"accept":a["accept"],"userText":a["text"].as_str().unwrap_or("")}),None,cancel)?;
             } else {
@@ -631,6 +616,7 @@ impl BrowserControl {
             self.cleanup_closed_dialogs();
             return Ok(json!({"handled":true,"dialog_open":!self.automation_dialogs.is_empty()}));
         }
+        if tool == "page_navigate" { g.origin(a["url"].as_str().ok_or("URL_REQUIRED")?)?; }
         let (context, frame) = self.target(&a, g, cancel)?;
         if tool == "__preview" {
             a["action"] = json!(if a.get("element_ref").is_some() {
@@ -676,7 +662,13 @@ impl BrowserControl {
                     cancel,
                 )?;
             }
+            // A closing target can disappear while enumerating its frames. The idle
+            // loop retries restoration; the successful close itself stays successful.
+            let _ = self.finish_closed_download_tab(a["tab_id"].as_str().unwrap_or(""),cancel);
             return Ok(json!({"closed":true}));
+        }
+        if crate::mcp::catalog_permission(tool).ok() == Some("page_write") || tool == "page_upload" {
+            self.claim_downloads(g,a["profile_id"].as_str().unwrap_or(""),a["tab_id"].as_str().ok_or("TAB_REQUIRED")?,cancel)?;
         }
         if tool == "page_navigate" {
             let url = a["url"].as_str().ok_or("URL_REQUIRED")?;
@@ -755,7 +747,13 @@ impl BrowserControl {
                     cancel,
                 )?;
             } else {
-                self.command("Page.bringToFront", json!({}), Some(&context), cancel)?;
+                // The selected frame can have its own OOPIF session. Only the
+                // top-level page session may activate the tab; native input below
+                // still uses the selected frame session and its coordinates.
+                let tab_session = self.targets
+                    .get(a["tab_id"].as_str().ok_or("TAB_REQUIRED")?)
+                    .cloned().ok_or("TAB_NOT_CONTROLLED")?;
+                self.command("Page.bringToFront", json!({}), Some(&tab_session), cancel)?;
             }
             a["action"] = json!("node");
             let node = self.evaluate(&context, &frame, g, &a, true, cancel)?;
@@ -889,6 +887,14 @@ impl BrowserControl {
         self.evaluate(&context, &frame, g, &a, false, cancel)
     }
 }
+// CDP can retire a page/OOPIF session between enumeration and inspection.
+// Do not suppress other browser errors (or cancellation) as a disappearing target.
+fn closed_target_error(error: &str) -> bool {
+    matches!(error,
+        "BROWSER_REJECTED: Session with given id not found."
+        | "BROWSER_REJECTED: Target closed"
+        | "BROWSER_REJECTED: Target closed.")
+}
 fn decode_remote(v: &Value) -> Result<Value, String> {
     Ok(match v["type"].as_str().unwrap_or("") {
         "object" => {
@@ -927,7 +933,7 @@ fn validate_file(g: &Grant, path: &str) -> Result<PathBuf, String> {
     }
     Ok(path)
 }
-fn download_dir(g: &Grant, profile: &str) -> Result<PathBuf, String> {
+pub(super) fn download_dir(g: &Grant, profile: &str) -> Result<PathBuf, String> {
     let base = std::fs::canonicalize(
         g.file_roots
             .first()
@@ -946,7 +952,7 @@ fn download_dir(g: &Grant, profile: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(dir).map_err(|_| "INVALID_DOWNLOAD_DIRECTORY".into())
 }
 
-fn browser_path(path: &Path) -> String {
+pub(super) fn browser_path(path: &Path) -> String {
     let text = path.to_string_lossy().to_string();
     #[cfg(windows)]
     {
@@ -958,4 +964,68 @@ fn browser_path(path: &Path) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    // Target.getTargets and Page.getFrameTree are separate protocol round trips:
+    // closing a tab can invalidate either a page or OOPIF session between them.
+    #[test]
+    fn frame_tree_omits_closed_targets_but_keeps_live_tabs_and_real_errors() {
+        for failure in ["Session with given id not found.", "Target closed", "Access denied"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut ws = tungstenite::accept(stream).unwrap();
+                while let Ok(Message::Text(raw)) = ws.read() {
+                    let request: Value = serde_json::from_str(&raw).unwrap();
+                    let result = match request["method"].as_str().unwrap() {
+                        "Target.getTargets" => json!({"targetInfos":[
+                            {"targetId":"live","type":"page","url":"https://example.test/","title":"Live","attached":true},
+                            {"targetId":"closing-page","type":"page","url":"https://closing.test/","title":"Closing","attached":true},
+                            {"targetId":"closing-frame","type":"iframe","url":"https://closing.test/frame","title":"Closing frame","attached":true},
+                            {"targetId":"live-frame","type":"iframe","url":"https://frame.test/","title":"Frame","attached":true}
+                        ]}),
+                        "Page.getFrameTree" if request["sessionId"] == "live-session" => json!({"frameTree":{"frame":{"id":"live","url":"https://example.test/"}}}),
+                        "Page.getFrameTree" if request["sessionId"] == "live-frame-session" => json!({"frameTree":{"frame":{"id":"live-frame","parentId":"live","url":"https://frame.test/"}}}),
+                        "Page.getFrameTree" => {
+                            ws.send(Message::Text(json!({"id":request["id"],"sessionId":request["sessionId"],"error":{"code":-32001,"message":failure}}).to_string().into())).unwrap();
+                            continue;
+                        }
+                        method => panic!("unexpected protocol call {method}"),
+                    };
+                    ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).unwrap();
+                }
+            });
+            let (mut socket, _) = tungstenite::connect(format!("ws://{address}")).unwrap();
+            if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+                stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            }
+            let mut controller = BrowserControl {
+                protocol: Protocol {socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None},
+                firefox:false,region:regional::initial(&crate::profiles::Preferences::default()).unwrap(),
+                permission:PermissionMode::Ask,primary:"live-session".into(),sessions:HashSet::new(),
+                targets:HashMap::from([("live".into(),"live-session".into()),("closing-page".into(),"closing-page-session".into()),("closing-frame".into(),"closing-frame-session".into()),("live-frame".into(),"live-frame-session".into())]),
+                workers:HashSet::new(),pages:HashSet::new(),advanced:Default::default(),fingerprint:None,
+                fingerprint_sessions:HashSet::new(),fingerprint_workers:HashMap::new(),internal_workers:HashSet::new(),
+                automation_fatal:None,automation_dialogs:HashMap::new(),automation_warnings:Vec::new(),automation_cleanup:Vec::new(),
+                download_lease:None,download_subscribed:false,download_checked:Instant::now(),
+            };
+            let result = controller.tree(&AtomicBool::new(false));
+            drop(controller);
+            server.join().unwrap();
+            if failure == "Access denied" {
+                assert!(result.unwrap_err().contains("Access denied"));
+            } else {
+                let items = result.unwrap();
+                assert_eq!(items.iter().map(|v| v["frame_id"].as_str().unwrap()).collect::<Vec<_>>(),vec!["live","live-frame"]);
+                assert_eq!(items[1]["tab_id"],"live");
+            }
+        }
+    }
 }

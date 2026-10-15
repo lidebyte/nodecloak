@@ -70,6 +70,7 @@ fn allowed(key: &str) -> bool {
         "media.peerconnection.ice.no_host",
         "media.peerconnection.ice.proxy_only",
         "remote.prefs.recommended",
+        "termsofuse.bypassNotification",
         "dom.file.createInChild",
     ]
     .contains(&key)

@@ -935,7 +935,14 @@ pub fn action(app: &tauri::AppHandle, action: Value) -> Result<Value, String> {
                     }
                 }
             }
-            save(root, &s.config)?;
+            let saved = save(root, &s.config);
+            drop(s);
+            if !enabled {
+                app.state::<crate::profiles::Runtime>()
+                    .1
+                    .invalidate_downloads(None);
+            }
+            saved?;
         }
         "grant" => {
             let mut g: Grant =
@@ -988,7 +995,16 @@ pub fn action(app: &tauri::AppHandle, action: Value) -> Result<Value, String> {
             if s.port == 0 {
                 return Err("MCP_NOT_READY".into());
             }
-            s.config.grants.retain(|g| !g.revoked);
+            let deadline = now();
+            for expired in s
+                .config
+                .grants
+                .iter()
+                .filter(|g| g.revoked || g.expires_at <= deadline)
+            {
+                secret_remove(&format!("{}:{}", s.namespace, expired.id));
+            }
+            s.config.grants.retain(|g| !g.revoked && g.expires_at > deadline);
             if s.config.grants.len() >= 100 {
                 return Err("TOO_MANY_CLIENTS".into());
             }
@@ -1017,7 +1033,12 @@ pub fn action(app: &tauri::AppHandle, action: Value) -> Result<Value, String> {
                     }
                 }
             }
-            save(root, &s.config)?;
+            let saved = save(root, &s.config);
+            drop(s);
+            app.state::<crate::profiles::Runtime>()
+                .1
+                .invalidate_downloads(Some(id));
+            saved?;
         }
         "approve" | "cancel" => {
             let id = action["id"]

@@ -113,13 +113,28 @@ func (s *Server) mcpUpdate(w http.ResponseWriter, r *http.Request, i identity) {
 		failure(w, 503, "gateway_unavailable")
 		return
 	}
-	tag, e := s.db.Exec(r.Context(), `UPDATE mcp_jobs j SET state=$4,result_sealed=$5,error=$6,arguments_sealed='',updated_at=now() FROM mcp_routes r WHERE j.id=$1 AND j.route_id=$2 AND r.id=j.route_id AND r.account_id=$3 AND r.device_id=$7 AND NOT r.revoked AND r.expires_at>now() AND j.expires_at>now() AND j.state IN('dispatched','running','awaiting_approval')`, r.PathValue("id"), in.Route, i.Account, in.State, sealed, in.Error, i.Device)
+	tx, e := s.db.Begin(r.Context())
+	if e != nil {
+		failure(w, 503, "database_unavailable")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	// A result authenticated before revocation must not repopulate cleared data.
+	if s.authorizeTx(r.Context(), tx, i, true) != nil {
+		failure(w, 401, "unauthorized")
+		return
+	}
+	tag, e := tx.Exec(r.Context(), `UPDATE mcp_jobs j SET state=$4,result_sealed=$5,error=$6,arguments_sealed='',updated_at=now() FROM mcp_routes r WHERE j.id=$1 AND j.route_id=$2 AND r.id=j.route_id AND r.account_id=$3 AND r.device_id=$7 AND NOT r.revoked AND r.expires_at>now() AND j.expires_at>now() AND j.state IN('dispatched','running','awaiting_approval')`, r.PathValue("id"), in.Route, i.Account, in.State, sealed, in.Error, i.Device)
 	if e != nil {
 		failure(w, 503, "database_unavailable")
 		return
 	}
 	if tag.RowsAffected() != 1 {
 		failure(w, 409, "job_not_active")
+		return
+	}
+	if tx.Commit(r.Context()) != nil {
+		failure(w, 503, "database_unavailable")
 		return
 	}
 	reply(w, 200, map[string]any{"updated": true})

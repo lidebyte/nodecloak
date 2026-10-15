@@ -17,6 +17,10 @@ use std::{
 };
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 mod automation;
+mod downloads;
+mod recovery;
+#[cfg(test)]
+mod recovery_tests;
 
 #[derive(Default)]
 pub struct Runtime(Mutex<HashMap<String, Control>>);
@@ -81,11 +85,16 @@ impl Runtime {
     }
 }
 enum Request {
+    InvalidateDownloads(Option<String>),
     Automation(String,Value,crate::mcp::policy::Grant,Arc<AtomicBool>,mpsc::Sender<Result<Value,String>>),
     Open(String, bool, mpsc::Sender<Result<(), OpenError>>),
     Quit(mpsc::Sender<Result<(), String>>),
     #[cfg(test)]
     Probe(mpsc::Sender<Result<Value, String>>),
+    #[cfg(test)]
+    Disconnect(mpsc::Sender<()>),
+    #[cfg(test)]
+    ExitBrowser(mpsc::Sender<()>),
 }
 pub struct Control {
     sender: mpsc::Sender<Request>,
@@ -130,6 +139,7 @@ struct Protocol {
     events: VecDeque<Value>,
     last_error: Option<String>,
     navigation: Option<(u64, Option<Value>)>,
+    reconnect_endpoint: Option<String>,
 }
 impl Protocol {
     fn read(&mut self) -> Result<Option<Value>, String> {
@@ -137,7 +147,7 @@ impl Protocol {
             Ok(Message::Text(text)) => serde_json::from_str(&text)
                 .map(Some)
                 .map_err(|_| "浏览器控制响应格式无效".into()),
-            Ok(Message::Close(_)) => Err("浏览器区域控制连接已关闭".into()),
+            Ok(Message::Close(frame)) => Err(format!("浏览器控制连接关闭（WebSocket Close，code={}）", frame.map(|f| u16::from(f.code)).unwrap_or(1005))),
             Ok(_) => Ok(None),
             Err(tungstenite::Error::Io(e))
                 if matches!(
@@ -147,7 +157,7 @@ impl Protocol {
             {
                 Ok(None)
             }
-            Err(_) => Err("浏览器区域控制连接中断".into()),
+            Err(e) => Err(format!("浏览器控制连接中断（{}）", recovery::transport_error(&e))),
         }
     }
     // UI activation can wait indefinitely for OS visibility in Firefox background windows.
@@ -171,7 +181,7 @@ impl Protocol {
         }
         self.socket
             .send(Message::Text(message.to_string().into()))
-            .map_err(|_| "无法写入浏览器区域设置")?;
+            .map_err(|e| format!("无法写入浏览器区域设置 {method}（{}）", recovery::transport_error(&e)))?;
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(if method=="Page.enable"{5}else{15}) {
             if let Some(value) = self.read()? {
@@ -183,9 +193,12 @@ impl Protocol {
                             .or_else(|| value["message"].as_str())
                             .or_else(|| value["error"].as_str())
                             .map(str::to_owned);
-                        return Err(format!(
-                            "浏览器不支持或拒绝了区域设置 {method}，请更新浏览器后重试"
-                        ));
+                        let code = value["error"]["code"].as_i64().map(|n|n.to_string())
+                            .or_else(|| value["error"].as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
+                        let reason = if self.last_error.as_deref().is_some_and(|m|m.contains("Maximum number of active sessions")) {
+                            "；现有 Firefox BiDi 会话仍在运行，当前浏览器未开放会话重连"
+                        } else { "" };
+                        return Err(format!("浏览器拒绝控制命令 {method}（code={code}）{reason}"));
                     }
                     if value["type"] == "exception"
                         || value["result"]["type"] == "exception"
@@ -268,6 +281,9 @@ struct BrowserControl {
     automation_dialogs:HashMap<String,Value>,
     automation_warnings:Vec<String>,
     automation_cleanup:Vec<automation::Cleanup>,
+    download_lease:Option<downloads::Lease>,
+    download_subscribed:bool,
+    download_checked:Instant,
 }
 impl BrowserControl {
     fn initialize(
@@ -279,17 +295,10 @@ impl BrowserControl {
         lookup_url: &str,
         advanced: crate::profiles::AdvancedSettings,
         fingerprint: Option<crate::fingerprint::Settings>,
+        deny_downloads: bool,
     ) -> Result<Self, String> {
-        let (mut socket, _) = tungstenite::connect(endpoint(browser, path)?.as_str())
-            .map_err(|_| "无法连接此副本的本地浏览器接口")?;
-        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
-            stream
-                .set_read_timeout(Some(Duration::from_millis(100)))
-                .map_err(|_| "无法设置控制超时")?;
-            stream
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .map_err(|_| "无法设置控制超时")?;
-        }
+        let endpoint = endpoint(browser, path)?;
+        let socket = recovery::connect_socket(&endpoint)?;
         let mut this = Self {
             protocol: Protocol {
                 socket,
@@ -297,6 +306,7 @@ impl BrowserControl {
                 events: VecDeque::new(),
                 last_error: None,
                 navigation: None,
+                reconnect_endpoint: None,
             },
             firefox: browser == "firefox",
             region,
@@ -315,14 +325,22 @@ impl BrowserControl {
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
             automation_cleanup:Vec::new(),
+            download_lease:None,
+            download_subscribed:false,
+            download_checked:Instant::now(),
         };
         if this.firefox {
-            this.protocol.call(
+            let session = this.protocol.call(
                 "session.new",
-                json!({"capabilities":{"alwaysMatch":{"acceptInsecureCerts":false,"unhandledPromptBehavior":"ignore"}}}),
+                json!({"capabilities":{"alwaysMatch":{"acceptInsecureCerts":false,"unhandledPromptBehavior":"ignore","webSocketUrl":true}}}),
                 None,
             )?;
-            this.protocol.call("session.subscribe",json!({"events":["browsingContext.userPromptOpened"]}),None)?;
+            // A session id is an authentication secret: keep it in memory, never log it.
+            if let Some(id) = session["sessionId"].as_str().filter(|id| id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+                this.protocol.reconnect_endpoint = Some(format!("{endpoint}/{id}"));
+            }
+            if deny_downloads { this.download_policy_after_reconnect()?; }
+            this.protocol.call("session.subscribe",json!({"events":["browsingContext.userPromptOpened","browsingContext.contextCreated"]}),None)?;
             if let Some(settings) = this.fingerprint.as_ref().filter(|f| f.enabled) {
                 this.protocol.call("script.addPreloadScript",json!({"functionDeclaration":crate::fingerprint::preload(settings)?,"userContexts":["default"]}),None)?;
             }
@@ -334,6 +352,7 @@ impl BrowserControl {
                 .ok_or("Firefox 初始页面尚未就绪")?
                 .into();
         } else {
+            if deny_downloads { this.download_policy_after_reconnect()?; }
             this.protocol.call("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"page","exclude":false},{"type":"iframe","exclude":false},{"type":"worker","exclude":false},{"type":"shared_worker","exclude":false},{"type":"service_worker","exclude":false},{"exclude":true}]}),None)?;
             this.drain()?;
             if this.primary.is_empty() {
@@ -495,6 +514,7 @@ impl BrowserControl {
     }
     fn drain(&mut self) -> Result<(), String> {
         while let Some(event) = self.protocol.events.pop_front() {
+            self.download_event(&event);
             if event["method"]=="Page.javascriptDialogClosed"||event["method"]=="browsingContext.userPromptClosed"{self.forget_dialog(&event);continue;}
             if event["method"]=="Page.javascriptDialogOpening"||event["method"]=="browsingContext.userPromptOpened"{self.remember_dialog(&event);continue;}
             if event["method"] == "Debugger.paused" {
@@ -751,6 +771,7 @@ pub(crate) fn start_with_lookup(
             &lookup_url,
             preferences.advanced.clone(),
             preferences.fingerprint.clone(),
+            false,
         )
         .and_then(|mut state| {
             state.region = regional::resolve(&preferences, state.region.ip_region.clone())?;
@@ -761,6 +782,7 @@ pub(crate) fn start_with_lookup(
         let mut state = match boot {
             Ok(state) => state,
             Err(e) => {
+                recovery::log(&path,&browser,"startup_failed",0,&e);
                 let _ = ready_tx.send(Err(e));
                 return;
             }
@@ -769,10 +791,14 @@ pub(crate) fn start_with_lookup(
         if ready_tx.send(Ok(state.region.clone())).is_err() {
             return;
         }
-        let run = (|| -> Result<(), String> {
+        recovery::log(&path, &browser, "connected", 0, "browser control ready");
+        let mut recent_recoveries = VecDeque::new();
+        let run = loop {
+          let result = (|| -> Result<(), String> {
             while !stop.load(Ordering::SeqCst) {
                 if let Ok(request) = requests.try_recv() {
                     match request {
+                        Request::InvalidateDownloads(client)=>state.invalidate_downloads(client.as_deref())?,
                         Request::Automation(tool,args,grant,cancel,response)=>{
                             let mut result=state.automate(&tool,args,&grant,&cancel);
                             if let Ok(value)=&mut result{if !state.automation_warnings.is_empty(){value["warnings"]=json!(std::mem::take(&mut state.automation_warnings));}}
@@ -799,6 +825,16 @@ pub(crate) fn start_with_lookup(
                             state.handle_open(&url, new_tab, response)?;
                         }
                         #[cfg(test)]
+                        Request::ExitBrowser(response) => {
+                            let _ = state.protocol.call(if state.firefox { "browser.close" } else { "Browser.close" },json!({}),None);
+                            let _ = response.send(());
+                        }
+                        #[cfg(test)]
+                        Request::Disconnect(response) => {
+                            if let MaybeTlsStream::Plain(stream) = state.protocol.socket.get_mut() { let _ = stream.shutdown(std::net::Shutdown::Both); }
+                            let _ = response.send(());
+                        }
+                        #[cfg(test)]
                         Request::Probe(response) => {
                             let _=response.send(state.protocol.call("Runtime.evaluate",json!({"expression":"({url:location.href,ready:document.readyState,body:document.body.innerText,first:typeof first!=='undefined'?first:null,progress:window.progress})","returnByValue":true}),Some(&state.primary)));
                         }
@@ -806,12 +842,24 @@ pub(crate) fn start_with_lookup(
                 }
                 state.drain()?;
                 state.cleanup_closed_dialogs();
+                if state.download_lease.is_some() && state.download_checked.elapsed() >= Duration::from_secs(1) {
+                    state.download_checked = Instant::now();
+                    let _ = state.maintain_downloads(&AtomicBool::new(false));
+                }
                 if let Some(event) = state.protocol.read()? {
                     state.protocol.events.push_back(event)
                 }
             }
             Ok(())
-        })();
+          })();
+          let Err(message) = result else { break Ok(()); };
+          alive.store(false, Ordering::SeqCst);
+          match recovery::recover(&mut state, &browser, &path, &stop, &message, &mut recent_recoveries) {
+              Ok(true) => { alive.store(true, Ordering::SeqCst); }
+              Ok(false) => break Ok(()),
+              Err(error) => break Err(error),
+          }
+        };
         alive.store(false, Ordering::SeqCst);
         if let Err(message) = run {
             if !stop.load(Ordering::SeqCst)
@@ -822,7 +870,10 @@ pub(crate) fn start_with_lookup(
                 if let Ok(mut e) = error.lock() {
                     *e = Some(format!("{message}；已关闭此副本，请重新启动"));
                 }
-                let _ = platform::close_profile(&path);
+                recovery::log(&path, &browser, "recovery_exhausted", 0, &message);
+                if let Err(close_error) = platform::close_profile(&path) {
+                    recovery::log(&path, &browser, "close_failed", 0, &close_error);
+                }
             }
         }
     });
@@ -938,6 +989,7 @@ mod tests {
                     events: VecDeque::new(),
                     last_error: None,
                     navigation: None,
+                reconnect_endpoint: None,
                 },
                 firefox: false,
                 region: regional::initial(&Preferences::default()).unwrap(),
@@ -956,6 +1008,9 @@ mod tests {
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
             automation_cleanup:Vec::new(),
+            download_lease:None,
+            download_subscribed:false,
+            download_checked:Instant::now(),
             },
             server,
         )
@@ -1021,6 +1076,7 @@ mod tests {
                 events: VecDeque::new(),
                 last_error: None,
                 navigation: None,
+                reconnect_endpoint: None,
             },
             firefox: true,
             region: regional::initial(&Preferences::default()).unwrap(),
@@ -1039,6 +1095,9 @@ mod tests {
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
             automation_cleanup:Vec::new(),
+            download_lease:None,
+            download_subscribed:false,
+            download_checked:Instant::now(),
         };
         let (tx, rx) = mpsc::channel();
         assert!(state
@@ -1372,6 +1431,9 @@ mod tests {
             }
         }
     }
+    include!("browser_control/download_checks.rs");
+    include!("browser_control/recovery_checks.rs");
+
     struct TempBrowser {
         path: PathBuf,
         control: Control,
@@ -1436,7 +1498,10 @@ mod tests {
             let _ = platform::force_close_profile(&self.path);
         }
     }
-    fn browser(browser: &str, mut prefs: Preferences, lookup: &str) -> TempBrowser {
+    fn browser(browser: &str, prefs: Preferences, lookup: &str) -> TempBrowser {
+        browser_with_setup(browser, prefs, lookup, |_| {})
+    }
+    fn browser_with_setup(browser: &str, mut prefs: Preferences, lookup: &str, setup: impl FnOnce(&Path)) -> TempBrowser {
         prefs.regional.enabled = true;
         let root = tempfile::tempdir().unwrap();
         let canonical = root.path().canonicalize().unwrap();
@@ -1464,6 +1529,7 @@ mod tests {
             )
             .unwrap();
         }
+        setup(&path);
         platform::spawn_controlled_browser(browser, &path, "direct", None).unwrap();
         let result = start_with_lookup(
             browser.into(),

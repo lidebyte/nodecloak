@@ -163,6 +163,9 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request, i identity) {
 		_, e = tx.Exec(r.Context(), "UPDATE sessions SET revoked=true WHERE account_id=$1 AND device_id=$2", i.Account, in.Revoke)
 	}
 	if e == nil {
+		e = revokeDeviceMCP(r.Context(), tx, i.Account, in.Revoke)
+	}
+	if e == nil {
 		_, e = tx.Exec(r.Context(), "UPDATE leases SET generation=generation+1,expires_at=now() WHERE account_id=$1", i.Account)
 	}
 	if e == nil {
