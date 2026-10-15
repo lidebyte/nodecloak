@@ -465,8 +465,9 @@ details>summary { border-radius: 8px; padding: 8px; font-size: 13px; }
 .select-menu-options button.chosen { color: var(--green); }
 .select-menu-options button.chosen .select-menu-check { opacity: 1; }
 .select-menu-options button.highlighted { background: var(--control-bg); border-color: var(--control-border); }
-.select-menu-search { display: flex; align-items: center; gap: 8px; padding: 0 8px 8px; flex-shrink: 0; color: var(--muted); }
-.select-menu-search input:not([type='checkbox']):not([type='radio']) { height: 38px; min-height: 38px; width: 100%; padding: 0 10px; border-radius: 10px; }
+.select-menu-search { position: relative; display: flex; align-items: center; padding: 0 8px 8px; flex-shrink: 0; color: var(--muted); }
+.select-menu-search > svg { position: absolute; left: 20px; top: 19px; transform: translateY(-50%); pointer-events: none; }
+.select-menu-search input:not([type='checkbox']):not([type='radio']) { height: 38px; min-height: 38px; width: 100%; padding: 0 10px 0 34px; border-radius: 10px; }
 .select-menu-empty { padding: 12px; font-size: 12px; color: var(--muted); }
 .profile-toolbar>.select-menu { width: 150px; }
 .profile-form .select-menu { margin-top: 8px; }

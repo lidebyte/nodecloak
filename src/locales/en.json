@@ -1383,5 +1383,10 @@
   "环境变量值不能包含空字符。": "Variable values cannot contain null characters.",
   "无法读取终端环境，请检查系统凭据存储。": "Cannot read terminal settings. Check the system credential store.",
   "无法保存终端环境，请检查系统凭据存储及配置大小。": "Cannot save terminal settings. Check the credential store and configuration size.",
-  "可设置代理、API 地址和密钥。配置在本机加密保存，预览始终隐藏变量值。": "Set proxies, API endpoints and keys. Settings are encrypted on this device. Values stay hidden in the preview."
+  "可设置代理、API 地址和密钥。配置在本机加密保存，预览始终隐藏变量值。": "Set proxies, API endpoints and keys. Settings are encrypted on this device. Values stay hidden in the preview.",
+  "使用自定义值": "Use custom value",
+  "继承已有值": "Inherit existing value",
+  "搜索或输入自定义值": "Search or enter a custom value",
+  "可搜索选择或输入自定义值；选择“继承已有值”沿用当前环境。": "Search and select or enter a custom value. Choose “Inherit existing value” to keep the current environment.",
+  "可搜索选择，或输入自定义值后确认。": "Search and select, or enter a custom value and confirm."
 }

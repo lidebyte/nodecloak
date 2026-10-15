@@ -7,12 +7,12 @@ export interface SelectOption {value:string;label:string;icon?:ReactNode}
 interface Props {
   id?:string; label:string; value:string; options:SelectOption[];
   onChange:(value:string)=>void; onOpen?:()=>void; disabled?:boolean;
-  className?:string; searchable?:boolean; placeholder?:string;
+  className?:string; searchable?:boolean; allowCustom?:boolean; searchMaxLength?:number; placeholder?:string;
   invalid?:boolean; describedBy?:string;
   menuMinWidth?:number; noWrap?:boolean;
 }
 
-export default function SelectMenu({id,label,value,options,onChange,onOpen,disabled=false,className='',searchable=false,placeholder,invalid,describedBy,menuMinWidth=178,noWrap=false}:Props) {
+export default function SelectMenu({id,label,value,options,onChange,onOpen,disabled=false,className='',searchable=false,allowCustom=false,searchMaxLength,placeholder,invalid,describedBy,menuMinWidth=178,noWrap=false}:Props) {
   const uid=useId(),listId=`${uid}-options`;
   const trigger=useRef<HTMLButtonElement>(null),panel=useRef<HTMLDivElement>(null),search=useRef<HTMLInputElement>(null);
   const [open,setOpen]=useState(false),[query,setQuery]=useState(''),[active,setActive]=useState(0);
@@ -20,6 +20,8 @@ export default function SelectMenu({id,label,value,options,onChange,onOpen,disab
   const [host,setHost]=useState<HTMLElement|null>(null);
   const selected=options.find(option=>option.value===value);
   const filtered=options.filter(option=>`${option.label} ${option.value}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const custom=query.trim();
+  if(allowCustom&&custom&&!options.some(option=>option.value===custom))filtered.push({value:custom,label:`${t('使用自定义值')}：${custom}`});
   const currentIndex=Math.min(active,Math.max(0,filtered.length-1));
   const typeahead=useRef({text:'',time:0});
 
@@ -88,7 +90,7 @@ export default function SelectMenu({id,label,value,options,onChange,onOpen,disab
       {selected?.icon}<span>{selected?.label||value||placeholder||label}</span><ChevronDown size={15}/>
     </button>
     {open&&host&&createPortal(<div ref={panel} className={`profile-menu select-menu-options${noWrap?' select-menu-nowrap':''}`} style={placement} onKeyDown={keyboard}>
-      {searchable&&<div className="select-menu-search"><Search size={15}/><input ref={search} aria-label={label} placeholder={placeholder||label} value={query}
+      {searchable&&<div className="select-menu-search"><Search size={15} aria-hidden="true"/><input ref={search} aria-label={label} placeholder={placeholder||label} maxLength={searchMaxLength} value={query}
         onChange={event=>{setQuery(event.target.value);setActive(0);}} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={listId}
         aria-activedescendant={filtered.length?`${listId}-${currentIndex}`:undefined}/></div>}
       <div id={listId} role="listbox" aria-label={label} className="select-menu-list">

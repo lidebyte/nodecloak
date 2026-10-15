@@ -20,11 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "复制副本时保留原有指纹开关，为新副本生成独立标识，保持默认配置的登录兼容性。 / Cloned profiles preserve the original fingerprint mode and receive an independent identity, retaining the login compatibility of default configurations.",
-  "浏览器控制连接中断后自动尝试恢复，正常关闭时准确更新状态，并保留具体错误记录。Firefox 在恢复失败时提示重启副本。 / Browser control retries interrupted connections, reports normal closure accurately and keeps detailed error records. Firefox prompts you to restart the profile if recovery fails.",
-  "改进 Chrome、Edge 和 Firefox 的 MCP 页面操作、跨框架点击与下载管理，授权撤销后及时停止访问。 / Improves MCP page actions, cross-frame clicks and download handling across Chrome, Edge and Firefox, with prompt access removal when authorization is revoked.",
-  "终端支持按工具保存时区、语言和自定义环境变量，可选择继承系统环境，并在启动前预览配置。 / Save timezone, language and custom environment variables for each terminal tool, inherit the system environment and preview settings before launch.",
-  "改进代理配置复制、测试与保存时的凭据匹配，提升多副本使用稳定性。 / Improves proxy credential matching when copying, testing and saving settings for more reliable profile management."
+  "终端的时区、语言（LANG）和区域格式（LC_ALL）支持搜索下拉选择，提供常用选项、自定义输入和继承已有值。 / Terminal timezone, language (LANG) and regional format (LC_ALL) now offer searchable dropdowns with common choices, custom values and inheritance.",
+  "新建和编辑 Chrome、Edge、Firefox 副本时，可通过搜索下拉选择浏览器语言和时区，并保留自定义语言顺序与原有配置。 / Choose browser languages and timezones from searchable dropdowns when creating or editing Chrome, Edge and Firefox profiles, preserving custom language order and existing settings.",
+  "统一下拉菜单与搜索框样式，搜索图标置于输入框内，优化选项显示与文字间距。 / Refines dropdowns and search fields, placing the search icon inside the input and improving option labels and spacing."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');
