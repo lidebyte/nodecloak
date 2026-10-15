@@ -138,6 +138,10 @@ LC_ALL=en_US.UTF-8
 
 网络检测会请求 Claude 和 Cloudflare，按 IP 匹配区域会请求 IPWhois，更新检查和下载请求 GitHub。这些服务会收到检测或下载请求及出口 IP。
 
+## MCP 自动化
+
+通过本机 MCP 连接，让 AI 管理授权副本，并在 Chrome、Edge、Firefox 中读取网页、填写表单、截图及处理文件。可在偏好设置中选择副本、网站与操作权限，查看待确认操作和任务记录。见 [MCP 使用指南](docs/mcp.md)。
+
 ## 开发与构建
 
 项目使用 Tauri 2、React、TypeScript 和 Rust。

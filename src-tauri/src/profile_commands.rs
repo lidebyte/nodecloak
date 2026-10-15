@@ -114,11 +114,15 @@ pub(crate) fn launch_with_lookup(
     runtime: &Runtime,
     lookup_url: &str,
 ) -> Result<(), String> {
+    launch_for_control(root,id,destination,runtime,lookup_url,false)
+}
+pub(crate) fn launch_for_control(root:&Path,id:&str,destination:&str,runtime:&Runtime,lookup_url:&str,force_control:bool)->Result<(),String>{
     crate::cloud::sharing::before_launch(root, id)?;
     let p = profiles::get(root, id, false)?;
     let path = profiles::path(root, &p)?;
     crate::cloud::browser_session::recover(&path)?;
     if profiles::running(root, &p)? {
+        if force_control && !runtime.1.ready(id){return Err("RESTART_REQUIRED: 此副本正在运行，请关闭后通过 MCP 启动".into());}
         if destination == "startup" || destination == "focus" {
             if crate::regional::needs_control_for(
                 &p.browser,
@@ -153,7 +157,7 @@ pub(crate) fn launch_with_lookup(
         );
     }
     crate::cloud::session_sync::before_launch(root, id)?;
-    if crate::regional::needs_control_for(&p.browser, &p.preferences) {
+    if force_control || crate::regional::needs_control_for(&p.browser, &p.preferences) {
         runtime.1.stop(id);
         let mut keep_browser = false;
         let result = (|| -> Result<(), String> {
@@ -172,7 +176,7 @@ pub(crate) fn launch_with_lookup(
                     planned.preferences_managed = true;
                     planned.preferences_dirty = true;
                 }
-                profiles::apply_preferences(root, &planned)?;
+                profiles::apply_preferences_for_control(root, &planned,force_control)?;
                 let mut provider_region = resolved.clone();
                 if p.browser == "firefox" {
                     if p.preferences.regional.location_mode == "custom"

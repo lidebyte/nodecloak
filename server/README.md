@@ -61,6 +61,16 @@ Check `GET /healthz` for database readiness. Email request and Google start retu
 
 ## Data and recovery operations
 
+## Remote MCP gateway
+
+The Go service now includes `/mcp` (Streamable HTTP JSON responses), OAuth PKCE authorization/registration/token/revocation endpoints under `/mcp/oauth/`, and protected-resource/authorization-server discovery. Migration 8 creates the MCP tables on startup. Desktop devices receive work through authenticated outbound `/v1/mcp/relay`; desktop debugging ports are never exposed.
+
+Use the full [Nginx snippet](deploy/nginx-account.conf) and [remote MCP deployment guide](../docs/specs/remote-mcp-deployment.md). The new paths must bypass the static website fallback. Preserve the API's nonce CSP for the consent page and disable OAuth request-URL logging. Keep `PUBLIC_URL`, desktop `NODECLOAK_API_URL` and the OAuth resource origin consistent. No additional environment secret is required: payload encryption uses a separate derived key from the existing stable `TOKEN_PEPPER`.
+
+Gateway payloads expire after fifteen minutes; the main process calls cleanup every minute to erase expired ciphertext independently of traffic. Backup retention is configured separately. Restore the same pepper with database backups; changing it requires an explicit re-encryption migration.
+
+Only explicit grants on signed-in approved devices can execute requests. OAuth grants bind the client, account, device and local grant. Logout revokes that device's routes, scrubs queued payloads and requests cancellation. Refresh token reuse revokes the affected route. Dispatched work is never delivered again, including after device restart.
+
 ## Account password and 2FA
 
 Passwords use salted Argon2id (64 MiB, three iterations, two lanes). Hashing endpoints admit at most two concurrent requests and reject excess work; account/IP limits also apply. Password and email-code login require TOTP or a single-use recovery code when 2FA is enabled. Verified Google OAuth intentionally skips application 2FA. Changing account security requires the current password and the enabled second factor; setting the first password requires provider/email authentication within 15 minutes. Refreshing a token never renews that authentication timestamp. Security changes revoke other sessions and pending login challenges.

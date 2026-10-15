@@ -1,6 +1,6 @@
 [package]
 name = "nodecloak"
-version = "2.2.0"
+version = "3.0.0"
 description = "Independent browser workspaces and environment diagnostics"
 authors = ["NodeCloak contributors"]
 edition = "2021"
@@ -29,7 +29,8 @@ tempfile = "3"
 sha2 = "0.10"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "io-std", "sync", "time", "macros", "rt", "rt-multi-thread"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
 tokio-native-tls = "0.3"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }

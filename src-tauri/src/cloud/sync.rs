@@ -15,6 +15,55 @@ pub enum Decision {
     Apply(Value),
     Conflict(Vec<String>),
 }
+/// Selected MCP previews pin remote identities; successful writes advance only their own pin.
+pub(crate) struct VersionGuard {
+    pub ids: Vec<String>,
+    pub objects: Vec<Object>,
+}
+impl VersionGuard {
+    pub fn check(&self, id: &str, kind: &str, actual: Option<&Object>) -> Result<(), String> {
+        if !self.ids.iter().any(|x| x == id) {
+            return Ok(());
+        }
+        let expected = self.objects.iter().find(|o| o.id == id && o.kind == kind);
+        let equal = match (expected, actual) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.id == b.id
+                    && a.kind == b.kind
+                    && a.revision == b.revision
+                    && a.epoch == b.epoch
+                    && a.writer == b.writer
+                    && a.generation == b.generation
+                    && a.deleted == b.deleted
+            }
+            _ => false,
+        };
+        if equal {
+            Ok(())
+        } else {
+            Err("SYNC_PREVIEW_CHANGED".into())
+        }
+    }
+    pub fn manifest(&self, list: &[Object]) -> Result<(), String> {
+        for id in &self.ids {
+            for kind in ["config", "session"] {
+                self.check(
+                    id,
+                    kind,
+                    list.iter().find(|o| &o.id == id && o.kind == kind),
+                )?;
+            }
+        }
+        Ok(())
+    }
+    fn record(&mut self, o: &Object) {
+        if self.ids.contains(&o.id) {
+            self.objects.retain(|x| x.id != o.id || x.kind != o.kind);
+            self.objects.push(o.clone());
+        }
+    }
+}
 pub fn decide(base: Option<&Value>, local: Option<&Value>, remote: Option<&Value>) -> Decision {
     let deleted_local = base.map(|b| {
         let mut v = b.clone();
@@ -129,6 +178,9 @@ pub fn manifest(c: &mut Connection) -> Result<Vec<Object>, String> {
         validate_object(o)?;
         check_confirmed(c, o)?;
     }
+    if let Some(guard) = &c.mcp_versions {
+        guard.manifest(&list)?;
+    }
     Ok(list)
 }
 pub fn fetch(c: &mut Connection, id: &str, kind: &str) -> Result<Object, String> {
@@ -142,6 +194,9 @@ pub fn fetch(c: &mut Connection, id: &str, kind: &str) -> Result<Object, String>
         return Err("云端记录身份不匹配".into());
     };
     check_confirmed(c, &o)?;
+    if let Some(guard) = &c.mcp_versions {
+        guard.check(id, kind, Some(&o))?;
+    }
     Ok(o)
 }
 pub fn decrypt(c: &Connection, o: &Object) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -200,6 +255,9 @@ pub fn upload(
     if response["revision"] != object.revision {
         return Err("云端版本校验失败".into());
     };
+    if let Some(guard) = &mut c.mcp_versions {
+        guard.record(&object);
+    }
     Ok(object)
 }
 fn put_document(
@@ -433,6 +491,14 @@ fn conflict(
         })
 }
 pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String> {
+    run_selected(c, runtime, None, &std::sync::atomic::AtomicBool::new(false))
+}
+pub(crate) fn run_selected(
+    c: &mut Connection,
+    runtime: &profiles::Runtime,
+    selected: Option<&[String]>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
     let account = c.account_id()?;
     if !c.disk.accounts[&account].setup_complete {
         return Err("请先选择同步方式和副本".into());
@@ -449,6 +515,9 @@ pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String
         .collect();
     let local = profiles::load(&c.root)?;
     for p in &local {
+        if selected.is_some() {
+            continue;
+        }
         if super::sharing::restricted(&c.root, &p.id)? {
             continue;
         }
@@ -470,10 +539,17 @@ pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String
         .get_mut(&account)
         .unwrap()
         .conflicts
-        .retain(|x| x.kind == "session");
+        .retain(|x| x.kind == "session" || selected.is_some_and(|ids| !ids.contains(&x.local_id)));
     c.disk.save(&c.root)?;
     let bindings = c.disk.accounts[&account].bindings.clone();
     for (id, mut b) in bindings {
+        if selected.is_some_and(|ids| !ids.contains(&id)) {
+            continue;
+        }
+        c.check_mcp_deadline()?;
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("CANCELLED".into());
+        }
         if super::sharing::restricted(&c.root, &id)? {
             continue;
         }
@@ -576,7 +652,7 @@ pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String
             .insert(id, b);
         c.disk.save(&c.root)?;
     }
-    if c.disk.accounts[&account].pull_cloud {
+    if selected.is_none() && c.disk.accounts[&account].pull_cloud {
         for o in remote.values() {
             let s = &c.disk.accounts[&account];
             if !o.deleted
@@ -588,7 +664,11 @@ pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String
             }
         }
     }
-    super::session_sync::run(c)?;
+    if selected.is_none() {
+        super::session_sync::run(c)?;
+    } else {
+        super::session_sync::run_selected(c, selected, cancel)?;
+    }
     let s = c.disk.accounts.get_mut(&account).unwrap();
     s.last_sync = Some(chrono::Utc::now().to_rfc3339());
     s.last_error = None;
@@ -702,6 +782,35 @@ pub fn detach(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mcp_versions_reject_changes_between_preview_and_execution() {
+        let original = Object {
+            id: "one".into(),
+            kind: "config".into(),
+            revision: 3,
+            epoch: 1,
+            deleted: false,
+            payload: String::new(),
+            writer: "writer".into(),
+            generation: 0,
+            updated_at: String::new(),
+        };
+        let mut guard = VersionGuard {
+            ids: vec!["one".into()],
+            objects: vec![original.clone()],
+        };
+        assert!(guard.check("one", "config", Some(&original)).is_ok());
+        let mut newer = original.clone();
+        newer.revision += 1;
+        assert!(guard.check("one", "config", Some(&newer)).is_err());
+        assert!(guard.check("one", "config", None).is_err());
+        let mut session = original.clone();
+        session.kind = "session".into();
+        assert!(guard.manifest(&[original.clone(), session]).is_err());
+        guard.record(&newer);
+        assert!(guard.check("one", "config", Some(&newer)).is_ok());
+        assert!(guard.check("unselected", "config", Some(&original)).is_ok());
+    }
     use serde_json::json;
     #[test]
     fn authentic_old_ciphertext_cannot_regress_a_confirmed_object() {

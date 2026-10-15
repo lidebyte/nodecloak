@@ -42,6 +42,9 @@ var securitySchema string
 //go:embed sharing.sql
 var sharingSchema string
 
+//go:embed mcp.sql
+var mcpSchema string
+
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	tx, e := db.Begin(ctx)
 	if e != nil {
@@ -140,6 +143,18 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			return e
 		}
 	}
+	var v8 bool
+	if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=8)").Scan(&v8); e != nil {
+		return e
+	}
+	if !v8 {
+		if _, e = tx.Exec(ctx, mcpSchema); e != nil {
+			return e
+		}
+		if _, e = tx.Exec(ctx, "INSERT INTO schema_versions(version) VALUES(8)"); e != nil {
+			return e
+		}
+	}
 	return tx.Commit(ctx)
 }
 
@@ -199,6 +214,7 @@ func New(db *pgxpool.Pool, c Config, m Mailer) *Server {
 	s.mux.HandleFunc("POST /v1/objects/{id}/lease", s.auth(true, s.lease))
 	s.registerAdmin()
 	s.registerSharing()
+	s.registerMCP()
 	return s
 }
 func (s *Server) Handler() http.Handler {
@@ -212,7 +228,8 @@ func (s *Server) Handler() http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		adminRequest := strings.HasPrefix(r.URL.Path, "/v1/admin/") || ((r.Method == "GET" || r.Method == "HEAD") && strings.HasPrefix(r.URL.Path, "/admin/"))
-		if r.Header.Get("Origin") != "" && !publicRead && (!adminRequest || !s.adminOrigin(r)) {
+		mcpBrowser := s.mcpBrowserOrigin(r)
+		if r.Header.Get("Origin") != "" && !publicRead && !mcpBrowser && (!adminRequest || !s.adminOrigin(r)) {
 			failure(w, 403, "browser_origin_denied")
 			return
 		}
@@ -670,6 +687,12 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, i identity) {
 		return
 	}
 	_, e = tx.Exec(r.Context(), "UPDATE sessions SET revoked=true WHERE account_id=$1 AND device_id=$2", i.Account, i.Device)
+	if e == nil {
+		_, e = tx.Exec(r.Context(), "UPDATE mcp_routes SET revoked=true WHERE account_id=$1 AND device_id=$2", i.Account, i.Device)
+	}
+	if e == nil {
+		_, e = tx.Exec(r.Context(), "UPDATE mcp_jobs j SET cancel_requested=true,state=CASE WHEN j.state='queued' THEN 'cancelled' ELSE j.state END,arguments_sealed='',result_sealed='' FROM mcp_routes r WHERE r.id=j.route_id AND r.account_id=$1 AND r.device_id=$2", i.Account, i.Device)
+	}
 	if e == nil {
 		e = tx.Commit(r.Context())
 	}
@@ -1170,6 +1193,10 @@ func (c Config) Validate() error {
 // Clean expired ephemeral authentication rows; retained refresh hashes detect replay for 30 days.
 func (s *Server) Cleanup(ctx context.Context) error {
 	_, e := s.db.Exec(ctx, `DELETE FROM admin_sessions WHERE expires_at<now();DELETE FROM admin_email_codes WHERE expires_at<now();DELETE FROM login_challenges WHERE expires_at<now();DELETE FROM totp_setups WHERE expires_at<now();DELETE FROM recovery_challenges WHERE expires_at<now();DELETE FROM email_codes WHERE expires_at<now();DELETE FROM oauth_flows WHERE expires_at<now();DELETE FROM auth_limits WHERE started_at<now()-interval '1 day';DELETE FROM sessions WHERE refresh_expires<now()-interval '1 day';DELETE FROM audit WHERE created_at<now()-interval '90 days';UPDATE profile_shares SET status='expired',payload='' WHERE status IN ('pending','accepted') AND expires_at<=now();DELETE FROM profile_share_envelopes e USING profile_shares s WHERE e.share_id=s.id AND s.status NOT IN ('pending','accepted')`)
+	if e != nil {
+		return e
+	}
+	_, e = s.db.Exec(ctx, `UPDATE mcp_jobs SET state='failed',error=CASE WHEN state='queued' THEN 'REQUEST_EXPIRED' ELSE 'EXECUTION_INDETERMINATE' END,arguments_sealed='',result_sealed='' WHERE expires_at<=now() AND state IN('queued','dispatched','running','awaiting_approval');UPDATE mcp_jobs j SET arguments_sealed='',result_sealed='' FROM mcp_routes r WHERE j.route_id=r.id AND (j.expires_at<=now() OR r.revoked OR r.expires_at<=now());UPDATE mcp_authorizations SET code_sealed=NULL WHERE expires_at<=now();DELETE FROM mcp_jobs WHERE expires_at<now()-interval '1 day';DELETE FROM mcp_authorizations WHERE expires_at<now()-interval '1 day';DELETE FROM mcp_sessions WHERE expires_at<now()-interval '1 day';DELETE FROM mcp_tokens WHERE refresh_expires<now()-interval '1 day'`)
 	return e
 }
 

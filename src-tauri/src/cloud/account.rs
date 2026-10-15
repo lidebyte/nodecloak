@@ -21,6 +21,8 @@ pub struct Session {
     pub expires_at: i64,
 }
 pub struct Connection {
+    pub(crate) mcp_versions: Option<super::sync::VersionGuard>,
+    pub(crate) mcp_deadline: Option<i64>,
     pub client: Client,
     pub ns: String,
     pub device: vault::Device,
@@ -32,6 +34,8 @@ impl Connection {
     #[cfg(test)]
     pub fn test_connection(root: &Path, client: Client, ns: &str) -> Result<Self, String> {
         Ok(Self {
+            mcp_versions: None,
+            mcp_deadline: None,
             client,
             ns: ns.into(),
             device: vault::Device::load(ns)?,
@@ -56,6 +60,8 @@ impl Connection {
             .map(|s| serde_json::from_str::<Session>(&s).map_err(|_| "登录凭据损坏，请重新登录"))
             .transpose()?;
         Ok(Self {
+            mcp_versions: None,
+            mcp_deadline: None,
             client,
             ns,
             device,
@@ -90,6 +96,7 @@ impl Connection {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, String> {
+        self.check_mcp_deadline()?;
         let expected_account = self.account_id()?;
         let token = {
             let _lock = SESSION_REFRESH.lock().map_err(|_| "登录凭据锁不可用")?;
@@ -103,7 +110,9 @@ impl Connection {
             }
             Zeroizing::new(self.session.as_ref().unwrap().access_token.clone())
         };
+        self.check_mcp_deadline()?;
         let result = self.client.call(method.clone(), path, Some(&token), body);
+        self.check_mcp_deadline()?;
         match result {
             Err(e) if e.contains("unauthorized") => {
                 let retry = {
@@ -118,9 +127,22 @@ impl Connection {
                     }
                     Zeroizing::new(self.session.as_ref().unwrap().access_token.clone())
                 };
-                self.client.call(method, path, Some(&retry), body)
+                self.check_mcp_deadline()?;
+                let result = self.client.call(method, path, Some(&retry), body);
+                self.check_mcp_deadline()?;
+                result
             }
             other => other,
+        }
+    }
+    pub(crate) fn check_mcp_deadline(&self) -> Result<(), String> {
+        if self
+            .mcp_deadline
+            .is_some_and(|deadline| chrono::Utc::now().timestamp() >= deadline)
+        {
+            Err("REMOTE_REQUEST_EXPIRED".into())
+        } else {
+            Ok(())
         }
     }
     fn reload_session(&mut self) -> Result<(), String> {
@@ -442,6 +464,33 @@ fn confirmed_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expired_mcp_sync_stops_before_authentication_or_network() {
+        let mut c = Connection {
+            mcp_versions: None,
+            mcp_deadline: Some(chrono::Utc::now().timestamp() - 1),
+            client: Client::new("http://127.0.0.1:1", true).unwrap(),
+            ns: String::new(),
+            device: vault::Device {
+                id: String::new(),
+                name: String::new(),
+                public_key: String::new(),
+                private_key: String::new(),
+                secret: String::new(),
+            },
+            disk: Disk::default(),
+            root: PathBuf::new(),
+            session: None,
+        };
+        assert_eq!(
+            c.request(Method::POST, "/v1/objects", None).unwrap_err(),
+            "REMOTE_REQUEST_EXPIRED"
+        );
+        c.mcp_deadline = Some(chrono::Utc::now().timestamp() + 60);
+        assert!(c.check_mcp_deadline().is_ok());
+        c.mcp_deadline = None;
+        assert!(c.check_mcp_deadline().is_ok());
+    }
     #[test]
     fn recovery_proposal_must_match_confirmed_root_not_just_epoch() {
         let winner = crypto::random_key().unwrap();

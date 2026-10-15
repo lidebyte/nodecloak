@@ -48,6 +48,7 @@ jobs:
       - run: npm test
       - run: npm run test:session-codec
       - run: node --test scripts/fingerprint.checks.mjs
+      - run: node --test scripts/mcp-page.checks.mjs
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Import Developer ID and validate notarization credentials

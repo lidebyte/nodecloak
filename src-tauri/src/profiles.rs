@@ -736,6 +736,9 @@ pub(crate) fn mark_shared(root: &Path, id: &str, grant: &str) -> Result<(), Stri
     save(root, &all)
 }
 pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
+    apply_preferences_for_control(root,p,false)
+}
+pub(crate) fn apply_preferences_for_control(root: &Path, p: &Profile, force_control:bool) -> Result<(), String> {
     let dir = path(root, p)?;
     platform::ensure_profile_closed(&dir)?;
     std::fs::create_dir_all(&dir).map_err(|_| "无法创建副本目录")?;
@@ -910,10 +913,11 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
             ] {
                 fields.push((key, serde_json::json!(value)));
             }
-            if crate::regional::needs_control_for(&p.browser, &p.preferences) {
+            if force_control || crate::regional::needs_control_for(&p.browser, &p.preferences) {
                 fields.push(("remote.prefs.recommended", serde_json::json!(false)));
             }
         }
+        if force_control {fields.push(("remote.prefs.recommended", serde_json::json!(false)));fields.push(("dom.file.createInChild",serde_json::json!(true)));}
         if p.proxy.custom() && !p.preferences_dirty {
             fields.push(("media.peerconnection.enabled", serde_json::json!(false)));
         }
@@ -936,7 +940,7 @@ pub fn apply_preferences(root: &Path, p: &Profile) -> Result<(), String> {
         if !data.is_object() {
             return Err("副本设置格式无效".into());
         }
-        if crate::regional::needs_control_for(&p.browser, &p.preferences) {
+        if force_control || crate::regional::needs_control_for(&p.browser, &p.preferences) {
             if data.get("session").is_none() {
                 data["session"] = serde_json::json!({});
             }

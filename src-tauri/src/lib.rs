@@ -14,6 +14,7 @@ mod profiles;
 mod proxy;
 mod regional;
 mod terminal;
+pub mod mcp;
 #[cfg(windows)]
 mod windows_icons;
 
@@ -485,13 +486,17 @@ pub fn run() {
             }
         }))
         .manage(OperationLock::default())
+        .manage(mcp::Runtime::default())
         .manage(profiles::Runtime::default())
         .manage(cloud::commands::Runtime::default())
         .manage(cloud::sharing::Runtime::default())
         .setup(|app| {
             let root = data_root::resolve(app.path().app_data_dir()?);
+            #[cfg(debug_assertions)]
+            let root = if let Ok(path)=std::env::var("NODECLOAK_TEST_DATA_ROOT"){let path=std::path::PathBuf::from(path).canonicalize()?;profiles::guard_tree(&path)?;path}else{root};
             profiles::load(&root)?;
             app.manage(data_root::DataRoot(root.clone()));
+            mcp::start(app.handle().clone());
             cloud::scheduler::start(app.handle().clone());
             cloud::sharing::start(app.handle().clone());
             let handle = app.handle().clone();
@@ -547,6 +552,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            mcp::mcp_status,
+            mcp::mcp_action,
             profile_commands::generate_fingerprint_seed,
             cloud::sharing::sharing_action,
             browser_sites::get_browser_site_catalog,

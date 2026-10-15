@@ -5,6 +5,8 @@ import { checkCount, defaultTimezoneTarget, definitions, labels, recommendedChec
 import { parseBrowserReport, withBrowserReport, type BrowserReport } from './browser-report';
 import AppUpdates from './AppUpdates';
 import ThemeControl from './ThemeControl';
+import McpWorkspace from './McpWorkspace';
+import {PlugZap} from 'lucide-react';
 import {useCloudAccount,AccountButton,AccountDialog,CloudSettings} from './AccountWorkspace';
 import WindowControls from './WindowControls';
 import TerminalWorkspace from './TerminalWorkspace';
@@ -29,15 +31,16 @@ import { getFontCatalog, removeUserFonts, type FontCatalog, type FontOutcome } f
 import { summarizeOutcomes } from './repair-result';
 import { getTimezoneCatalog, checkRepairReadiness, openTimezoneSettings, openFirefoxDownload, native, type BrowserDestination, scanEnvironment, getHistory, repairEnvironment, undoRepair, launchBrowser } from './bridge';
 
-type Page = 'profiles' | 'sharing' | 'computer' | 'overview' | 'code' | 'history' | 'settings' | 'account' | 'devices';
+type Page = 'profiles' | 'sharing' | 'computer' | 'overview' | 'code' | 'history' | 'settings' | 'account' | 'devices' | 'automation';
 type RepairRequest = { browser: BrowserId; ids: CheckId[]; consentTimezone: boolean; consentFonts: boolean; timezoneTarget: TimezoneTarget; customTimezone: string };
 type Modal = {kind:'fonts';catalog:FontCatalog;initialIds:string[]} | {kind:'font-result';outcomes:FontOutcome[]} | { kind: 'repair'; ids: CheckId[] } | { kind: 'detail'; id: CheckId } | { kind: 'undo'; record: RepairRecord } | { kind: 'help' } | { kind: 'result'; outcomes: Outcome[]; request: RepairRequest } | { kind: 'blocked'; request: RepairRequest; reason: string } | { kind: 'report' };
 const icons: Record<CheckId, ElementType> = { connection: Wifi, route: Globe2, webrtc: ShieldCheck, dns: LockKeyhole, language: Languages, timezone: Clock3, offset: Clock3, clock: Clock3, locale: Languages, cli: Terminal, fonts: Type, emoji: Fingerprint, webgl: Monitor, screen: Monitor, networkInfo: Wifi, plugins: Settings2, tracking: ShieldCheck };
 const nav: { id: Page; title: string; icon: ElementType }[] = [
-  {id:'profiles',title:'浏览器副本',icon:Globe2},{id:'sharing',title:'共享',icon:Share2},{id:'computer',title:'电脑环境',icon:Monitor},
+  {id:'profiles',title:'浏览器副本',icon:Globe2},{id:'sharing',title:'共享',icon:Share2},{id:'automation',title:'MCP',icon:PlugZap},{id:'computer',title:'电脑环境',icon:Monitor},
   { id: 'overview', title: '环境概览', icon: LayoutDashboard }, { id: 'code', title: '终端', icon: Terminal }, { id: 'history', title: '修复记录', icon: History },
 ];
 const pageTitles: Record<Page, string> = {
+  automation:'MCP 与自动化',
   profiles: '浏览器副本', sharing:'共享', computer: '电脑环境', overview: '环境概览', code: '终端', history: '修复记录', settings: '偏好设置', account:'个人资料',devices:'设备',
 };
 const browserNames = { chrome: 'Google Chrome', edge: 'Microsoft Edge', firefox: 'Firefox' };
@@ -59,6 +62,8 @@ export default function App() {
   const sharing=useProfileSharing(cloud.status.account?.id);
   const [shareProfile,setShareProfile]=useState<BrowserProfile|null>(null);
   const [page, setPage] = useState<Page>('profiles');
+  const [mcpPending,setMcpPending]=useState(false);
+  useEffect(()=>{if(!native)return;let disposed=false;let off:(()=>void)|undefined;void listen<{pending:number}>('mcp-approval',event=>setMcpPending(event.payload.pending>0)).then(fn=>{if(disposed)fn();else off=fn;});return()=>{disposed=true;off?.();};},[]);
   useEffect(()=>{if((page==='account'||page==='devices')&&!cloud.status.account)setPage('profiles');},[page,cloud.status.account?.id]);
   const [activeProfile,setActiveProfileState]=useState<BrowserProfile|null>(null);
   const [profileOptions,setProfileOptions]=useState<BrowserProfile[]>([]);
@@ -207,10 +212,10 @@ export default function App() {
       <div className="sidebar-bottom"><div className="sidebar-footer"><AccountButton cloud={cloud} preferencesDisabled={!!busy} onPreferences={()=>{cloud.setPanel(null);setPage('settings');}} onAccountPage={next=>{cloud.setError('');cloud.setPanel(null);setPage(next);}}/><span>v{t(version)}</span></div></div>
     </aside>
     <main>
-      <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}{siteCatalog.supportURL&&<button className="telegram-group" title={siteCatalog.supportURL.startsWith('https://t.me/')?t("加入 Telegram 群"):t("帮助与说明")} disabled={!!busy} onClick={() => void perform('正在打开帮助', openCatalogSupport)}>{siteCatalog.supportURL.startsWith('https://t.me/')?<Send size={14}/>:<CircleHelp size={14}/>}<span>{siteCatalog.supportURL.startsWith('https://t.me/')?'Telegram Group':t('帮助与说明')}</span><ArrowUpRight size={13} /></button>}<span className="announcement-toolbar-slot" ref={setAnnouncementToolbar}/><button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
+      <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}{siteCatalog.supportURL&&<button className="telegram-group" title={siteCatalog.supportURL.startsWith('https://t.me/')?t("加入 Telegram 群"):t("帮助与说明")} disabled={!!busy} onClick={() => void perform('正在打开帮助', openCatalogSupport)}>{siteCatalog.supportURL.startsWith('https://t.me/')?<Send size={14}/>:<CircleHelp size={14}/>}<span>{siteCatalog.supportURL.startsWith('https://t.me/')?'Telegram Group':t('帮助与说明')}</span><ArrowUpRight size={13} /></button>}<span className="announcement-toolbar-slot" ref={setAnnouncementToolbar}/>{mcpPending&&<button className="icon-button mcp-pending" title={t("MCP 有待确认操作")} aria-label={t("MCP 有待确认操作")} onClick={()=>setPage('automation')}><PlugZap size={18}/></button>}<button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
       <div className="main-content">
         <AnnouncementCenter announcements={siteCatalog.announcements??[]} toolbarTarget={announcementToolbar}/>
-        {page!=='profiles'&&<div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{!['settings','account','devices','sharing'].includes(page)&&<button className="button secondary" style={{visibility:page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>}
+        {page!=='profiles'&&<div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{!['settings','account','devices','sharing','automation'].includes(page)&&<button className="button secondary" style={{visibility:page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>}
 
         <AppUpdates expanded={page === 'settings'} busy={!!busy} onBusyChange={value=>setBusy(value?'正在更新应用':null)} />
         {(page==='account'||page==='devices')&&cloud.status.account&&<AccountDialog inline cloud={{...cloud,panel:page}}/>}
@@ -249,6 +254,7 @@ export default function App() {
         </>}
 
         <ThemeControl visible={page==='settings'} />
+        {page==='automation'&&<McpWorkspace/>}
         {page === 'settings' && <>
           <CloudSettings cloud={cloud}/>
           <section className="settings-card about-card"><div className="brand"><Mark small /><span>NodeCloak<small>{t("版本")}{t(version)} · Tauri 2</small></span></div><p>{t("管理独立浏览器副本，为每个副本配置代理、语言和隐私设置，并检查网络连接与浏览器环境。")}</p></section>

@@ -29,6 +29,10 @@ pub fn api_error(status: u16, body: &str) -> String {
         .and_then(|v| v["error"].as_str().map(str::to_string))
         .unwrap_or_default();
     let known = [
+        "authorization_not_found",
+        "invalid_scope",
+        "job_not_active",
+        "invalid_request",
         "device_approval_required",
         "unauthorized",
         "invalid_code",

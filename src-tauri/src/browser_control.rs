@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
+mod automation;
 
 #[derive(Default)]
 pub struct Runtime(Mutex<HashMap<String, Control>>);
@@ -80,6 +81,7 @@ impl Runtime {
     }
 }
 enum Request {
+    Automation(String,Value,crate::mcp::policy::Grant,Arc<AtomicBool>,mpsc::Sender<Result<Value,String>>),
     Open(String, bool, mpsc::Sender<Result<(), OpenError>>),
     Quit(mpsc::Sender<Result<(), String>>),
     #[cfg(test)]
@@ -171,8 +173,9 @@ impl Protocol {
             .send(Message::Text(message.to_string().into()))
             .map_err(|_| "无法写入浏览器区域设置")?;
         let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(15) {
+        while started.elapsed() < Duration::from_secs(if method=="Page.enable"{5}else{15}) {
             if let Some(value) = self.read()? {
+                if value["method"]=="Target.detachedFromTarget"&&session.is_some_and(|s|value["params"]["sessionId"]==s){self.events.push_back(value);self.last_error=Some("TARGET_GONE".into());return Err("TARGET_GONE".into());}
                 if value["id"] == id {
                     if value.get("error").is_some() {
                         self.last_error = value["error"]["message"]
@@ -261,6 +264,10 @@ struct BrowserControl {
     fingerprint_sessions: HashSet<String>,
     fingerprint_workers: HashMap<String, String>,
     internal_workers: HashSet<String>,
+    automation_fatal:Option<String>,
+    automation_dialogs:HashMap<String,Value>,
+    automation_warnings:Vec<String>,
+    automation_cleanup:Vec<automation::Cleanup>,
 }
 impl BrowserControl {
     fn initialize(
@@ -304,13 +311,18 @@ impl BrowserControl {
             fingerprint_sessions: HashSet::new(),
             fingerprint_workers: HashMap::new(),
             internal_workers: HashSet::new(),
+            automation_fatal:None,
+            automation_dialogs:HashMap::new(),
+            automation_warnings:Vec::new(),
+            automation_cleanup:Vec::new(),
         };
         if this.firefox {
             this.protocol.call(
                 "session.new",
-                json!({"capabilities":{"alwaysMatch":{"acceptInsecureCerts":false}}}),
+                json!({"capabilities":{"alwaysMatch":{"acceptInsecureCerts":false,"unhandledPromptBehavior":"ignore"}}}),
                 None,
             )?;
+            this.protocol.call("session.subscribe",json!({"events":["browsingContext.userPromptOpened"]}),None)?;
             if let Some(settings) = this.fingerprint.as_ref().filter(|f| f.enabled) {
                 this.protocol.call("script.addPreloadScript",json!({"functionDeclaration":crate::fingerprint::preload(settings)?,"userContexts":["default"]}),None)?;
             }
@@ -483,6 +495,8 @@ impl BrowserControl {
     }
     fn drain(&mut self) -> Result<(), String> {
         while let Some(event) = self.protocol.events.pop_front() {
+            if event["method"]=="Page.javascriptDialogClosed"||event["method"]=="browsingContext.userPromptClosed"{self.forget_dialog(&event);continue;}
+            if event["method"]=="Page.javascriptDialogOpening"||event["method"]=="browsingContext.userPromptOpened"{self.remember_dialog(&event);continue;}
             if event["method"] == "Debugger.paused" {
                 if let Some(session) = event["sessionId"].as_str() {
                     if event["params"]["reason"] == "instrumentation"
@@ -520,6 +534,7 @@ impl BrowserControl {
                 }
             } else if event["method"] == "Target.attachedToTarget" {
                 let params = &event["params"];
+
                 let session = params["sessionId"]
                     .as_str()
                     .ok_or("浏览器附加页面无效")?
@@ -546,7 +561,15 @@ impl BrowserControl {
                     if self.primary.is_empty() && params["targetInfo"]["type"] == "page" {
                         self.primary = session.clone();
                     }
-                    self.apply(Some(&session))?;
+                    if let Err(error)=self.apply(Some(&session)){
+                        let gone=self.protocol.last_error.as_deref()==Some("TARGET_GONE");
+                        let closed=if gone{true}else if let Some(target)=params["targetInfo"]["targetId"].as_str(){self.protocol.call("Target.closeTarget",json!({"targetId":target}),None).is_ok_and(|v|v["success"]==true)}else{false};
+                        if !closed{return Err(error);}
+                        self.sessions.remove(&session);self.pages.remove(&session);self.workers.remove(&session);self.fingerprint_sessions.remove(&session);self.fingerprint_workers.remove(&session);self.internal_workers.remove(&session);self.targets.retain(|_,s|s!=&session);self.automation_dialogs.remove(&session);
+                        if self.primary==session{self.primary=self.pages.iter().next().cloned().unwrap_or_default();}
+                        if self.automation_warnings.len()<16{self.automation_warnings.push("A new browser target could not be initialized and was closed; existing protected tabs remain available.".into());}
+                        continue;
+                    }
                     self.protocol.call("Target.setAutoAttach",json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"type":"worker","exclude":false},{"type":"shared_worker","exclude":false},{"type":"service_worker","exclude":false},{"exclude":true}]}),Some(&session))?;
                     self.protocol.call(
                         "Runtime.runIfWaitingForDebugger",
@@ -750,6 +773,12 @@ pub(crate) fn start_with_lookup(
             while !stop.load(Ordering::SeqCst) {
                 if let Ok(request) = requests.try_recv() {
                     match request {
+                        Request::Automation(tool,args,grant,cancel,response)=>{
+                            let mut result=state.automate(&tool,args,&grant,&cancel);
+                            if let Ok(value)=&mut result{if !state.automation_warnings.is_empty(){value["warnings"]=json!(std::mem::take(&mut state.automation_warnings));}}
+                            let _=response.send(result);
+                            if let Some(error)=state.automation_fatal.take(){return Err(error);}
+                        }
                         Request::Quit(response) => {
                             let result = state
                                 .protocol
@@ -776,6 +805,7 @@ pub(crate) fn start_with_lookup(
                     }
                 }
                 state.drain()?;
+                state.cleanup_closed_dialogs();
                 if let Some(event) = state.protocol.read()? {
                     state.protocol.events.push_back(event)
                 }
@@ -922,6 +952,10 @@ mod tests {
                 fingerprint_sessions: HashSet::new(),
                 fingerprint_workers: HashMap::new(),
                 internal_workers: HashSet::new(),
+            automation_fatal:None,
+            automation_dialogs:HashMap::new(),
+            automation_warnings:Vec::new(),
+            automation_cleanup:Vec::new(),
             },
             server,
         )
@@ -1001,6 +1035,10 @@ mod tests {
             fingerprint_sessions: HashSet::new(),
             fingerprint_workers: HashMap::new(),
             internal_workers: HashSet::new(),
+            automation_fatal:None,
+            automation_dialogs:HashMap::new(),
+            automation_warnings:Vec::new(),
+            automation_cleanup:Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         assert!(state
@@ -1339,6 +1377,41 @@ mod tests {
         control: Control,
         _root: tempfile::TempDir,
     }
+    #[test]
+    #[ignore="Starts isolated installed Chrome/Edge/Firefox for MCP page operations"]
+    fn native_mcp_page_operations_all_browsers(){
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+        let done=Arc::new(AtomicBool::new(false));let stop=done.clone();listener.set_nonblocking(true).unwrap();
+        let server=std::thread::spawn(move||{while !stop.load(Ordering::SeqCst){if let Ok((mut stream,_))=listener.accept(){let _=stream.set_read_timeout(Some(Duration::from_secs(2)));let mut request=[0u8;4096];let n=stream.read(&mut request).unwrap_or(0);let req=String::from_utf8_lossy(&request[..n]);let body=if req.starts_with("GET /frame"){r#"<html><body>Frame ready<button onclick="this.textContent='Frame clicked'">Frame button</button></body></html>"#.to_string()}else{format!(r#"<html><head><title>MCP Fixture</title></head><body><p id="result">Ready</p><input aria-label="Name" oninput="document.getElementById('nameValue').textContent='Name:'+this.value"><span id="nameValue"></span><select aria-label="Color" onchange="document.getElementById('colorValue').textContent='Color:'+this.value"><option value="a">A</option><option value="b">B</option></select><span id="colorValue"></span><input type="file" aria-label="Upload" onchange="document.getElementById('uploadValue').textContent=this.files[0]?.name"><span id="uploadValue"></span><button onclick="document.getElementById('result').textContent='Clicked'">Save</button><button onclick="alert('Hello')">Dialog</button><a href="/file" download="fixture.txt">Download</a><iframe src="/frame?local"></iframe><iframe src="http://localhost:{}/frame"></iframe></body></html>"#,address.port())};let data=if req.starts_with("GET /file"){"HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=fixture.txt\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfixture!".to_string()}else{format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body)};let _=stream.write_all(data.as_bytes());}else{std::thread::sleep(Duration::from_millis(15));}}});
+        for engine in ["chrome","edge","firefox"].into_iter().filter(|e|std::env::var("CLAUDE_DONE_TEST_BROWSER").map(|s|s==*e).unwrap_or(true)){
+            let mut prefs=Preferences::default();prefs.startup_url="about:blank".into();prefs.fingerprint=Some(crate::fingerprint::fresh().unwrap());
+            let browser=browser(engine,prefs,"");let files=tempfile::tempdir().unwrap();let file=files.path().join("input.txt");std::fs::write(&file,"fixture upload").unwrap();
+            let grant=crate::mcp::policy::Grant{id:uuid::Uuid::new_v4().to_string(),name:"Fixture".into(),profile_ids:vec!["test".into()],permissions:vec!["read".into(),"manage".into(),"page_read".into(),"page_write".into(),"files".into()],origins:vec![],expires_at:chrono::Utc::now().timestamp()+600,confirm_interactions:false,file_roots:vec![files.path().to_string_lossy().into()],revoked:false,token_hash:String::new()};
+            let call=|tool:&str,mut args:Value|{args["profile_id"]=json!("test");let(tx,rx)=mpsc::channel();browser.control.sender.send(Request::Automation(tool.into(),args,grant.clone(),Arc::new(AtomicBool::new(false)),tx)).unwrap();rx.recv_timeout(Duration::from_secs(45)).unwrap_or_else(|e|panic!("{engine}: {tool}: {e}; {:?}",browser.control.error.lock().unwrap()))};
+            let open=call("tabs_open",json!({"url":format!("http://{address}/")})).unwrap_or_else(|e|panic!("{engine}: open: {e}"));let tab=open["tab_id"].as_str().unwrap();let base=json!({"tab_id":tab});
+            call("page_wait",json!({"tab_id":tab,"text":"Ready","timeout_ms":15000})).unwrap_or_else(|e|panic!("{engine}: wait: {e}"));
+            let snapshot=call("page_snapshot",base.clone()).unwrap();assert_eq!(snapshot["title"],"MCP Fixture","{engine}");
+            let element=|label:&str|{let ref_id=snapshot["elements"].as_array().unwrap().iter().find(|e|e["name"]==label).unwrap()["ref"].clone();json!({"tab_id":tab,"snapshot_id":snapshot["snapshot_id"],"element_ref":ref_id})};
+            let mut fill=element("Name");fill["value"]=json!("NodeCloak");call("page_fill",fill).unwrap_or_else(|e|panic!("{engine}: fill: {e}"));
+            call("page_wait",json!({"tab_id":tab,"text":"Name:NodeCloak"})).unwrap();
+            let mut select=element("Color");select["values"]=json!(["b"]);call("page_select",select).unwrap();call("page_wait",json!({"tab_id":tab,"text":"Color:b"})).unwrap();
+            let preview=call("__preview",element("Save")).unwrap();assert_eq!(preview["name"],"Save");
+            let mut changed=element("Save");changed["_expected_target"]=json!({"url":"https://changed.test/","epoch":0});assert!(call("page_click",changed).unwrap_err().contains("PAGE_CHANGED"));
+            let mut renamed=element("Save");let mut wrong=preview.clone();wrong["name"]=json!("Other action");renamed["_expected_target"]=wrong;assert!(call("page_click",renamed).unwrap_err().contains("TARGET_CHANGED"));
+            let mut approved=element("Save");approved["_expected_target"]=preview;call("page_click",approved).unwrap();
+            let mut upload=element("Upload");upload["paths"]=json!([file]);call("page_upload",upload).unwrap_or_else(|e|panic!("{engine}: upload: {e}"));
+            call("page_wait",json!({"tab_id":tab,"text":"input.txt"})).unwrap();
+            call("page_click",element("Dialog")).unwrap_or_else(|e|panic!("{engine}: dialog click: {e}"));call("page_dialog",json!({"tab_id":tab,"accept":true})).unwrap_or_else(|e|panic!("{engine}: dialog handle: {e}"));
+            call("page_click",element("Download")).unwrap();let limit=Instant::now()+Duration::from_secs(10);loop{let files=call("downloads_list",json!({})).unwrap();if files["files"].as_array().unwrap().iter().any(|f|f["name"]=="fixture.txt"){break;}assert!(Instant::now()<limit,"{engine}: download missing: {files}");std::thread::sleep(Duration::from_millis(200));}
+            call("page_click",element("Save")).unwrap();let screen=call("page_screenshot",base.clone()).unwrap();assert!(screen["image_base64"].as_str().unwrap().len()>100,"{engine}");
+            call("page_wait",base.clone()).unwrap();let frames=call("frames_list",base.clone()).unwrap();println!("{engine}: frames: {frames}");let children:Vec<_>=frames["items"].as_array().unwrap().iter().filter(|f|f["top_level"]==false).collect();assert!(children.len()>=2,"{engine}: missing frames: {frames}");for child_frame in children{let frame=child_frame["frame_id"].clone();let child=call("page_snapshot",json!({"tab_id":tab,"frame_id":frame})).unwrap_or_else(|e|panic!("{engine}: frame: {e}"));assert!(child["text"].as_str().unwrap().contains("Frame ready"));let button=child["elements"][0]["ref"].clone();call("page_click",json!({"tab_id":tab,"frame_id":frame,"snapshot_id":child["snapshot_id"],"element_ref":button})).unwrap_or_else(|e|panic!("{engine}: frame click: {e}"));call("page_wait",json!({"tab_id":tab,"frame_id":frame,"text":"Frame clicked"})).unwrap_or_else(|e|panic!("{engine}: frame click result: {e}"));call("page_navigate",json!({"tab_id":tab,"frame_id":frame,"url":format!("{}?changed",child_frame["url"].as_str().unwrap())})).unwrap();call("page_wait",json!({"tab_id":tab,"frame_id":frame,"text":"Frame ready"})).unwrap();}
+            let root_after=call("page_snapshot",base.clone()).unwrap();assert_eq!(root_after["url"],format!("http://{address}/"),"{engine}: child navigation changed root");
+            let next=call("page_snapshot",base.clone()).unwrap();assert!(call("page_click",element("Save")).is_err(),"{engine}: stale ref accepted");assert_ne!(snapshot["snapshot_id"],next["snapshot_id"]);
+            call("page_navigate",json!({"tab_id":tab,"url":format!("http://{address}/?again")})).unwrap();call("page_wait",json!({"tab_id":tab,"text":"Ready"})).unwrap();assert!(call("page_fill",element("Name")).is_err());
+            call("tabs_close",base).unwrap();assert!(browser.control.alive.load(Ordering::SeqCst));println!("{engine}: MCP page/inputs/upload/screenshot/cross-origin frame/stale-ref passed");
+        }
+        done.store(true,Ordering::SeqCst);server.join().unwrap();
+    }
     impl TempBrowser {
         fn show(&self) {
             platform::focus_profile(&self.path).unwrap();
@@ -1381,6 +1454,7 @@ mod tests {
             preferences: prefs.clone(),
         };
         let p = profiles::create(&canonical, draft, None).unwrap();
+        profiles::apply_preferences_for_control(&canonical,&p,true).unwrap();
         let path = profiles::path(&canonical, &p).unwrap();
         let ip=regional::uses_ip(&prefs).then(||regional::parse_ip_region(&json!({"success":true,"ip":"203.0.113.12","country_code":"JP","city":"Tokyo","latitude":35.68,"longitude":139.69,"timezone":{"id":"Asia/Tokyo"}})).unwrap());
         if browser == "firefox" {

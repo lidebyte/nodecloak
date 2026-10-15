@@ -168,7 +168,7 @@ fn stamp_path(
     }
     Ok(())
 }
-fn stamp(browser: &str, path: &Path) -> Result<String, String> {
+pub(crate) fn stamp(browser: &str, path: &Path) -> Result<String, String> {
     let mut h = Sha256::new();
     let files: &[&str] = if browser == "firefox" {
         &["cookies.sqlite", "cookies.sqlite-wal", "storage/default"]
@@ -369,6 +369,13 @@ fn reconcile(
     Ok(SessionPreparation::Complete)
 }
 pub fn run(c: &mut Connection) -> Result<(), String> {
+    run_selected(c, None, &std::sync::atomic::AtomicBool::new(false))
+}
+pub(crate) fn run_selected(
+    c: &mut Connection,
+    selected: Option<&[String]>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
     let account = c.account_id()?;
     if !c.disk.accounts[&account].session_sync {
         return Ok(());
@@ -377,6 +384,13 @@ pub fn run(c: &mut Connection) -> Result<(), String> {
     let bindings = c.disk.accounts[&account].bindings.clone();
     let all = profiles::load(&c.root)?;
     for (id, mut b) in bindings {
+        if selected.is_some_and(|ids| !ids.contains(&id)) {
+            continue;
+        }
+        c.check_mcp_deadline()?;
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("CANCELLED".into());
+        }
         if super::sharing::restricted(&c.root, &id)? {
             continue;
         }
