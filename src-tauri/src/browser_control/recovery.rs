@@ -284,10 +284,11 @@ mod tests {
     #[test]
     fn diagnostics_rotate_and_do_not_persist_close_reason_or_message_bytes() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("nodecloak-control.jsonl");
+        let path = dir.path().canonicalize().unwrap();
+        let file = path.join("nodecloak-control.jsonl");
         std::fs::write(&file, vec![b' '; 1024 * 1024 + 1]).unwrap();
         log(
-            dir.path(),
+            &path,
             "chrome",
             "disconnected",
             1,
@@ -296,6 +297,6 @@ mod tests {
         let value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(value["event"], "disconnected");
         assert!(value["detail"].as_str().unwrap().contains("10054"));
-        assert!(dir.path().join("nodecloak-control.previous.jsonl").exists());
+        assert!(path.join("nodecloak-control.previous.jsonl").exists());
     }
 }
