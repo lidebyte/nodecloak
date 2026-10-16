@@ -942,11 +942,14 @@ mod tests {
     #[test]
     fn purge_keeps_explicit_deletion_intent_until_cloud_acknowledges_it() {
         let temp = tempfile::tempdir().unwrap();
+        // macOS temporary directories may be reached through /var -> /private/var.
+        // Exercise the profile guard against the real root, as the app does.
+        let root = temp.path().canonicalize().unwrap();
         let draft = profiles::Draft { name:"Pending deletion".into(), browser:"firefox".into(),
             notes:String::new(), tags:vec![], proxy:crate::proxy::ProxyConfig::system(),
             password:None, clear_password:false, preferences:profiles::Preferences::default() };
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let p = profiles::create_synced(temp.path(), draft, &id).unwrap();
+        let p = profiles::create_synced(&root, draft, &id).unwrap();
         let mut disk = super::super::model::Disk::default();
         let account = uuid::Uuid::new_v4().to_string();
         let cloud_id = uuid::Uuid::new_v4().to_string();
@@ -955,15 +958,15 @@ mod tests {
             epoch:1, deleted:false, payload:String::new(), writer:uuid::Uuid::new_v4().to_string(),
             generation:0, updated_at:String::new() });
         disk.accounts.entry(account.clone()).or_default().bindings.insert(id.clone(), binding);
-        disk.save(temp.path()).unwrap();
+        disk.save(&root).unwrap();
         let runtime = profiles::Runtime::default();
-        profiles::remove(temp.path(), &id, false, &runtime).unwrap();
-        assert!(profiles::remove(temp.path(), &id, true, &runtime).is_err());
-        assert!(profiles::get(temp.path(), &id, true).unwrap().deleted_at.is_some());
-        assert!(profiles::path(temp.path(), &p).unwrap().exists());
+        profiles::remove(&root, &id, false, &runtime).unwrap();
+        assert!(profiles::remove(&root, &id, true, &runtime).is_err());
+        assert!(profiles::get(&root, &id, true).unwrap().deleted_at.is_some());
+        assert!(profiles::path(&root, &p).unwrap().exists());
         disk.accounts.get_mut(&account).unwrap().bindings.get_mut(&id).unwrap().baseline.as_mut().unwrap().deleted = true;
-        disk.save(temp.path()).unwrap();
-        profiles::remove(temp.path(), &id, true, &runtime).unwrap();
-        assert!(profiles::get(temp.path(), &id, true).is_err());
+        disk.save(&root).unwrap();
+        profiles::remove(&root, &id, true, &runtime).unwrap();
+        assert!(profiles::get(&root, &id, true).is_err());
     }
 }

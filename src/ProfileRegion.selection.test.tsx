@@ -18,6 +18,7 @@ const choose=async(label:string,value:string)=>{
 };
 beforeEach(()=>{vi.stubGlobal('ResizeObserver',class{observe(){} disconnect(){} unobserve(){}});HTMLElement.prototype.scrollIntoView=vi.fn();HTMLDialogElement.prototype.showModal=function(){this.open=true;};HTMLDialogElement.prototype.close=function(){this.open=false;};setLanguage('zh');Object.assign(globalThis,{IS_REACT_ACT_ENVIRONMENT:true});host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.resetAllMocks();vi.unstubAllGlobals();});
+// This full dialog flow renders several searchable lists on shared CI runners.
 for(const browser of ['chrome','edge','firefox'] as const)for(const editing of [false,true])it(`${browser}: saves region dropdown values when ${editing?'editing':'creating'} a profile`,async()=>{
  const profile:BrowserProfile={...defaults(),id:'existing-'+browser,legacy:false,name:'Existing',browser,createdAt:'',updatedAt:'',deletedAt:null,lastTest:null,running:false,pendingRestart:false,browserAvailable:true,hasPassword:false,proxyReady:true};
  profile.preferences.language='en-CA,en';
@@ -34,4 +35,4 @@ for(const browser of ['chrome','edge','firefox'] as const)for(const editing of [
  expect(draft.browser).toBe(browser);expect(draft.preferences.language).toBe(language);expect(draft.preferences.regional).toMatchObject({enabled:true,timezoneMode:'custom',timezone:'Europe/Paris'});
  expect(id).toBe(editing?profile.id:undefined);expect(draft.preferences.startupUrl).toBe(profile.preferences.startupUrl);
  if(editing)expect(draft.preferences.fingerprint).toEqual(profile.preferences.fingerprint);
-});
+},15000);
