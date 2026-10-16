@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "修复 Firefox 副本启动时因内置页面初始化失败而自动关闭的问题，保留已有标签页和网站登录数据。 / Fixes Firefox profiles closing during startup when an internal browser page is present, preserving existing tabs and website login data.",
-  "改进 Firefox 启动时的 IP 地区匹配，使语言、时区和位置设置在独立空白页完成初始化。 / Improves IP-based regional setup during Firefox startup, initializing language, time zone and location through a separate blank tab.",
-  "新建副本的默认打开页面更新为 IP.NodeCloak，可直接查看公网 IP、网络信息和 IP 测评；已有副本的网址设置继续保留。 / New profiles open IP.NodeCloak by default for public IP, network information and IP assessment; existing profile URLs are preserved."
+  "偏好设置新增“开机自动启动”，首次运行默认开启，可随时关闭；关闭后保留你的选择。 / Adds Launch at login in Preferences, enabled on first run. Turning it off preserves your choice.",
+  "电脑环境和环境概览直接显示上次检测结果及时间，点击“重新检测”获取最新结果。 / Computer environment and Environment overview show the last results and check time immediately. Use Check again for fresh results.",
+  "修复记录独立加载并保留最近读取的记录，点击“刷新记录”更新；修复或撤销后，相关记录同步更新。 / Repair history loads independently and keeps recently loaded records. Refresh history reloads records; repairs and restores update related history."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

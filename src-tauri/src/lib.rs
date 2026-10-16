@@ -1,3 +1,4 @@
+mod autostart;
 mod browser_control;
 mod browser_sites;
 mod claude_probe;
@@ -489,6 +490,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::Builder::new().app_name(autostart::entry_name()).build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -497,6 +499,7 @@ pub fn run() {
             }
         }))
         .manage(OperationLock::default())
+        .manage(autostart::StartupState::default())
         .manage(mcp::Runtime::default())
         .manage(profiles::Runtime::default())
         .manage(cloud::commands::Runtime::default())
@@ -507,6 +510,9 @@ pub fn run() {
             let root = if let Ok(path)=std::env::var("NODECLOAK_TEST_DATA_ROOT"){let path=std::path::PathBuf::from(path).canonicalize()?;profiles::guard_tree(&path)?;path}else{root};
             profiles::load(&root)?;
             app.manage(data_root::DataRoot(root.clone()));
+            if let Err(error)=autostart::initialize_app(app.handle()){
+                eprintln!("NodeCloak autostart initialization failed: {error}");
+            }
             mcp::start(app.handle().clone());
             cloud::scheduler::start(app.handle().clone());
             cloud::sharing::start(app.handle().clone());
@@ -563,6 +569,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            autostart::get_autostart_enabled,
+            autostart::set_autostart_enabled,
             mcp::mcp_status,
             mcp::mcp_action,
             profile_commands::generate_fingerprint_seed,

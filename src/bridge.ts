@@ -8,6 +8,14 @@ export const native = isTauri();
 let activeProfileId:string|null=null;
 export function setActiveProfile(id:string|null){activeProfileId=id;}
 export function getActiveProfile(){return activeProfileId;}
+export async function getAutostartEnabled():Promise<boolean>{
+  if(native)return invoke('get_autostart_enabled');
+  return localStorage.getItem('nodecloak.autostart-demo')!=='false';
+}
+export async function setAutostartEnabled(enabled:boolean):Promise<boolean>{
+  if(native)return invoke('set_autostart_enabled',{enabled});
+  localStorage.setItem('nodecloak.autostart-demo',String(enabled));return enabled;
+}
 export async function checkForUpdates(): Promise<UpdateCheck> {
   if (native) return {...await checkNativeUpdate(),portable:await invoke<boolean>('is_portable_build')};
   await new Promise(resolve => setTimeout(resolve, 700));
