@@ -60,7 +60,7 @@ jobs:
           if [ ! -x /Applications/Firefox.app/Contents/MacOS/firefox ]; then
             brew install --cask firefox
           fi
-          cargo test --manifest-path src-tauri/Cargo.toml --locked native_firefox_ip_ -- --ignored --nocapture --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml --locked native_firefox_ip_lookup_avoids_protected_startup_page -- --ignored --nocapture --test-threads=1
       - name: Import Developer ID and validate notarization credentials
         if: env.MACOS_NOTARIZE == 'true'
         run: node scripts/macos-signing.mjs prepare

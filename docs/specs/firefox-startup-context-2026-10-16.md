@@ -42,7 +42,15 @@ settings. No system-access permission, profile reset or new mode is introduced.
   are checked by the existing opt-in integration regression.
 
 Local tests exercise the shared startup path on Windows. The 3.1.2 release
-matrix additionally installs Firefox and runs both native startup regressions
+matrix additionally installs Firefox and runs the protected-startup regression
 on macOS ARM64 and Intel before packaging. The reporter's exact Firefox build
 remains unavailable; release execution and package verification are recorded
 in the release plan.
+
+The initial ARM64 release candidate also ran the older broad region/provider
+integration. Its first report unexpectedly identified `/frame` (300x150) rather
+than the expected top-level `/launch-ip`, then failed its geolocation assertion.
+That test's result correlation on macOS remains unresolved; its assertions and
+opt-in coverage are unchanged. This is not recorded as passing macOS geolocation
+acceptance. The release gate uses the exact protected-startup regression, which
+passed on that same runner and exercises the reported protocol failure directly.
