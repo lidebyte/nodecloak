@@ -50,7 +50,7 @@ fn initialization_commands_with_deferral(
             }
             let result = match command["method"].as_str().unwrap() {
                 "session.new" => json!({"sessionId":"test"}),
-                "browsingContext.getTree" => json!({"contexts":[{"context":"page"}]}),
+                "browsingContext.getTree" => json!({"contexts":[{"context":"page","url":"about:blank","userContext":"default"}]}),
                 // An about:blank popup can inherit the opener's Intl values;
                 // those values do not mean this target owns persistent overrides.
                 "Runtime.evaluate" => json!({"result":{"value":{"locale":"en-US","timeZone":"Asia/Tokyo"}}}),

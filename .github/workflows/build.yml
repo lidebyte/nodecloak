@@ -51,6 +51,16 @@ jobs:
       - run: node --test scripts/mcp-page.checks.mjs
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Verify Firefox startup on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          NODECLOAK_TEST_HEADLESS_BROWSERS: '1'
+        run: |
+          if [ ! -x /Applications/Firefox.app/Contents/MacOS/firefox ]; then
+            brew install --cask firefox
+          fi
+          cargo test --manifest-path src-tauri/Cargo.toml --locked native_firefox_ip_ -- --ignored --nocapture --test-threads=1
       - name: Import Developer ID and validate notarization credentials
         if: env.MACOS_NOTARIZE == 'true'
         run: node scripts/macos-signing.mjs prepare

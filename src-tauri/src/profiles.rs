@@ -76,7 +76,7 @@ impl Default for Preferences {
             language: "en-US,en".into(),
             privacy: true,
             font_restriction: false,
-            startup_url: "https://claude.ai".into(),
+            startup_url: "https://ip.nodecloak.com/".into(),
             advanced: AdvancedSettings::default(),
             regional: crate::regional::RegionalSettings::default(),
         }

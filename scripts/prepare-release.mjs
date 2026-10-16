@@ -20,11 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "修复 Firefox 副本在同步网站登录状态时无法启动的问题，保留本机数据并提供更清晰的同步提示。 / Fixes Firefox profiles failing to start while syncing website sessions, preserving local data and showing clearer sync status.",
-  "改进多设备同步中的删除与恢复处理，保护本机配置，减少恢复后反复出现的冲突。 / Improves profile deletion and restoration across devices, protecting local configuration and reducing repeated conflicts after recovery.",
-  "同步冲突可从副本列表、启动提示和工具栏直接处理，清楚选择保留本地、使用云端或保留两份。 / Resolve sync conflicts directly from the profile list, startup messages or toolbar, with clear choices to keep local, use cloud or keep both.",
-  "冲突提示持续显示，便于处理批量启动、重新启动和保存后启动时遇到的同步问题。 / Keeps conflict messages visible and makes sync issues easier to resolve during batch starts, restarts and save-and-start actions.",
-  "连接失败时保留本机修改，恢复连接后可继续同步。 / Preserves local changes through connection failures so syncing can resume after reconnection."
+  "修复 Firefox 副本启动时因内置页面初始化失败而自动关闭的问题，保留已有标签页和网站登录数据。 / Fixes Firefox profiles closing during startup when an internal browser page is present, preserving existing tabs and website login data.",
+  "改进 Firefox 启动时的 IP 地区匹配，使语言、时区和位置设置在独立空白页完成初始化。 / Improves IP-based regional setup during Firefox startup, initializing language, time zone and location through a separate blank tab.",
+  "新建副本的默认打开页面更新为 IP.NodeCloak，可直接查看公网 IP、网络信息和 IP 测评；已有副本的网址设置继续保留。 / New profiles open IP.NodeCloak by default for public IP, network information and IP assessment; existing profile URLs are preserved."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

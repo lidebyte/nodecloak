@@ -23,6 +23,8 @@ mod recovery;
 mod recovery_tests;
 #[cfg(test)]
 mod separation_tests;
+#[cfg(test)]
+mod startup_tests;
 
 pub(crate) fn log_capture_failure(path: &Path, browser: &str, attempt: usize, error: &str) {
     recovery::log(path, browser, "session_capture_failed", attempt, error);
@@ -552,10 +554,19 @@ impl BrowserControl {
             let tree =
                 this.protocol
                     .call("browsingContext.getTree", json!({"maxDepth":0}), None)?;
-            this.primary = tree["contexts"][0]["context"]
-                .as_str()
-                .ok_or("Firefox 初始页面尚未就绪")?
-                .into();
+            // First-run, recovery and restored tabs can precede our startup tab.
+            // Firefox's privileged internal pages reject script.evaluate. Keep
+            // those tabs intact and use only an explicitly loaded blank document.
+            this.primary = match tree["contexts"].as_array().and_then(|contexts| {
+                contexts.iter().find(|context| context["url"] == "about:blank" && context["userContext"] == "default")
+                    .and_then(|context| context["context"].as_str())
+            }) {
+                Some(context) => context.to_owned(),
+                None => this.protocol.call("browsingContext.create", json!({"type":"tab","userContext":"default"}), None)?
+                    ["context"].as_str().ok_or("无法创建 Firefox 启动标签页")?.to_owned(),
+            };
+            this.protocol.call("browsingContext.navigate",
+                json!({"context":this.primary,"url":"about:blank","wait":"complete"}), None)?;
         } else {
             if deny_downloads { this.download_policy_after_reconnect()?; }
             this.protocol.call("Target.setAutoAttach",this.auto_attach(true),None)?;
@@ -2192,6 +2203,37 @@ mod tests {
             );
             assert_eq!(data["webdriver"], true);
         }
+    }
+    #[test]
+    #[ignore = "Starts temporary Firefox on a protected welcome page to verify browser-network IP initialization"]
+    fn native_firefox_ip_lookup_avoids_protected_startup_page() {
+        let fixture = Fixture::new();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let exe = platform::browser_path("firefox").unwrap();
+        let mut child = platform::command(exe.to_str().unwrap())
+            .args(["--headless", "--no-remote", "--remote-debugging-port=0", "--profile"])
+            .arg(&path).args(["--new-window", "about:home"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).spawn().unwrap();
+        let preferences = Preferences::default();
+        let result = BrowserControl::initialize("firefox", &path,
+            regional::initial(&preferences).unwrap(), PermissionMode::Ask, true,
+            &fixture.url("/region"), preferences.advanced.clone(), None, false,
+            ControlPlan::new("firefox", &preferences, LaunchPurpose::Manual));
+        // Always clean up this synthetic profile, including the failing case.
+        let outcome = result.and_then(|mut state| {
+            let region = state.region.ip_region.clone();
+            let tree = state.protocol.call("browsingContext.getTree", json!({"maxDepth":0}), None);
+            let _ = state.protocol.call("browser.close", json!({}), None);
+            tree.map(|tree| (region, tree))
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        let (region, tree) = outcome.unwrap();
+        assert_eq!(region.unwrap().timezone, "Asia/Tokyo");
+        assert!(tree["contexts"].as_array().unwrap().iter().any(|context| context["url"] == "about:home"),
+            "initialization replaced the existing Firefox home tab");
     }
     #[test]
     #[ignore = "Starts temporary Firefox; verify browser-network IP retry and restoration; use MOZ_HEADLESS=1 on an occluded test desktop"]
