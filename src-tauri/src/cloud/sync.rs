@@ -15,6 +15,18 @@ pub enum Decision {
     Apply(Value),
     Conflict(Vec<String>),
 }
+pub(crate) fn ensure_purge_synced(root: &std::path::Path, id: &str) -> Result<(), String> {
+    let disk = super::model::Disk::load(root)?;
+    for state in disk.accounts.values() {
+        if state.detached.contains(id) { continue; }
+        if let Some(binding) = state.bindings.get(id) {
+            if !binding.baseline.as_ref().is_some_and(|o| o.deleted) {
+                return Err("副本的删除尚未同步到云端，本机数据已保留。请在管理同步中完成同步，或取消云端关联后再彻底删除。".into());
+            }
+        }
+    }
+    Ok(())
+}
 /// Selected MCP previews pin remote identities; successful writes advance only their own pin.
 pub(crate) struct VersionGuard {
     pub ids: Vec<String>,
@@ -65,12 +77,16 @@ impl VersionGuard {
     }
 }
 pub fn decide(base: Option<&Value>, local: Option<&Value>, remote: Option<&Value>) -> Decision {
-    let deleted_local = base.map(|b| {
-        let mut v = b.clone();
-        v["deleted"] = json!(true);
-        v
-    });
-    let local = local.or(deleted_local.as_ref());
+    // A different data root, incomplete registry or failed migration is not a
+    // user deletion. Only an explicit tombstone may propagate deletion.
+    if base.is_some() && local.is_none() {
+        // Purging a profile after its deletion was confirmed is already settled;
+        // it must neither generate a new deletion nor block pending session cleanup.
+        if base == remote && base.is_some_and(|b| b["deleted"] == true) {
+            return Decision::Unchanged;
+        }
+        return Decision::Conflict(vec!["local_config_missing".into()]);
+    }
     if local == remote {
         return Decision::Unchanged;
     }
@@ -82,8 +98,8 @@ pub fn decide(base: Option<&Value>, local: Option<&Value>, remote: Option<&Value
         (None, None, Some(r)) => Decision::Apply(r.clone()),
         (None, Some(_), Some(_)) => Decision::Conflict(vec!["first_association".into()]),
         (Some(b), Some(l), Some(r)) => {
-            if (r["deleted"] == true && l != b && l["deleted"] != true)
-                || (l["deleted"] == true && r != b && r["deleted"] != true)
+            if (r["deleted"] == true && l["deleted"] != true)
+                || (l["deleted"] == true && l != b && r != b && r["deleted"] != true)
             {
                 return Decision::Conflict(vec!["deletion_vs_edit".into()]);
             }
@@ -702,24 +718,14 @@ pub fn resolve(
     let local_doc = local
         .as_ref()
         .map(Document::export)
-        .transpose()?
-        .or_else(|| {
-            binding
-                .baseline
-                .as_ref()
-                .and_then(|o| document(c, o).ok())
-                .map(|mut d| {
-                    d.deleted = true;
-                    d
-                })
-        })
-        .ok_or("本地配置不存在")?;
+        .transpose()?;
     match choice {
         "local" => {
+            let local_doc = local_doc.as_ref().ok_or("本地配置记录缺失，不能以删除记录代替本地配置。请检查数据目录或从备份恢复后重试。")?;
             binding.baseline = Some(put_document(
                 c,
                 &binding,
-                &local_doc,
+                local_doc,
                 Some(&remote),
                 remote.deleted && !local_doc.deleted,
             )?);
@@ -731,7 +737,7 @@ pub fn resolve(
         "both" => {
             let p = local.as_ref().ok_or("本地副本不存在，无法保留两份")?;
             platform::ensure_profile_closed(&profiles::path(&c.root, p)?)?;
-            let mut d = local_doc.draft();
+            let mut d = local_doc.as_ref().ok_or("本地配置不存在")?.draft();
             d.name = format!("{} (copy)", d.name.chars().take(50).collect::<String>());
             let copied = if c.disk.accounts[&account].session_sync {
                 super::session_sync::copy_with_session(c, p, d, runtime)?
@@ -878,17 +884,86 @@ mod tests {
         ));
     }
     #[test]
-    fn unmodified_local_receives_tombstone_and_edit_vs_delete_conflicts() {
+    fn live_local_requires_confirmation_before_accepting_remote_deletion() {
         let base = json!({"name":"a","deleted":false});
         let remote = json!({"name":"a","deleted":true});
         assert!(matches!(
             decide(Some(&base), Some(&base), Some(&remote)),
-            Decision::Apply(_)
+            Decision::Conflict(_)
         ));
         let edited = json!({"name":"b","deleted":false});
         assert!(matches!(
             decide(Some(&base), None, Some(&edited)),
             Decision::Conflict(_)
         ));
+    }
+    #[test]
+    fn absent_local_registry_entry_never_generates_cloud_deletion() {
+        let base = json!({"name":"a","deleted":false});
+        let deleted = json!({"name":"a","deleted":true});
+        for remote in [&base, &deleted] {
+            assert!(matches!(
+                decide(Some(&base), None, Some(remote)),
+                Decision::Conflict(fields) if fields == ["local_config_missing"]
+            ));
+        }
+        let restored = json!({"name":"restored","deleted":false});
+        assert!(matches!(decide(Some(&deleted), None, Some(&restored)),
+            Decision::Conflict(fields) if fields == ["local_config_missing"]));
+    }
+    #[test]
+    fn purging_after_confirmed_cloud_deletion_does_not_recreate_a_conflict() {
+        let deleted = json!({"name":"a","deleted":true});
+        assert!(matches!(decide(Some(&deleted), None, Some(&deleted)), Decision::Unchanged));
+    }
+    #[test]
+    fn explicit_local_tombstone_still_synchronizes_deletion() {
+        let base = json!({"name":"a","deleted":false});
+        let deleted = json!({"name":"a","deleted":true});
+        assert!(matches!(
+            decide(Some(&base), Some(&deleted), Some(&base)),
+            Decision::Upload(value) if value == deleted
+        ));
+        assert!(matches!(
+            decide(Some(&deleted), Some(&deleted), Some(&deleted)),
+            Decision::Unchanged
+        ));
+    }
+    #[test]
+    fn explicit_cloud_restore_reaches_device_that_already_confirmed_deletion() {
+        let deleted=json!({"name":"a","deleted":true});
+        let restored=json!({"name":"a","deleted":false});
+        assert!(matches!(decide(Some(&deleted),Some(&deleted),Some(&restored)),
+            Decision::Apply(value) if value==restored));
+        let live=json!({"name":"a","deleted":false});
+        let edited=json!({"name":"remote edit","deleted":false});
+        assert!(matches!(decide(Some(&live),Some(&deleted),Some(&edited)),Decision::Conflict(_)));
+    }
+    #[test]
+    fn purge_keeps_explicit_deletion_intent_until_cloud_acknowledges_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let draft = profiles::Draft { name:"Pending deletion".into(), browser:"firefox".into(),
+            notes:String::new(), tags:vec![], proxy:crate::proxy::ProxyConfig::system(),
+            password:None, clear_password:false, preferences:profiles::Preferences::default() };
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let p = profiles::create_synced(temp.path(), draft, &id).unwrap();
+        let mut disk = super::super::model::Disk::default();
+        let account = uuid::Uuid::new_v4().to_string();
+        let cloud_id = uuid::Uuid::new_v4().to_string();
+        let mut binding = Binding::new(&cloud_id);
+        binding.baseline = Some(Object { id:cloud_id, kind:"config".into(), revision:1,
+            epoch:1, deleted:false, payload:String::new(), writer:uuid::Uuid::new_v4().to_string(),
+            generation:0, updated_at:String::new() });
+        disk.accounts.entry(account.clone()).or_default().bindings.insert(id.clone(), binding);
+        disk.save(temp.path()).unwrap();
+        let runtime = profiles::Runtime::default();
+        profiles::remove(temp.path(), &id, false, &runtime).unwrap();
+        assert!(profiles::remove(temp.path(), &id, true, &runtime).is_err());
+        assert!(profiles::get(temp.path(), &id, true).unwrap().deleted_at.is_some());
+        assert!(profiles::path(temp.path(), &p).unwrap().exists());
+        disk.accounts.get_mut(&account).unwrap().bindings.get_mut(&id).unwrap().baseline.as_mut().unwrap().deleted = true;
+        disk.save(temp.path()).unwrap();
+        profiles::remove(temp.path(), &id, true, &runtime).unwrap();
+        assert!(profiles::get(temp.path(), &id, true).is_err());
     }
 }

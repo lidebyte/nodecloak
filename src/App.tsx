@@ -8,6 +8,7 @@ import ThemeControl from './ThemeControl';
 import McpWorkspace from './McpWorkspace';
 import {PlugZap} from 'lucide-react';
 import {useCloudAccount,AccountButton,AccountDialog,CloudSettings} from './AccountWorkspace';
+import {isSyncRecoveryError} from './cloud';
 import WindowControls from './WindowControls';
 import TerminalWorkspace from './TerminalWorkspace';
 import {useLanguage} from './LanguageControl';
@@ -59,6 +60,9 @@ export default function App() {
   const {catalog:siteCatalog}=useBrowserSiteCatalog();
   const [announcementToolbar,setAnnouncementToolbar]=useState<HTMLSpanElement|null>(null);
   const cloud=useCloudAccount();
+  const [syncTarget,setSyncTarget]=useState<string>();
+  function openSyncConflict(id?:string){setSyncTarget(id);cloud.open('sync');void cloud.reload();}
+  useEffect(()=>{if(cloud.panel!=='sync')setSyncTarget(undefined);},[cloud.panel]);
   const sharing=useProfileSharing(cloud.status.account?.id);
   const [shareProfile,setShareProfile]=useState<BrowserProfile|null>(null);
   const [page, setPage] = useState<Page>('profiles');
@@ -99,7 +103,7 @@ export default function App() {
   const [reportInput, setReportInput] = useState('');
   const [group, setGroup] = useState('all');
   const [onlyPending, setOnlyPending] = useState(false);
-  const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
+  const [toast, setToast] = useState<{ text: string; error?: boolean; syncRecovery?:boolean; syncProfileId?:string } | null>(null);
   const initialized = useRef(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const allChecks=withBrowserReport(scan,reports[reportKey],page==='computer'?'computer':'browser')?.checks||[];
@@ -123,10 +127,10 @@ export default function App() {
     if (results[0].status === 'fulfilled') setScan(results[0].value); else notify(String(results[0].reason), true);
     if (results[1].status === 'fulfilled') setHistory(results[1].value.sort((a,b)=>b.createdAt.localeCompare(a.createdAt))); else notify(String(results[1].reason), true);
   }
-  async function perform(label: string, action: () => Promise<void>) {
+  async function perform(label: string, action: () => Promise<void>, syncProfileId?:string) {
     if (busy) return;
     setBusy(label);
-    try { await action(); } catch (e) { notify(e instanceof Error ? e.message : String(e), true); }
+    try { await action(); } catch (e) { const text=e instanceof Error?e.message:String(e);if(isSyncRecoveryError(text)){setModal(null);setToast({text,error:true,syncRecovery:true,syncProfileId});void cloud.reload();}else notify(text,true); }
     finally { setBusy(null); }
   }
   useEffect(() => {
@@ -154,7 +158,7 @@ export default function App() {
     setPage(next);if(next==='history')await perform('正在读取修复记录',()=>refresh());
   }
   async function quit(){if(busy)return;setBusy('正在关闭副本并退出');try{await quitApplication(true);setQuitting(false);}catch(e){setQuitError(String(e));}finally{setBusy(null);}}
-  useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(null), toast.error ? 9000 : 5000); return () => clearTimeout(timer); } }, [toast]);
+  useEffect(() => { if (toast&&!toast.syncRecovery) { const timer = setTimeout(() => setToast(null), toast.error ? 9000 : 5000); return () => clearTimeout(timer); } }, [toast]);
   useEffect(() => { if (modal) dialogRef.current?.showModal(); else dialogRef.current?.close(); }, [modal]);
   function repairDialog(ids: CheckId[], target: TimezoneTarget = defaultTimezoneTarget(ids), custom = '') { const mapped = repairIds(ids); setSelected(mapped); setConsentTimezone(false); setConsentFonts(false); setTimezoneTarget(target); setCustomTimezone(custom); setModal({ kind: 'repair', ids: mapped }); }
   async function fontDialog(initialIds: string[] = []) {
@@ -193,7 +197,7 @@ export default function App() {
       await refresh(request.browser);
     });
   }
-  const openBrowser = (destination: BrowserDestination) => perform('正在打开专用浏览器', async () => { await launchBrowser(browser, destination); notify('已打开专用浏览器。请在该窗口内验证设置。'); });
+  const openBrowser = (destination: BrowserDestination) => perform('正在打开专用浏览器', async () => { await launchBrowser(browser, destination); notify('已打开专用浏览器。请在该窗口内验证设置。'); },activeProfile?.id);
 
   function checkRow(c: EnvironmentCheck) {
     const Icon = icons[c.id];
@@ -212,14 +216,14 @@ export default function App() {
       <div className="sidebar-bottom"><div className="sidebar-footer"><AccountButton cloud={cloud} preferencesDisabled={!!busy} onPreferences={()=>{cloud.setPanel(null);setPage('settings');}} onAccountPage={next=>{cloud.setError('');cloud.setPanel(null);setPage(next);}}/><span>v{t(version)}</span></div></div>
     </aside>
     <main>
-      <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}{siteCatalog.supportURL&&<button className="telegram-group" title={siteCatalog.supportURL.startsWith('https://t.me/')?t("加入 Telegram 群"):t("帮助与说明")} disabled={!!busy} onClick={() => void perform('正在打开帮助', openCatalogSupport)}>{siteCatalog.supportURL.startsWith('https://t.me/')?<Send size={14}/>:<CircleHelp size={14}/>}<span>{siteCatalog.supportURL.startsWith('https://t.me/')?'Telegram Group':t('帮助与说明')}</span><ArrowUpRight size={13} /></button>}<span className="announcement-toolbar-slot" ref={setAnnouncementToolbar}/>{mcpPending&&<button className="icon-button mcp-pending" title={t("MCP 有待确认操作")} aria-label={t("MCP 有待确认操作")} onClick={()=>setPage('automation')}><PlugZap size={18}/></button>}<button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
+      <header className="topbar" data-tauri-drag-region="deep"><div className="breadcrumb">NodeCloak<ChevronRight size={12} /><span>{t(pageTitles[page])}</span></div><div className="topbar-right">{!native && <span className="demo-badge">{t("交互演示 · 不修改电脑")}</span>}{siteCatalog.supportURL&&<button className="telegram-group" title={siteCatalog.supportURL.startsWith('https://t.me/')?t("加入 Telegram 群"):t("帮助与说明")} disabled={!!busy} onClick={() => void perform('正在打开帮助', openCatalogSupport)}>{siteCatalog.supportURL.startsWith('https://t.me/')?<Send size={14}/>:<CircleHelp size={14}/>}<span>{siteCatalog.supportURL.startsWith('https://t.me/')?'Telegram Group':t('帮助与说明')}</span><ArrowUpRight size={13} /></button>}<span className="announcement-toolbar-slot" ref={setAnnouncementToolbar}/>{!!cloud.status.conflicts?.length&&<button className="icon-button sync-conflicts-button" disabled={!!busy} title={t('处理同步冲突')} aria-label={t('处理同步冲突')} onClick={()=>openSyncConflict(cloud.status.conflicts?.[0]?.localId)}><CircleAlert size={18}/><span className="sync-conflict-count">{new Set(cloud.status.conflicts.map(c=>c.localId)).size}</span></button>}{mcpPending&&<button className="icon-button mcp-pending" title={t("MCP 有待确认操作")} aria-label={t("MCP 有待确认操作")} onClick={()=>setPage('automation')}><PlugZap size={18}/></button>}<button className="icon-button" title={t("使用指南")} aria-label={t("使用指南")} onClick={() => setModal({ kind: 'help' })}><CircleHelp size={18} /></button><WindowControls onError={message => notify(message)} /></div></header>
       <div className="main-content">
         <AnnouncementCenter announcements={siteCatalog.announcements??[]} toolbarTarget={announcementToolbar}/>
         {page!=='profiles'&&<div className="page-heading"><div><h1>{t(pageTitles[page])}</h1></div>{!['settings','account','devices','sharing','automation'].includes(page)&&<button className="button secondary" style={{visibility:page==='code'?'hidden':undefined}} disabled={!!busy} onClick={() => perform('正在重新检测', async () => { await refresh(); notify(native ? '检测已更新' : '演示检测已更新'); })}><RefreshCw size={15} className={busy?.includes('检测') ? 'spin' : ''} />{t(busy?.includes('检测') ? '正在检测' : '重新检测')}</button>}</div>}
 
         <AppUpdates expanded={page === 'settings'} busy={!!busy} onBusyChange={value=>setBusy(value?'正在更新应用':null)} />
         {(page==='account'||page==='devices')&&cloud.status.account&&<AccountDialog inline cloud={{...cloud,panel:page}}/>}
-        {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} onShare={setShareProfile} onManageSharing={()=>setPage('sharing')} busy={!!busy||sharing.busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
+        {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} onShare={setShareProfile} onManageSharing={()=>setPage('sharing')} syncConflicts={cloud.status.conflicts} onResolveSync={openSyncConflict} onSyncStatusChange={()=>void cloud.reload()} busy={!!busy||sharing.busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
         {page==='sharing'&&<SharingWorkspace sharing={sharing} cloud={cloud}/>}
         <ShareProfileDialog profile={shareProfile} sharing={sharing} cloud={cloud} onClose={()=>setShareProfile(null)}/>
         {activeProfile&&['overview','history'].includes(page)&&<div className="active-profile-bar"><div className={page==='overview'?'overview-profile-identity':undefined}>{page==='overview'?<label className="overview-profile-picker"><span>{t("当前副本")}</span><SelectMenu menuMinWidth={320} noWrap label={t("切换浏览器副本")} disabled={!!busy} value={activeProfile.id} onOpen={()=>void loadProfileOptions().catch(e=>notify(String(e),true))} onChange={value=>{const p=profileOptions.find(p=>p.id===value);if(p&&p.id!==activeProfile.id)void selectProfile(p);}} options={(!profileOptions.some(p=>p.id===activeProfile.id)?[activeProfile,...profileOptions]:profileOptions).map(p=>({value:p.id,label:`${p.name} · ${browserNames[p.browser]}`,icon:<BrowserIcon browser={p.browser}/>}))} /></label>:<strong>{activeProfile.name}</strong>}<span>{t(browserNames[browser])} · {t(activeProfile.proxy.mode==='system'?'系统代理':activeProfile.proxy.mode==='direct'?'直连':activeProfile.proxy.host+':'+activeProfile.proxy.port)}</span></div><button disabled={!!busy} className={page==='overview'?'selected':''} onClick={()=>setPage('overview')}>{t("环境检测")}</button><button disabled={!!busy} className={page==='history'?'selected':''} onClick={()=>setPage('history')}>{t("修复记录")}</button><button disabled={!!busy} onClick={()=>setPage('profiles')}>{t("返回列表")}</button></div>}
@@ -261,9 +265,9 @@ export default function App() {
         </>}
       </div>
     </main>
-    <AccountDialog cloud={cloud}/>
+    <AccountDialog cloud={cloud} focusProfileId={syncTarget}/>
     {t(busy && scan && <div className="operation-indicator" role="status"><LoaderCircle size={14} className="spin" />{t(busy)}</div>)}
-    {toast && <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <Info size={18} /> : <Check size={18} />}<span>{t(toast.text)}</span><button aria-label={t("关闭通知")} onClick={() => setToast(null)}><X size={15} /></button></div>}
+    {toast && <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <Info size={18} /> : <Check size={18} />}<span>{t(toast.text)}</span>{toast.syncRecovery&&<button type="button" className="button secondary compact" onClick={()=>openSyncConflict(toast.syncProfileId)}><Settings2 size={14}/>{t('处理同步冲突')}</button>}<button aria-label={t("关闭通知")} onClick={() => setToast(null)}><X size={15} /></button></div>}
     <dialog ref={quitDialog} className="app-dialog" onCancel={e=>{e.preventDefault();if(!busy)setQuitting(false);}}><h2>{t("退出 NodeCloak？")}</h2><p className="modal-subtitle">{t("真正退出将先关闭运行中的浏览器副本和本地代理。请保存各窗口中未完成的输入。")}</p>{t(quitError&&<p role="alert" className="profile-error">{t(quitError)}</p>)}<div className="modal-actions"><button className="button secondary" disabled={!!busy} onClick={()=>setQuitting(false)}>{t("继续运行")}</button><button className="button primary" disabled={!!busy} onClick={()=>void quit()}>{busy?<LoaderCircle className="spin" size={15}/>:null}{t("关闭副本并退出")}</button></div></dialog>
     <dialog ref={dialogRef} className="modal" onCancel={e => { if (busy) e.preventDefault(); else setModal(null); }} onClick={e => { if (e.target === e.currentTarget && !busy) setModal(null); }} aria-labelledby="modal-title"><div className="modal-content"><button className="modal-close icon-button" aria-label={t("关闭面板")} disabled={!!busy} onClick={() => setModal(null)}><X size={19} /></button>
       {modal?.kind === 'fonts' && <FontReview key="font-review" catalog={modal.catalog} initialIds={modal.initialIds} busy={!!busy} onClose={() => setModal(null)} onSubmit={(ids,consent) => void applyFonts(ids,consent)}/>}

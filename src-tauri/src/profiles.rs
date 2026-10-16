@@ -1092,6 +1092,7 @@ pub fn remove(root: &Path, id: &str, purge: bool, runtime: &Runtime) -> Result<(
         if p.deleted_at.is_none() {
             return Err("请先将副本移到最近删除，再彻底删除".into());
         }
+        crate::cloud::sync::ensure_purge_synced(root, id)?;
         for reference in &p.credential_refs {
             match secret_entry(id, reference)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => {}

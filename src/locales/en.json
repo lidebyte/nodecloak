@@ -1,4 +1,12 @@
 {
+  "副本的删除尚未同步到云端，本机数据已保留。请在管理同步中完成同步，或取消云端关联后再彻底删除。": "Profile deletion has not synced to the cloud. Local data has been preserved. Finish syncing in Manage sync, or unlink the profile before permanently deleting it.",
+  "处理同步冲突": "Resolve sync conflicts",
+  "查看同步冲突": "View sync conflicts",
+  "存在待处理的同步冲突，本机数据已保留。": "Sync conflicts need attention. Local data has been preserved.",
+  "本机配置记录缺失": "Local configuration is missing",
+  "本机配置记录缺失，已暂停此副本同步。请检查数据目录或恢复配置备份；未向云端发送删除。": "Sync is paused because the local configuration is missing. Check the data folder or restore a configuration backup. No deletion was sent to the cloud.",
+  "本地配置记录缺失，不能以删除记录代替本地配置。请检查数据目录或从备份恢复后重试。": "The local configuration is missing. A deletion record cannot replace it. Check the data folder or restore a backup, then retry.",
+  "请选择要保留的副本状态。若选中的一方已删除，另一方也会应用删除；本机删除可在最近删除中恢复。": "Choose which profile state to keep. If that side is deleted, deletion also applies to the other side. Local deletion can be undone in Recently deleted.",
   "关闭错误提示": "Dismiss error",
   "没有匹配项": "No matches",
   "正在安装更新，请稍候。": "Installing the update. Please wait.",
@@ -1432,5 +1440,11 @@
   "已提取的代理地址无效，请重新启动副本": "The extracted proxy address is invalid. Restart the profile.",
   "运行中的 API 代理地址未保存，请关闭并重新启动副本": "The running API proxy address is unavailable. Close and restart the profile.",
   "API 代理尚未提取有效地址": "No valid API proxy address has been extracted",
-  "链式": "Chained"
+  "链式": "Chained",
+  "Firefox 隔离网站存储页面受特殊内容限制，已保留本机数据": "Firefox restricted access to an isolated storage page. Local data has been preserved.",
+  "无法进入隔离网站存储（{0}；{1}）": "Could not prepare isolated website storage ({0}; {1})",
+  "页面未完成加载": "The page did not finish loading",
+  "网站存储超过同步容量限制，本机数据已保留": "Website storage exceeds the sync limit. Local data has been preserved.",
+  "隔离网站存储被浏览器阻止，本机数据已保留": "The browser blocked isolated website storage. Local data has been preserved.",
+  "网站存储处理失败，保留本机数据": "Website storage processing failed. Local data has been preserved."
 }

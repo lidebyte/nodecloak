@@ -20,12 +20,11 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "新增链式代理：可通过本机代理或软路由连接副本代理，支持 HTTP、HTTPS 和 SOCKS5 前置代理。 / Adds proxy chaining through a local proxy or LAN router, with HTTP, HTTPS and SOCKS5 first hops.",
-  "新增 API 提取代理：支持返回 IP:端口 的接口，每次启动提取代理，并在本次运行中保持地址一致。 / Adds API proxy sources returning IP:port, extracting an endpoint at startup and keeping it consistent during the session.",
-  "扩展代理导入：支持 主机:端口:用户名:密码 格式，方便粘贴代理商提供的连接信息。 / Accepts host:port:username:password proxy exports for convenient provider configuration.",
-  "优化 Chrome、Edge、Firefox 的手动启动与 MCP 自动化协作，改善稳定指纹及区域设置的登录兼容性。 / Improves manual startup and MCP automation coordination across Chrome, Edge and Firefox, including login compatibility with stable fingerprints and regional settings.",
-  "修复登录新标签页自动关闭及持续加载问题，增强连接恢复、网站登录状态同步与错误提示。 / Fixes login tabs closing or remaining loading, and improves connection recovery, website-session sync and error messages.",
-  "启动浏览器副本时显示加载状态，便于查看启动进度。 / Shows a loading state while browser profiles start."
+  "修复 Firefox 副本在同步网站登录状态时无法启动的问题，保留本机数据并提供更清晰的同步提示。 / Fixes Firefox profiles failing to start while syncing website sessions, preserving local data and showing clearer sync status.",
+  "改进多设备同步中的删除与恢复处理，保护本机配置，减少恢复后反复出现的冲突。 / Improves profile deletion and restoration across devices, protecting local configuration and reducing repeated conflicts after recovery.",
+  "同步冲突可从副本列表、启动提示和工具栏直接处理，清楚选择保留本地、使用云端或保留两份。 / Resolve sync conflicts directly from the profile list, startup messages or toolbar, with clear choices to keep local, use cloud or keep both.",
+  "冲突提示持续显示，便于处理批量启动、重新启动和保存后启动时遇到的同步问题。 / Keeps conflict messages visible and makes sync issues easier to resolve during batch starts, restarts and save-and-start actions.",
+  "连接失败时保留本机修改，恢复连接后可继续同步。 / Preserves local changes through connection failures so syncing can resume after reconnection."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

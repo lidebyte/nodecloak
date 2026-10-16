@@ -1,0 +1,35 @@
+// @vitest-environment jsdom
+import {act} from 'react';
+import {createRoot,type Root} from 'react-dom/client';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+import App from './App';
+import {LanguageProvider} from './LanguageControl';
+import {languageStorageKey} from './i18n';
+import * as bridge from './bridge';
+import * as profiles from './browser-profiles';
+const api=vi.hoisted(()=>({status:vi.fn(),action:vi.fn()}));
+vi.mock('./cloud',async original=>({...await original<object>(),cloudStatus:api.status,cloudAction:api.action}));
+vi.mock('./browser-site-catalog',async original=>({...await original<object>(),useBrowserSiteCatalog:()=>({catalog:{revision:0,groups:[],announcements:[]}})}));
+vi.mock('./AppUpdates',()=>({default:()=>null}));
+let host:HTMLDivElement,root:Root;
+beforeEach(()=>{vi.useFakeTimers();localStorage.clear();localStorage.setItem(languageStorageKey,'zh');Object.assign(globalThis,{IS_REACT_ACT_ENVIRONMENT:true});vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:()=>{},removeEventListener:()=>{}}));HTMLDialogElement.prototype.showModal=function(){this.open=true;};HTMLDialogElement.prototype.close=function(){this.open=false;};host=document.createElement('div');document.body.append(host);root=createRoot(host);api.status.mockResolvedValue({account:{id:'test',name:'Test',email:'test@example.com',avatar:''},unlocked:true,recoverySaved:true,setupComplete:true,conflicts:[]});api.action.mockResolvedValue({status:{account:null},result:{profiles:[],localProfiles:[]}});});
+afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.useRealTimers();vi.restoreAllMocks();vi.unstubAllGlobals();});
+it('keeps overview launch conflicts visible and opens targeted recovery from the error',async()=>{
+ const target=(await profiles.listProfiles())[0];
+ vi.spyOn(bridge,'launchBrowser').mockRejectedValue(new Error('云端配置已变化，请先同步副本配置后再打开浏览器'));
+ await act(async()=>root.render(<LanguageProvider><App/></LanguageProvider>));
+ const profile=Array.from(host.querySelectorAll<HTMLButtonElement>('button.profile-name-button')).find(b=>b.textContent?.startsWith(target.name))!;
+ await act(async()=>{profile.click();await vi.advanceTimersByTimeAsync(2000);});
+ const launch=Array.from(host.querySelectorAll('button')).find(b=>b.textContent?.trim()==='打开浏览器')!;
+ expect(launch).toBeDefined();expect(launch.disabled).toBe(false);
+ const refreshes=api.status.mock.calls.length;
+ await act(async()=>launch.click());
+ const error=host.querySelector('.toast.error')!;
+ expect(error.textContent).toContain('云端配置已变化');
+ expect(error.querySelector('button')?.textContent).toContain('处理同步冲突');
+ expect(api.status.mock.calls.length).toBeGreaterThan(refreshes);
+ await act(async()=>vi.advanceTimersByTimeAsync(10000));
+ expect(host.querySelector('.toast.error')).not.toBeNull();
+ await act(async()=>error.querySelector<HTMLButtonElement>('button')!.click());
+ expect(host.querySelector('dialog.account-dialog')?.hasAttribute('open')).toBe(true);
+});

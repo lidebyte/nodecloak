@@ -38,3 +38,5 @@
 .app-dialog.account-dialog .account-recovery textarea{height:88px;min-height:88px;max-height:88px;padding:12px 14px;line-height:1.8;font-size:12px;border-radius:10px;margin:4px 0 14px;word-break:break-all}
 .app-dialog.account-dialog .account-recovery .profile-checkbox{align-items:center;font-size:12px;line-height:1.6}
 .app-dialog.account-dialog .account-recovery .profile-checkbox input{width:16px;height:16px;margin:0}
+
+.cloud-conflict:focus{outline:2px solid var(--text-secondary);outline-offset:4px}.cloud-conflict{scroll-margin-block:24px}

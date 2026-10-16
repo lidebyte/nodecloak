@@ -221,7 +221,8 @@ mod tests {
             .cloud_id
             .clone();
         profiles::remove(&r2, &copied.id, false, &runtime).unwrap();
-        profiles::remove(&r2, &copied.id, true, &runtime).unwrap();
+        assert!(profiles::remove(&r2, &copied.id, true, &runtime).is_err(),
+            "pending deletion must retain its explicit local tombstone");
         let mut other_lease = super::super::model::Binding::new(&copied_cloud);
         super::super::session_sync::lease(&mut a, &mut other_lease, true).unwrap();
         let mut live_doc =
@@ -234,6 +235,7 @@ mod tests {
         assert!(b.disk.accounts[&account].conflicts.iter().any(
             |x| x.local_id == copied.id && x.fields.contains(&"deletion_waiting_device".into())
         ));
+        profiles::remove(&r2, &copied.id, true, &runtime).unwrap();
         let active = sync::fetch(&mut b, &cloud, "config").unwrap();
         assert_eq!(
             sync::document(&b, &active).unwrap().notes,
@@ -481,5 +483,113 @@ mod tests {
             }
         }
         std::fs::write(dir.join("done"), b"passed").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated Go/PostgreSQL harness and test-only OS credentials"]
+    fn desktop_two_device_config_sync_lifecycle() {
+        let dir = std::path::PathBuf::from(std::env::var("DESKTOP_INTEROP_DIR").unwrap());
+        let endpoint = std::fs::read_to_string(dir.join("endpoint")).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (r1,r2) = (temp.path().join("one"),temp.path().join("two"));
+        let namespaces = [format!("test-{}",uuid::Uuid::new_v4()),format!("test-{}",uuid::Uuid::new_v4())];
+        struct Cleanup { namespaces:[String;2], account:Option<String>, dir:std::path::PathBuf }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for ns in &self.namespaces {
+                    let _ = vault::remove(&format!("{ns}:device"));
+                    let _ = vault::remove(&format!("{ns}:session"));
+                    if let Some(id) = &self.account {
+                        let _ = vault::remove(&format!("{ns}:{id}:root:1"));
+                        let _ = vault::clear_staged(ns,id,1);
+                        let _ = vault::remove(&format!("{ns}:{id}:recovery-pending"));
+                    }
+                }
+                let _ = std::fs::write(self.dir.join("done"), b"finished");
+            }
+        }
+        let mut cleanup = Cleanup { namespaces:namespaces.clone(),account:None,dir:dir.clone() };
+        let mut a = Connection::test_connection(&r1,Client::new(&endpoint,true).unwrap(),&namespaces[0]).unwrap();
+        let mut b = Connection::test_connection(&r2,Client::new(&endpoint,true).unwrap(),&namespaces[1]).unwrap();
+        login(&mut a,&dir);
+        cleanup.account = Some(a.account_id().unwrap());
+        let recovery = a.initialize().unwrap()["recoveryCode"].as_str().unwrap().to_owned();
+        a.acknowledge_recovery().unwrap();login(&mut b,&dir);b.recover(&recovery).unwrap();
+        let draft:profiles::Draft = serde_json::from_value(json!({"name":"Original","browser":"firefox","notes":"initial","tags":[],"proxy":{"mode":"direct","host":"","port":0,"username":""},"preferences":profiles::Preferences::default()})).unwrap();
+        let runtime = profiles::Runtime::default();
+        let p = profiles::create(&r1,draft.clone(),None).unwrap();
+        sync::setup(&mut a,"upload",&[p.id.clone()],&[],false,&runtime).unwrap();
+        let account = a.account_id().unwrap();
+        let cloud = a.disk.accounts[&account].bindings[&p.id].cloud_id.clone();
+        sync::setup(&mut b,"merge",&[],&[cloud.clone()],false,&runtime).unwrap();
+        let peer = profiles::load(&r2).unwrap().into_iter().find(|x|x.name=="Original").unwrap();
+        let marker = profiles::path(&r2,&peer).unwrap().join("sync-test-local-data");
+        std::fs::write(&marker,b"preserved").unwrap();
+        let revision = sync::fetch(&mut a,&cloud,"config").unwrap().revision;
+        sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+        assert_eq!(sync::fetch(&mut a,&cloud,"config").unwrap().revision,revision,"unchanged sync must not create writes");
+        let mut local = super::super::model::Document::export(&profiles::get(&r1,&p.id,false).unwrap()).unwrap().draft();
+        local.name="Renamed".into();profiles::update(&r1,&p.id,local).unwrap();
+        let mut remote = super::super::model::Document::export(&profiles::get(&r2,&peer.id,false).unwrap()).unwrap().draft();
+        remote.notes="Independent note".into();profiles::update(&r2,&peer.id,remote).unwrap();
+        sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();sync::run(&mut a,&runtime).unwrap();
+        let merged=profiles::get(&r1,&p.id,false).unwrap();assert_eq!(merged.name,"Renamed");assert_eq!(merged.notes,"Independent note");
+        for choice in ["local","cloud","both"] {
+            sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+            let mut da=super::super::model::Document::export(&profiles::get(&r1,&p.id,false).unwrap()).unwrap().draft();
+            let mut db=super::super::model::Document::export(&profiles::get(&r2,&peer.id,false).unwrap()).unwrap().draft();
+            da.name=format!("Remote {choice}");db.name=format!("Local {choice}");
+            profiles::update(&r1,&p.id,da).unwrap();profiles::update(&r2,&peer.id,db).unwrap();
+            sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+            assert!(b.disk.accounts[&account].conflicts.iter().any(|x|x.local_id==peer.id&&x.fields.contains(&"/name".into())));
+            let before=sync::fetch(&mut b,&cloud,"config").unwrap().revision;
+            sync::resolve(&mut b,&peer.id,"skip",&runtime).unwrap();
+            assert_eq!(sync::fetch(&mut b,&cloud,"config").unwrap().revision,before);
+            sync::resolve(&mut b,&peer.id,choice,&runtime).unwrap();
+            let kept=profiles::get(&r2,&peer.id,false).unwrap();
+            assert_eq!(kept.name,format!("{} {choice}",if choice=="local"{"Local"}else{"Remote"}));
+            if choice=="both" { assert!(profiles::load(&r2).unwrap().iter().any(|x|x.name=="Local both (copy)")); }
+            assert_eq!(std::fs::read(&marker).unwrap(),b"preserved");
+        }
+        // An unavailable service must preserve pending local changes, which the
+        // next successful sync can publish without resetting the local profile.
+        let mut offline_draft=super::super::model::Document::export(&profiles::get(&r2,&peer.id,false).unwrap()).unwrap().draft();
+        offline_draft.notes="Offline change retained".into();profiles::update(&r2,&peer.id,offline_draft).unwrap();
+        let registry_before=std::fs::read(r2.join("profiles.json")).unwrap();
+        let state_before=std::fs::read(r2.join("cloud/state.json")).unwrap();
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let offline_endpoint=format!("http://{}",listener.local_addr().unwrap());drop(listener);
+        let mut offline=Connection::test_connection(&r2,Client::new(&offline_endpoint,true).unwrap(),&namespaces[1]).unwrap();
+        assert!(sync::run(&mut offline,&runtime).is_err());
+        assert_eq!(std::fs::read(r2.join("profiles.json")).unwrap(),registry_before);
+        assert_eq!(std::fs::read(r2.join("cloud/state.json")).unwrap(),state_before);
+        sync::run(&mut b,&runtime).unwrap();sync::run(&mut a,&runtime).unwrap();
+        assert_eq!(profiles::get(&r1,&p.id,false).unwrap().notes,"Offline change retained");
+        sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+        profiles::remove(&r1,&p.id,false,&runtime).unwrap();sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+        assert!(profiles::get(&r2,&peer.id,false).is_ok(),"remote deletion must preserve the local profile pending choice");
+        sync::resolve(&mut b,&peer.id,"local",&runtime).unwrap();
+        assert!(!sync::fetch(&mut b,&cloud,"config").unwrap().deleted);
+        sync::run(&mut a,&runtime).unwrap();assert!(profiles::get(&r1,&p.id,false).is_ok());
+        profiles::remove(&r1,&p.id,false,&runtime).unwrap();sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+        sync::resolve(&mut b,&peer.id,"cloud",&runtime).unwrap();
+        assert!(profiles::get(&r2,&peer.id,true).unwrap().deleted_at.is_some());
+        assert_eq!(std::fs::read(&marker).unwrap(),b"preserved");
+        profiles::remove(&r2,&peer.id,true,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+        assert!(!b.disk.accounts[&account].conflicts.iter().any(|x|x.local_id==peer.id));
+        let missing=profiles::create(&r1,draft,None).unwrap();sync::run(&mut a,&runtime).unwrap();sync::run(&mut b,&runtime).unwrap();
+        let missing_cloud=a.disk.accounts[&account].bindings[&missing.id].cloud_id.clone();
+        let missing_peer=profiles::load(&r2).unwrap().into_iter().find(|x|x.name=="Original"&&x.deleted_at.is_none()).unwrap();
+        let missing_marker=profiles::path(&r2,&missing_peer).unwrap().join("sync-test-preserved");std::fs::write(&missing_marker,b"preserved").unwrap();
+        let before=sync::fetch(&mut b,&missing_cloud,"config").unwrap().revision;
+        let file=r2.join("profiles.json");let mut registry:serde_json::Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        registry["profiles"].as_array_mut().unwrap().retain(|x|x["id"]!=missing_peer.id);
+        std::fs::write(&file,serde_json::to_vec(&registry).unwrap()).unwrap();
+        sync::run(&mut b,&runtime).unwrap();
+        assert!(b.disk.accounts[&account].conflicts.iter().any(|x|x.local_id==missing_peer.id&&x.fields==["local_config_missing"]));
+        assert!(sync::resolve(&mut b,&missing_peer.id,"local",&runtime).is_err());
+        let after=sync::fetch(&mut b,&missing_cloud,"config").unwrap();assert_eq!(after.revision,before);assert!(!after.deleted);
+        assert_eq!(std::fs::read(&missing_marker).unwrap(),b"preserved");
+        eprintln!("config lifecycle passed: initial sync, unchanged sync, independent merge, same-field local/cloud/both/skip, offline retry, deletion restore/accept/purge, missing registry protection");
     }
 }

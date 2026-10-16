@@ -15,6 +15,8 @@ use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
 pub(super) const PARTITIONED_STORAGE_ERROR: &str =
     "此副本包含尚未支持迁移的分区网站存储，已保留本机数据";
+const FIREFOX_WEB_CONTEXT_ERROR: &str =
+    "Firefox 隔离网站存储页面受特殊内容限制，已保留本机数据";
 
 pub fn origin(v: &str) -> Result<String, String> {
     let u = reqwest::Url::parse(v).map_err(|_| "网站来源无效")?;
@@ -377,6 +379,21 @@ pub(super) fn capture_transport_failure(error: &str) -> bool {
         || error.starts_with("隔离浏览器连接已关闭（")
         || error.starts_with("浏览器登录数据操作 ") && error.ends_with(" 超时")
 }
+pub(super) fn capture_local_launch_failure(error: &str) -> bool {
+    capture_transport_failure(error) || error == FIREFOX_WEB_CONTEXT_ERROR
+        || error == "无法进入隔离网站存储" || error.starts_with("无法进入隔离网站存储（")
+        || ["网站存储超过同步容量限制，本机数据已保留", "网站存储包含不可迁移的值，保留本机数据",
+            "隔离网站存储被浏览器阻止，本机数据已保留"].contains(&error)
+}
+fn codec_result(value: Value) -> Result<Value, String> {
+    if value["ok"] == true && value.get("value").is_some() { return Ok(value["value"].clone()); }
+    Err(match value["code"].as_str() {
+        Some("NC_LIMIT") => "网站存储超过同步容量限制，本机数据已保留",
+        Some("non-exportable CryptoKey" | "NC_UNSUPPORTED_VALUE") => "网站存储包含不可迁移的值，保留本机数据",
+        Some("NC_STORAGE_BLOCKED") => "隔离网站存储被浏览器阻止，本机数据已保留",
+        _ => "网站存储处理失败，保留本机数据",
+    }.into())
+}
 struct Browser {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     child: Child,
@@ -608,6 +625,10 @@ impl Browser {
     }
     fn result(v: Value, method: &str) -> Result<Value, String> {
         if v.get("error").is_some() || v["type"] == "error" {
+            if v["error"] == "unsupported operation" && v["message"].as_str()
+                .is_some_and(|m|m.to_ascii_lowercase().contains("system access")) {
+                return Err(FIREFOX_WEB_CONTEXT_ERROR.into());
+            }
             return Err(format!("浏览器拒绝登录数据操作 {method}"));
         }
         Ok(v["result"].clone())
@@ -656,16 +677,20 @@ impl Browser {
             self.call("Page.navigate", json!({"url":url}), true)?;
         }
         let start = Instant::now();
+        let mut last_error = None;
         loop {
             let expression = format!(
                 "location.href==={} && document.readyState!=='loading'",
                 json!(url)
             );
-            if self.eval(&expression).ok() == Some(json!(true)) {
-                break;
-            };
+            match self.eval(&expression) {
+                Ok(value) if value == json!(true) => break,
+                Err(error) if error == FIREFOX_WEB_CONTEXT_ERROR => return Err(error),
+                Err(error) => last_error = Some(error),
+                _ => {}
+            }
             if start.elapsed() > Duration::from_secs(15) {
-                return Err("无法进入隔离网站存储".into());
+                return Err(format!("无法进入隔离网站存储（{}；{}）",if self.firefox {"Firefox"} else {"Chromium"},last_error.as_deref().unwrap_or("页面未完成加载")));
             };
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -706,6 +731,12 @@ impl Browser {
         );
         self.eval(&code)?;
         Ok(())
+    }
+    fn codec(&mut self, expression: &str) -> Result<Value, String> {
+        // Only fixed codec error identifiers leave the isolated page. Browser
+        // exceptions can otherwise include database names and website secrets.
+        let wrapped = format!("(async()=>{{try{{return {{ok:true,value:await ({expression})}};}}catch(e){{const codes=['NC_LIMIT','NC_UNSUPPORTED_VALUE','non-exportable CryptoKey','NC_STORAGE_BLOCKED'];return {{ok:false,code:codes.includes(e.message)?e.message:'NC_CODEC_FAILED'}};}}}})()");
+        codec_result(self.eval(&wrapped)?)
     }
     fn frame(&mut self, site: &str) -> Result<(), String> {
         let url = format!(
@@ -977,6 +1008,12 @@ impl Stage {
             }
             let mut user = firefox_prefs[0].1.clone().unwrap_or_default();
             user.extend_from_slice(b"\nuser_pref(\"network.proxy.type\",1);user_pref(\"network.proxy.http\",\"127.0.0.1\");user_pref(\"network.proxy.http_port\",9);user_pref(\"network.proxy.ssl\",\"127.0.0.1\");user_pref(\"network.proxy.ssl_port\",9);user_pref(\"network.proxy.no_proxies_on\",\"\");user_pref(\"network.proxy.allow_hijacking_localhost\",true);user_pref(\"dom.serviceWorkers.enabled\",false);user_pref(\"browser.sessionstore.resume_from_crash\",false);user_pref(\"browser.startup.page\",0);\n");
+            // The offline codec serves empty intercepted documents, including
+            // Mozilla web origins. Give those documents ordinary web content
+            // capabilities instead of privileged Mozilla actors. Never grant
+            // system access to BiDi. Both preferences are restored byte-for-byte
+            // before staged data can replace the real profile.
+            user.extend_from_slice(b"user_pref(\"browser.tabs.remote.separatePrivilegedMozillaWebContentProcess\",false);\nuser_pref(\"browser.tabs.remote.separatedMozillaDomains\",\"\");\n");
             engine::atomic_write(&path.join("user.js"), &user)?;
         }
         Ok(Self {
@@ -1118,7 +1155,7 @@ fn export_staged_profile(browser: &str, profile: &Path) -> Result<Snapshot, Stri
     for o in origins {
         let state = if let Some(state) = local.remove(&o) { state } else {
             b.site(&o)?;
-            b.eval("__ncSessionCodec.exportOrigin()")?
+            b.codec("__ncSessionCodec.exportOrigin()")?
         };
         if state["local"].as_array().is_some_and(|v| !v.is_empty())
             || state["databases"].as_array().is_some_and(|v| !v.is_empty())
@@ -1167,7 +1204,7 @@ pub fn restore_profile(
             "__ncSessionCodec.importOrigin({})",
             serde_json::to_string(&state).map_err(|_| "网站存储无效")?
         );
-        b.eval(&expression)?;
+        b.codec(&expression)?;
     }
     b.set_cookies(&snapshot.cookies)?;
     let cookies = b.cookies()?;
@@ -1188,7 +1225,7 @@ pub fn restore_profile(
     for site in &snapshot.origins {
         if local.iter().any(|(key, _)| *key == site.key()) { continue; }
         b.site(&site.key())?;
-        let mut state = b.eval("__ncSessionCodec.exportOrigin()")?;
+        let mut state = b.codec("__ncSessionCodec.exportOrigin()")?;
         canonical_storage(&mut state)?;
         if state != site.state {
             return Err("网站存储写入复检不一致，取消导入并保留本机数据".into());
@@ -1267,6 +1304,24 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn codec_results_preserve_values_and_only_report_fixed_error_categories() {
+        assert_eq!(codec_result(json!({"ok":true,"value":{"local":[["key","value"]],"databases":[]}})).unwrap()["local"][0][1], "value");
+        for (code, expected) in [("NC_LIMIT","网站存储超过同步容量限制，本机数据已保留"),
+            ("NC_UNSUPPORTED_VALUE","网站存储包含不可迁移的值，保留本机数据"),
+            ("non-exportable CryptoKey","网站存储包含不可迁移的值，保留本机数据"),
+            ("NC_STORAGE_BLOCKED","隔离网站存储被浏览器阻止，本机数据已保留"),
+            ("private-database-name","网站存储处理失败，保留本机数据")] {
+            assert_eq!(codec_result(json!({"ok":false,"code":code,"message":"private-browser-payload"})).unwrap_err(),expected);
+        }
+    }
+    #[test]
+    fn firefox_system_access_rejection_is_actionable_without_exposing_browser_messages() {
+        let error = Browser::result(json!({"type":"error","error":"unsupported operation",
+            "message":"System access is required; private-browser-payload"}), "script.evaluate").unwrap_err();
+        assert_eq!(error, "Firefox 隔离网站存储页面受特殊内容限制，已保留本机数据");
+        assert!(!error.contains("private-browser-payload"));
+    }
+    #[test]
     fn export_retries_transport_failure_once_without_retrying_invalid_storage() {
         for error in ["隔离浏览器连接中断", "无法读取网站存储"] {
             let mut calls = 0;
@@ -1298,6 +1353,31 @@ mod tests {
     }
     #[test]
     #[ignore = "Read-only source profile diagnostic; launches only a staged copy, never prints website data"]
+    fn staged_profile_navigation_diagnostic() {
+        let browser = std::env::var("NODECLOAK_DIAGNOSTIC_BROWSER").unwrap();
+        let source = PathBuf::from(std::env::var_os("NODECLOAK_DIAGNOSTIC_PROFILE").unwrap());
+        let stage = Stage::new(&browser, &source).unwrap();
+        let scopes = disk_origins(&browser, &stage.path).unwrap();
+        let mut b = Browser::launch(&browser, &stage.path).unwrap();
+        println!("staged navigation: {} namespaces", scopes.len());
+        for (index, scope) in scopes.iter().enumerate() {
+            if let Err(error) = b.site(scope) {
+                let expected = scope.partition_key.as_ref().map(|p| &p.top_level_site).unwrap_or(&scope.origin);
+                let probe = b.eval(&format!("({{protocol:location.protocol,originMatches:location.origin==={},readyState:document.readyState,errorPage:document.documentURI.startsWith('about:neterror'),visibility:document.visibilityState}})",json!(expected)));
+                println!("failed namespace {index}: {error}; partitioned={}; expected_scheme={}; readiness={probe:?}; alive={:?}",scope.partition_key.is_some(),reqwest::Url::parse(expected).unwrap().scheme(),b.call("browsingContext.getTree",json!({"root":b.target,"maxDepth":0}),false).map(|v| v["contexts"].as_array().map(|a|a.len())));
+                panic!("isolated navigation failed");
+            }
+            println!("namespace {index} navigation succeeded");
+            if std::env::var_os("NODECLOAK_DIAGNOSTIC_CODEC").is_some() {
+                let probe = b.eval("(async()=>{try{await __ncSessionCodec.exportOrigin();return {ok:true};}catch(e){const codes=['NC_LIMIT','NC_UNSUPPORTED_VALUE','non-exportable CryptoKey','NC_STORAGE_BLOCKED','NC_INVALID_GRAPH'];return {ok:false,code:codes.includes(e.message)?e.message:'unknown',securityError:e.name==='SecurityError'};}})()").unwrap();
+                println!("namespace {index} codec probe: {probe}");
+                assert_eq!(probe["ok"], true, "namespace {index} codec failed: {probe}");
+            }
+        }
+        b.close().unwrap();
+    }
+    #[test]
+    #[ignore = "Read-only source profile diagnostic; launches only a staged copy, never prints website data"]
     fn staged_profile_capture_diagnostic() {
         let browser = std::env::var("NODECLOAK_DIAGNOSTIC_BROWSER").unwrap();
         let source = PathBuf::from(std::env::var_os("NODECLOAK_DIAGNOSTIC_PROFILE").unwrap());
@@ -1319,6 +1399,35 @@ mod tests {
         if browser == "edge" && discovered.iter().any(|key| key.origin == "https://ntp.msn.com") {
             assert!(snapshot.origins.iter().any(|site| site.origin == "https://ntp.msn.com"), "NTP storage was dropped");
         }
+    }
+    #[test]
+    #[ignore = "Offline installed Firefox protected-web storage roundtrip with synthetic data"]
+    fn installed_firefox_mozilla_web_storage_roundtrip() {
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let profile = dir.path().join("firefox-storage");
+        std::fs::create_dir_all(&profile).unwrap();
+        let original = b"user_pref(\"browser.tabs.remote.separatePrivilegedMozillaWebContentProcess\",true);\nuser_pref(\"browser.tabs.remote.separatedMozillaDomains\",\"addons.mozilla.org,accounts.firefox.com\");\nuser_pref(\"custom.sentinel\",true);\n";
+        std::fs::write(profile.join("user.js"), original).unwrap();
+        let original_prefs = b"user_pref(\"custom.prefs.sentinel\",\"keep\");\n";
+        std::fs::write(profile.join("prefs.js"), original_prefs).unwrap();
+        let input = Snapshot::parse(json!({"schema":1,"cookies":[],"origins":[
+            {"origin":"https://accounts.firefox.com","state":{"local":[["synthetic-account","keep-account"]],"databases":[]}},
+            {"origin":"https://addons.mozilla.org","state":{"local":[["synthetic-addon","keep-addon"]],"databases":[]}}
+        ]})).unwrap();
+        let restored = restore_profile("firefox", &profile, &input).unwrap();
+        assert_eq!(restored.bytes().unwrap(), input.bytes().unwrap());
+        assert_eq!(std::fs::read(profile.join("user.js")).unwrap(), original);
+        assert_eq!(std::fs::read(profile.join("prefs.js")).unwrap(), original_prefs);
+        let captured = export_profile("firefox", &profile).unwrap();
+        assert_eq!(captured.bytes().unwrap(), input.bytes().unwrap());
+        assert_eq!(std::fs::read(profile.join("user.js")).unwrap(), original);
+        assert_eq!(std::fs::read(profile.join("prefs.js")).unwrap(), original_prefs);
+        let stage = Stage::new("firefox", &profile).unwrap();
+        let mut browser = Browser::launch("firefox", &stage.path).unwrap();
+        browser.site(&SiteKey{origin:"https://large.example".into(),partition_key:None}).unwrap();
+        browser.eval("(()=>{localStorage.setItem('large-cache','x'.repeat(1048577));return true;})()").unwrap();
+        assert_eq!(browser.codec("__ncSessionCodec.exportOrigin()").unwrap_err(), "网站存储超过同步容量限制，本机数据已保留");
+        browser.close().unwrap();
     }
     #[test]
     fn cookie_readback_rejects_changed_expiry_and_native_partition_attributes() {

@@ -245,7 +245,7 @@ fn local_launch_snapshot(
     match result {
         Ok(snapshot) => Ok(Some(snapshot)),
         Err(error) if allow_local_launch && owner && (error == browser_session::PARTITIONED_STORAGE_ERROR
-            || browser_session::capture_transport_failure(&error)) => {
+            || browser_session::capture_local_launch_failure(&error)) => {
             *last_error = Some(error);
             Ok(None)
         }
@@ -984,6 +984,12 @@ mod launch_tests {
     fn capture_transport_failure_only_allows_owner_local_launch() {
         for message in [
             "隔离浏览器连接中断", "隔离浏览器连接已关闭", "无法启动隔离浏览器", "无法连接隔离浏览器",
+            "无法进入隔离网站存储",
+            "无法进入隔离网站存储（Firefox；code=unknown error）",
+            "Firefox 隔离网站存储页面受特殊内容限制，已保留本机数据",
+            "网站存储超过同步容量限制，本机数据已保留",
+            "网站存储包含不可迁移的值，保留本机数据",
+            "隔离网站存储被浏览器阻止，本机数据已保留",
             "浏览器登录数据操作 Storage.getCookies 超时",
             "隔离浏览器连接中断（操作 Page.navigate，I/O kind=ConnectionReset, os_code=Some(10054)）",
         ] {
