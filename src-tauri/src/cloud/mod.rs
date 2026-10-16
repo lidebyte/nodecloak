@@ -16,3 +16,5 @@ pub mod sharing;
 pub mod session_sync;
 pub mod sync;
 pub mod vault;
+#[cfg(test)]
+mod sync_tolerance_tests;

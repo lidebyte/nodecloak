@@ -204,6 +204,15 @@ pub struct Conflict {
     pub fields: Vec<String>,
     pub remote_revision: u64,
 }
+impl Conflict {
+    /// Persist the original records for older clients; project ordinary waiting
+    /// conditions separately so only incompatible content asks for a choice.
+    pub fn waiting(&self) -> bool {
+        !self.fields.is_empty() && self.fields.iter().all(|field| matches!(field.as_str(),
+            "close_browser" | "concurrent_write" | "config_changed" | "lease_held"
+            | "lease_or_revision_changed" | "deletion_waiting_device"))
+    }
+}
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountState {

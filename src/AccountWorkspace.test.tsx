@@ -77,3 +77,11 @@ describe('account and sync screens',()=>{
   expect(html).not.toContain('应用选择');
  });
 });
+it('shows queued automatic sync separately from conflicts without forcing overwrite choices',()=>{
+ setLanguage('zh');
+ const status={account,unlocked:true,recoverySaved:true,setupComplete:true,autoSync:true,conflicts:[],waiting:[{localId:'one',cloudId:'two',name:'Waiting profile',kind:'session' as const,fields:['close_browser'],remoteRevision:2}]};
+ const html=renderToStaticMarkup(<AccountDialog cloud={controller(status)}/>);
+ expect(html).toContain('等待同步');expect(html).toContain('Waiting profile');expect(html).toContain('将自动重试');
+ expect(html).not.toContain('待处理冲突');expect(html).not.toContain('应用选择');
+ const settings=renderToStaticMarkup(<CloudSettings cloud={controller(status)}/>);expect(settings).toContain('等待自动同步');expect(settings).not.toContain('处理同步冲突');
+});

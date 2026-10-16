@@ -121,7 +121,12 @@ mod tests {
             c.disk.save(&c.root).unwrap();
         }
         sync::run(&mut a, &runtime).unwrap();
+        assert_eq!(a.disk.accounts[&a.account_id().unwrap()].bindings[&p.id].generation,0,
+            "a closed writer must release its lease after upload");
+        super::super::session_sync::prepare_launch(&mut b, &pb.id).unwrap();
         sync::run(&mut b, &runtime).unwrap();
+        assert_eq!(b.disk.accounts[&b.account_id().unwrap()].bindings[&pb.id].generation,0,
+            "a device that prepared but closed the profile must release its lease");
         let old_session = sync::fetch(&mut b, &cloud, "session").unwrap();
         let downloaded = super::super::browser_session::export_profile("firefox", &bpath).unwrap();
         assert_eq!(

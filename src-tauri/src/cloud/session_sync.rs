@@ -95,16 +95,38 @@ fn hash(s: &Snapshot) -> Result<String, String> {
     Ok(format!("{:x}", Sha256::digest(s.bytes()?.as_slice())))
 }
 pub fn lease(c: &mut Connection, b: &mut Binding, takeover: bool) -> Result<(), String> {
-    let v = c.request(
+    request_lease(c, b, takeover, false)
+}
+fn request_lease(c: &mut Connection, b: &mut Binding, takeover: bool, new_session: bool) -> Result<(), String> {
+    let mut body = json!({"takeover":takeover});
+    if new_session { body["newSession"] = json!(true); }
+    let result = c.request(
         Method::POST,
         &format!("/v1/objects/{}/lease", b.cloud_id),
-        Some(&json!({"takeover":takeover})),
-    )?;
+        Some(&body),
+    );
+    let v = match result {
+        // Old servers reject unknown input fields and do not support release,
+        // so their original timeout-based handoff remains safe and compatible.
+        Err(e) if new_session && e.contains("(400)") => c.request(Method::POST,
+            &format!("/v1/objects/{}/lease", b.cloud_id), Some(&json!({"takeover":takeover})))?,
+        other => other?,
+    };
     b.generation = v["generation"]
         .as_u64()
         .filter(|v| *v > 0)
         .ok_or("云端租约无效")?;
     Ok(())
+}
+fn release_lease(c: &mut Connection, b: &mut Binding) -> Result<(), String> {
+    if b.generation == 0 { return Ok(()); }
+    if c.request(Method::DELETE, &format!("/v1/objects/{}/lease", b.cloud_id),
+        Some(&json!({"generation":b.generation}))).ok()
+        .is_some_and(|reply| reply["released"].is_boolean())
+    {
+        b.generation = 0;
+    }
+    c.check_mcp_deadline()
 }
 fn conflict(
     c: &mut Connection,
@@ -235,7 +257,18 @@ pub(super) fn one(
     b: &mut Binding,
     remote: Option<&Object>,
 ) -> Result<(), String> {
-    reconcile(c, p, b, remote, false).map(|_| ())
+    reconcile(c, p, b, remote, false)?;
+    let account = c.account_id()?;
+    if b.generation > 0 && !b.session_dirty && b.pending_session.is_none()
+        && !c.disk.accounts[&account].conflicts.iter().any(|x| x.local_id == p.id)
+        && !profiles::running(&c.root, p)?
+    {
+        // Older servers and transient network failures retain the generation for
+        // the next automatic cycle; they must not turn a completed upload into a
+        // manual conflict or silently release a different device's fence.
+        release_lease(c, b)?;
+    }
+    Ok(())
 }
 
 fn local_launch_snapshot(
@@ -450,14 +483,9 @@ pub(crate) fn run_selected(
                 b.file_stamp = None;
                 b.session_dirty = false;
                 b.pending_session = None;
-                c.disk
-                    .accounts
-                    .get_mut(&account)
-                    .unwrap()
-                    .bindings
-                    .insert(id.clone(), b);
-                c.disk.save(&c.root)?;
             }
+            release_lease(c, &mut b)?;
+            c.disk.accounts.get_mut(&account).unwrap().bindings.insert(id.clone(), b);
             c.disk
                 .accounts
                 .get_mut(&account)
@@ -544,15 +572,15 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
     };
     let state = &c.disk.accounts[&account];
     if !state.setup_complete
-        || !state.session_sync
         || state.detached.contains(id)
         || !state.bindings.contains_key(id)
     {
         return Ok(());
     };
+    let session_sync = state.session_sync;
     let mut b = state.bindings[id].clone();
     if !state.auto_sync {
-        b.session_dirty = true;
+        if session_sync { b.session_dirty = true; }
         b.generation = 0;
         c.disk
             .accounts
@@ -562,7 +590,7 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             .insert(id.into(), b);
         return c.disk.save(root);
     }
-    let p = profiles::get(root, id, false)?;
+    let mut p = profiles::get(root, id, false)?;
     let mut remote_revision = 0;
     let result = (|| {
         c.refresh_vault()?;
@@ -593,9 +621,19 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             b.generation = 0;
             return Err("云端已删除此副本，本机配置和登录数据已保留。请在管理同步的待处理冲突中选择保留本地，或取消云端关联后再启动。".into());
         }
-        if !config_current || config_conflicted(c, &account, id) {
+        if !config_current {
+            sync::config_profile(c, id, config, &profiles::Runtime::default(), &std::sync::atomic::AtomicBool::new(false))?;
+            b = c.disk.accounts[&account].bindings[id].clone();
+            p = profiles::get(root, id, false)?;
+            if !config_conflicted(c, &account, id) {
+                c.disk.accounts.get_mut(&account).unwrap().conflicts.retain(|x|
+                    x.local_id != id || x.kind != "session" || x.fields != ["config_changed"]);
+            }
+        }
+        if config_conflicted(c, &account, id) {
             return Err("云端配置已变化，请先同步副本配置后再打开浏览器".into());
         }
+        if !session_sync { return Ok(()); }
         let remote = list
             .iter()
             .find(|o| o.kind == "session" && o.id == b.cloud_id)
@@ -617,7 +655,7 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             b.generation = 0;
             Ok(())
         } else {
-            lease(&mut c, &mut b, false)
+            request_lease(&mut c, &mut b, false, true)
         }
     })();
     let offline = result.as_ref().err().is_some_and(|e| {
@@ -633,7 +671,7 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             conflict(&mut c, id, &b, &p.name, "lease_held", remote_revision)?;
         }
     }
-    b.session_dirty = true;
+    if session_sync { b.session_dirty = true; }
     c.disk
         .accounts
         .get_mut(&account)

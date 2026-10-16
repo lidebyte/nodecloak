@@ -2,7 +2,7 @@ import {invoke} from '@tauri-apps/api/core';
 import {native} from './bridge';
 export interface Account {id:string;name:string;email:string;avatar:string;googleLinked?:boolean;hasPassword?:boolean;twoFactorEnabled?:boolean;recentAuth?:boolean}
 export interface CloudConflict {localId:string;cloudId:string;name:string;kind:'config'|'session'|'running';fields:string[];remoteRevision:number}
-export interface CloudStatus {account:Account|null;endpoint?:string;deviceId?:string;deviceName?:string;fingerprint?:string;vaultCode?:string|null;approvedNeedsVerification?:boolean;initialized?:boolean;unlocked?:boolean;recoverySaved?:boolean;setupComplete?:boolean;autoSync?:boolean;sessionSync?:boolean;pullCloud?:boolean;lastSync?:string|null;lastError?:string|null;conflicts?:CloudConflict[];bindings?:{localId:string;cloudId:string;sessionPending:boolean;configPending:boolean}[]}
+export interface CloudStatus {account:Account|null;endpoint?:string;deviceId?:string;deviceName?:string;fingerprint?:string;vaultCode?:string|null;approvedNeedsVerification?:boolean;initialized?:boolean;unlocked?:boolean;recoverySaved?:boolean;setupComplete?:boolean;autoSync?:boolean;sessionSync?:boolean;pullCloud?:boolean;lastSync?:string|null;lastError?:string|null;conflicts?:CloudConflict[];waiting?:CloudConflict[];bindings?:{localId:string;cloudId:string;sessionPending:boolean;configPending:boolean}[]}
 export interface CloudDevice {id:string;name:string;publicKey:string;fingerprint:string;status:'pending'|'approved'|'revoked';createdAt:string}
 export interface CloudPreview {profiles:{id:string;name:string;browser:string;deleted:boolean;revision:number}[];localProfiles:{id:string;name:string;browser:string;eligible:boolean;selected:boolean}[]}
 export type CloudAction=

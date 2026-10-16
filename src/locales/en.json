@@ -1463,5 +1463,15 @@
   "启动路径编码无效": "The startup path encoding is invalid.",
   "无法读取系统启动项禁用状态": "Unable to read the system startup item override.",
   "系统启动项禁用状态格式无效": "The system startup item override is invalid.",
-  "请在系统设置 → 通用 → 登录项中允许 NodeCloak 自动启动。": "Allow NodeCloak in System Settings → General → Login Items."
+  "请在系统设置 → 通用 → 登录项中允许 NodeCloak 自动启动。": "Allow NodeCloak in System Settings → General → Login Items.",
+  "等待同步": "Waiting to sync",
+  "等待自动同步": "Waiting for automatic sync",
+  "将自动重试，无需手动选择保留哪一份。": "Sync will retry automatically. No manual choice is needed.",
+  "开启自动同步或点击“立即同步”后重试。": "Enable automatic sync or select Sync now to retry.",
+  "副本关闭后将自动同步。": "Sync resumes after the profile closes.",
+  "其他设备正在更新，将自动合并重试。": "Another device is updating. Changes will be merged and retried automatically.",
+  "配置更新后将自动继续同步。": "Sync resumes automatically after the configuration updates.",
+  "另一台设备正在使用，结束后将自动同步；接管会影响该设备的后续同步。": "Another device is using this profile. Sync resumes when it finishes. Taking over affects its later sync.",
+  "等待其他设备完成同步后自动重试。": "Sync retries automatically after the other device finishes.",
+  "等待另一台设备结束使用后完成删除。": "Deletion completes after the other device finishes using the profile."
 }

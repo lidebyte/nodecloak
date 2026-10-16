@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "偏好设置新增“开机自动启动”，首次运行默认开启，可随时关闭；关闭后保留你的选择。 / Adds Launch at login in Preferences, enabled on first run. Turning it off preserves your choice.",
-  "电脑环境和环境概览直接显示上次检测结果及时间，点击“重新检测”获取最新结果。 / Computer environment and Environment overview show the last results and check time immediately. Use Check again for fresh results.",
-  "修复记录独立加载并保留最近读取的记录，点击“刷新记录”更新；修复或撤销后，相关记录同步更新。 / Repair history loads independently and keeps recently loaded records. Refresh history reloads records; repairs and restores update related history."
+  "多设备同步会自动合并普通配置变更，并在同时上传时自动重试，减少不必要的冲突提示。 / Multi-device sync merges compatible configuration changes and retries simultaneous uploads, reducing unnecessary conflict prompts.",
+  "副本关闭并完成同步后自动释放占用，切换到另一台设备使用更顺畅。 / Profiles release their sync lock after closing and syncing, making device handoff smoother.",
+  "同步界面分别显示“等待同步”和需要处理的数据分歧；等待项自动重试，本机登录数据继续保留。 / Sync separates waiting items from conflicting data. Waiting items retry automatically, while local website login data is preserved."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

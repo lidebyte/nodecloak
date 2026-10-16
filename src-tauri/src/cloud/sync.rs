@@ -506,6 +506,73 @@ fn conflict(
             remote_revision: rev,
         })
 }
+/// Reconcile one configuration; an optimistic CAS race is retried using fresh
+/// cloud data, without applying an uncommitted merge to the local profile.
+pub(super) fn config_profile(
+    c: &mut Connection,
+    id: &str,
+    remote: Option<&Object>,
+    runtime: &profiles::Runtime,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let account = c.account_id()?;
+    let mut b = c.disk.accounts[&account].bindings[id].clone();
+    let p = profiles::load(&c.root)?.into_iter().find(|p| p.id == id);
+    let lv = p.as_ref().map(Document::export).transpose()?.as_ref().map(value).transpose()?;
+    let bv = b.baseline.as_ref().map(|o| document(c, o)).transpose()?.as_ref().map(value).transpose()?;
+    let name = p.as_ref().map(|p| p.name.as_str()).unwrap_or("已删除副本");
+    let mut ro = remote.map(|o| fetch(c, &o.id, "config")).transpose()?;
+    c.disk.accounts.get_mut(&account).unwrap().conflicts.retain(|x| x.local_id != id || x.kind == "session");
+    for attempt in 0..3 {
+        c.check_mcp_deadline()?;
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("CANCELLED".into());
+        }
+        let rv = ro.as_ref().map(|o| document(c, o)).transpose()?.as_ref().map(value).transpose()?;
+        match decide(bv.as_ref(), lv.as_ref(), rv.as_ref()) {
+            Decision::Conflict(fields) => {
+                conflict(&account, c, id, &b, name, "config", fields, ro.as_ref().map(|o|o.revision).unwrap_or(0));
+            }
+            Decision::Unchanged => {
+                if ro.is_some() { b.baseline = ro; }
+                b.pending_config = None;
+            }
+            Decision::Apply(v) => {
+                let doc = Document::parse(v)?;
+                if doc.deleted && p.as_ref().is_some_and(|p| profiles::running(&c.root,p).unwrap_or(true)) {
+                    b.pending_config = ro.clone();
+                    conflict(&account,c,id,&b,name,"running",vec!["close_browser".into()],ro.as_ref().map(|o|o.revision).unwrap_or(0));
+                } else {
+                    apply(c,id,&doc,runtime)?;
+                    b.baseline = ro;
+                    b.pending_config = None;
+                }
+            }
+            Decision::Upload(v) => {
+                let doc = Document::parse(v.clone())?;
+                let restore = b.baseline.as_ref().is_some_and(|o|o.deleted) && !doc.deleted;
+                match put_document(c,&b,&doc,ro.as_ref(),restore) {
+                    Ok(o) => {
+                        if lv.as_ref() != Some(&v) { apply(c,id,&doc,runtime)?; }
+                        b.baseline = Some(o);
+                        b.pending_config = None;
+                    }
+                    Err(e) if e.contains("revision_conflict") => {
+                        if attempt < 2 {
+                            ro = Some(fetch(c,&b.cloud_id,"config")?);
+                            continue;
+                        }
+                        conflict(&account,c,id,&b,name,"config",vec!["concurrent_write".into()],ro.as_ref().map(|o|o.revision).unwrap_or(0));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        break;
+    }
+    c.disk.accounts.get_mut(&account).unwrap().bindings.insert(id.into(),b);
+    c.disk.save(&c.root)
+}
 pub fn run(c: &mut Connection, runtime: &profiles::Runtime) -> Result<(), String> {
     run_selected(c, runtime, None, &std::sync::atomic::AtomicBool::new(false))
 }
@@ -558,7 +625,7 @@ pub(crate) fn run_selected(
         .retain(|x| x.kind == "session" || selected.is_some_and(|ids| !ids.contains(&x.local_id)));
     c.disk.save(&c.root)?;
     let bindings = c.disk.accounts[&account].bindings.clone();
-    for (id, mut b) in bindings {
+    for (id, b) in bindings {
         if selected.is_some_and(|ids| !ids.contains(&id)) {
             continue;
         }
@@ -572,101 +639,7 @@ pub(crate) fn run_selected(
         if c.disk.accounts[&account].detached.contains(&id) {
             continue;
         }
-        let p = local.iter().find(|p| p.id == id);
-        let lv = p
-            .map(Document::export)
-            .transpose()?
-            .as_ref()
-            .map(value)
-            .transpose()?;
-        let bv = b
-            .baseline
-            .as_ref()
-            .map(|o| document(c, o))
-            .transpose()?
-            .as_ref()
-            .map(value)
-            .transpose()?;
-        let ro = remote
-            .get(&b.cloud_id)
-            .map(|o| fetch(c, &o.id, "config"))
-            .transpose()?;
-        let rv = ro
-            .as_ref()
-            .map(|o| document(c, o))
-            .transpose()?
-            .as_ref()
-            .map(value)
-            .transpose()?;
-        let name = p.map(|p| p.name.as_str()).unwrap_or("已删除副本");
-        match decide(bv.as_ref(), lv.as_ref(), rv.as_ref()) {
-            Decision::Conflict(fields) => conflict(
-                &account,
-                c,
-                &id,
-                &b,
-                name,
-                "config",
-                fields,
-                ro.as_ref().map(|o| o.revision).unwrap_or(0),
-            ),
-            Decision::Unchanged => {
-                if ro.is_some() {
-                    b.baseline = ro;
-                }
-            }
-            Decision::Apply(v) => {
-                let doc = Document::parse(v)?;
-                if doc.deleted && p.is_some_and(|p| profiles::running(&c.root, p).unwrap_or(true)) {
-                    b.pending_config = ro.clone();
-                    conflict(
-                        &account,
-                        c,
-                        &id,
-                        &b,
-                        name,
-                        "running",
-                        vec!["close_browser".into()],
-                        ro.as_ref().map(|o| o.revision).unwrap_or(0),
-                    );
-                } else {
-                    apply(c, &id, &doc, runtime)?;
-                    b.baseline = ro;
-                    b.pending_config = None;
-                }
-            }
-            Decision::Upload(v) => {
-                let doc = Document::parse(v.clone())?;
-                if lv.as_ref() != Some(&v) {
-                    apply(c, &id, &doc, runtime)?;
-                }
-                let restore = b.baseline.as_ref().is_some_and(|o| o.deleted) && !doc.deleted;
-                match put_document(c, &b, &doc, ro.as_ref(), restore) {
-                    Ok(o) => {
-                        b.baseline = Some(o);
-                        b.pending_config = None
-                    }
-                    Err(e) if e.contains("revision_conflict") => conflict(
-                        &account,
-                        c,
-                        &id,
-                        &b,
-                        name,
-                        "config",
-                        vec!["concurrent_write".into()],
-                        ro.as_ref().map(|o| o.revision).unwrap_or(0),
-                    ),
-                    Err(e) => return Err(e),
-                }
-            }
-        };
-        c.disk
-            .accounts
-            .get_mut(&account)
-            .unwrap()
-            .bindings
-            .insert(id, b);
-        c.disk.save(&c.root)?;
+        config_profile(c, &id, remote.get(&b.cloud_id), runtime, cancel)?;
     }
     if selected.is_none() && c.disk.accounts[&account].pull_cloud {
         for o in remote.values() {

@@ -212,6 +212,7 @@ func New(db *pgxpool.Pool, c Config, m Mailer) *Server {
 	s.mux.HandleFunc("GET /v1/objects/{id}", s.auth(true, s.getObject))
 	s.mux.HandleFunc("PUT /v1/objects/{id}", s.auth(true, s.putObject))
 	s.mux.HandleFunc("POST /v1/objects/{id}/lease", s.auth(true, s.lease))
+	s.mux.HandleFunc("DELETE /v1/objects/{id}/lease", s.auth(true, s.releaseLease))
 	s.registerAdmin()
 	s.registerSharing()
 	s.registerMCP()
@@ -1122,6 +1123,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, i identity) {
 func (s *Server) lease(w http.ResponseWriter, r *http.Request, i identity) {
 	var in struct {
 		Takeover bool `json:"takeover"`
+		NewSession bool `json:"newSession"`
 	}
 	if !decode(w, r, &in, 4096) {
 		return
@@ -1157,7 +1159,7 @@ func (s *Server) lease(w http.ResponseWriter, r *http.Request, i identity) {
 		reply(w, 409, map[string]any{"error": "lease_held", "owner": owner, "expiresAt": expires})
 		return
 	}
-	if !live || owner != i.Device {
+	if !live || owner != i.Device || in.NewSession {
 		generation++
 	}
 	e = tx.QueryRow(r.Context(), `INSERT INTO leases(account_id,object_id,owner,generation,expires_at) VALUES($1,$2,$3,$4,now()+interval '5 minutes') ON CONFLICT(account_id,object_id) DO UPDATE SET owner=$3,generation=$4,expires_at=now()+interval '5 minutes' RETURNING expires_at`, i.Account, id, i.Device, generation).Scan(&expires)

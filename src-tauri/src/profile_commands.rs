@@ -169,6 +169,7 @@ fn launch_with_purpose(
         );
     }
     crate::cloud::session_sync::before_launch(root, id)?;
+    let p = profiles::get(root, id, false)?;
     if automation || crate::regional::needs_control_for(&p.browser, &p.preferences) {
         runtime.1.stop(id);
         let mut keep_browser = false;
