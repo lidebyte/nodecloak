@@ -36,6 +36,10 @@ pub fn fields(id: &str) -> Result<Vec<(&'static str, Value)>, String> {
 }
 fn allowed(key: &str) -> bool {
     [
+        "devtools.debugger.remote-enabled",
+        "devtools.chrome.enabled",
+        "devtools.debugger.prompt-connection",
+        "devtools.debugger.force-local",
         "network.proxy.type",
         "network.proxy.http",
         "network.proxy.http_port",
@@ -70,6 +74,7 @@ fn allowed(key: &str) -> bool {
         "media.peerconnection.ice.no_host",
         "media.peerconnection.ice.proxy_only",
         "remote.prefs.recommended",
+        "marionette.port",
         "termsofuse.bypassNotification",
         "dom.file.createInChild",
     ]
@@ -143,6 +148,31 @@ const GEO_FIELDS: [&str; 4] = [
     "geo.provider.network.scan",
     "geo.provider.network.timeToWaitBeforeSending",
 ];
+/// Reserve originals before native runtime configuration for an IP-selected
+/// position. Do not publish placeholder coordinates while lookup is pending.
+pub(crate) fn reserve_geolocation(profile: &Path) -> Result<(), String> {
+    crate::platform::ensure_profile_closed(profile)?;
+    let file = profile.join("nodecloak-geolocation-original.json");
+    crate::profiles::guard_tree(&file)?;
+    if file.exists() { return Err("Firefox 原定位配置尚未恢复，请重试启动".into()); }
+    let values = GEO_FIELDS.into_iter().map(|key| snapshot(profile,key).map(|v|(key.to_owned(),v))).collect::<Result<Vec<_>,_>>()?;
+    crate::engine::atomic_write(&file,&serde_json::to_vec(&values).map_err(|_|"定位配置备份无效")?)
+}
+
+/// user.js is owned by this application and only read by Firefox at startup.
+/// Never rewrite Firefox-owned prefs.js while a browser is running.
+pub(crate) fn restore_user_preferences(profile: &Path, changes: &[(String, Value, Value)]) -> Result<(), String> {
+    let file = profile.join("user.js");
+    let mut text = document(&file)?;
+    for (key,before,after) in changes {
+        if !allowed(key) || before.get("user").is_none() || after.get("user").is_none()
+            || value_in(&text,key)? != (!after["user"].is_null()).then(||after["user"].clone()) {
+            return Err("Firefox 启动配置发生变化，原文件已保留".into());
+        }
+        text = replace(&text,key,&before["user"]);
+    }
+    crate::engine::atomic_write(&file,text.as_bytes())
+}
 /// Replace only Firefox's session-random PNG chunk while stable mode is on.
 /// Preserve all unrelated baseline protections and restore both preference files.
 pub fn prepare_stable_canvas(profile: &Path, enabled: bool) -> Result<(), String> {

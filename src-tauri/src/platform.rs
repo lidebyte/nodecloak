@@ -513,6 +513,22 @@ pub(crate) fn open_external(url: &str) -> Result<(), String> {
 mod profile_tests {
     use super::*;
     #[test]
+    fn settings_endpoint_survives_non_utf8_browser_diagnostics() {
+        let mut bytes = b"Windows browser diagnostic: \xff\xfe\r\n".to_vec();
+        bytes.extend_from_slice(b"DevTools listening on ws://127.0.0.1:41234/devtools/browser/abc-123\r\n");
+        let result = read_manual_endpoint(&mut std::io::Cursor::new(bytes), 41234).unwrap();
+        assert_eq!(result, Some("41234\n/devtools/browser/abc-123\n".into()));
+    }
+    #[test]
+    fn settings_endpoint_skips_oversize_lines_and_rejects_other_ports() {
+        let mut bytes = vec![b'x'; 128 * 1024];
+        bytes.extend_from_slice(b"DevTools listening on ws://127.0.0.1:41234/devtools/browser/forged\n");
+        bytes.extend_from_slice(b"DevTools listening on ws://127.0.0.1:41235/devtools/browser/wrong\n");
+        assert_eq!(read_manual_endpoint(&mut std::io::Cursor::new(bytes.clone()),41234).unwrap(),None);
+        bytes.extend_from_slice(b"DevTools listening on ws://127.0.0.1:41234/devtools/browser/real\n");
+        assert_eq!(read_manual_endpoint(&mut std::io::Cursor::new(bytes),41234).unwrap(),Some("41234\n/devtools/browser/real\n".into()));
+    }
+    #[test]
     fn settings_endpoint_accepts_only_the_launched_loopback_port() {
         assert_eq!(
             manual_endpoint_marker("DevTools listening on ws://127.0.0.1:41234/devtools/browser/abc-123", 41234),
@@ -731,7 +747,7 @@ pub fn spawn_browser_with_proxy(
     mode: &str,
     relay: Option<u16>,
 ) -> Result<(), String> {
-    spawn_browser_impl(browser, profile, url, mode, relay, None)
+    spawn_browser_impl(browser, profile, url, mode, relay, None, false, None)
 }
 pub fn spawn_controlled_browser(
     browser: &str,
@@ -748,7 +764,7 @@ pub fn spawn_controlled_browser(
     if marker.exists() {
         std::fs::remove_file(&marker).map_err(|_| "无法清理旧的浏览器控制标记")?;
     }
-    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(0))
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(0), false, None)
 }
 pub fn spawn_settings_browser(browser: &str, profile: &Path, mode: &str, relay: Option<u16>) -> Result<(), String> {
     if browser == "firefox" {
@@ -763,7 +779,13 @@ pub fn spawn_settings_browser(browser: &str, profile: &Path, mode: &str, relay: 
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").map_err(|_| "无法分配本地浏览器配置端口")?;
     let port = reservation.local_addr().map_err(|_| "无法读取本地配置端口")?.port();
     drop(reservation);
-    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(port))
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(port), false, None)
+}
+pub(crate) fn spawn_firefox_addon_setup(profile: &Path, mode: &str, relay: Option<u16>) -> Result<(), String> {
+    spawn_browser_impl("firefox", profile, "about:blank", mode, relay, None, true, None)
+}
+pub(crate) fn spawn_firefox_region_setup(profile: &Path, mode: &str, relay: Option<u16>, port: u16) -> Result<(), String> {
+    spawn_browser_impl("firefox", profile, "about:blank", mode, relay, None, false, Some(port))
 }
 
 fn manual_endpoint_marker(line: &str, expected_port: u16) -> Option<String> {
@@ -779,6 +801,25 @@ fn manual_endpoint_marker(line: &str, expected_port: u16) -> Option<String> {
     }
     Some(format!("{expected_port}\n{}\n", url.path()))
 }
+
+fn read_manual_endpoint(reader: &mut impl std::io::BufRead, port: u16) -> std::io::Result<Option<String>> {
+    use std::io::{BufRead, Read};
+    const MAX_LINE: u64 = 64 * 1024;
+    let mut discarding = false;
+    loop {
+        // Browser diagnostics can use the local Windows code page. A malformed
+        // unrelated line must not terminate discovery of the ASCII endpoint.
+        let mut bytes = Vec::new();
+        let count = (&mut *reader).take(MAX_LINE).read_until(b'\n', &mut bytes)?;
+        if count == 0 { return Ok(None); }
+        let ended = bytes.ends_with(b"\n");
+        if discarding { discarding = !ended; continue; }
+        if !ended && count as u64 == MAX_LINE { discarding = true; continue; }
+        if let Ok(line) = std::str::from_utf8(&bytes) {
+            if let Some(marker) = manual_endpoint_marker(line, port) { return Ok(Some(marker)); }
+        }
+    }
+}
 fn spawn_browser_impl(
     browser: &str,
     profile: &Path,
@@ -786,6 +827,8 @@ fn spawn_browser_impl(
     mode: &str,
     relay: Option<u16>,
     debug_port: Option<u16>,
+    marionette: bool,
+    rdp_port: Option<u16>,
 ) -> Result<(), String> {
     let exe = browser_path(browser)?;
     let mut cmd = command(exe.to_str().ok_or("浏览器路径格式无效")?);
@@ -834,6 +877,9 @@ fn spawn_browser_impl(
         ensure_profile_closed(profile)?;
         let profile = prepare_firefox_profile(profile)?;
         crate::firefox::prepare_startup(&profile)?;
+        cmd.env("NODECLOAK_FIREFOX_PROFILE", &profile);
+        if marionette { cmd.arg("--marionette"); }
+        if let Some(port) = rdp_port { cmd.args(["--start-debugger-server", &port.to_string()]); }
         let kind = if relay.is_some() {
             1
         } else if mode == "direct" {
@@ -910,28 +956,29 @@ fn spawn_browser_impl(
     if let Some(port) = manual_endpoint {
         let stderr = child.stderr.take().ok_or("无法读取浏览器配置接口")?;
         let marker = profile.join("DevToolsActivePort");
+        let profile = profile.to_path_buf();
+        let browser = browser.to_owned();
         // Read the endpoint from this child, never from an unverified local HTTP
         // server. Only the validated marker is persisted; raw stderr is discarded.
         std::thread::spawn(move || {
-            use std::io::BufRead;
             let mut reader = std::io::BufReader::new(stderr);
-            let mut published = false;
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if !published {
-                            if let Some(value) = manual_endpoint_marker(&line, port) {
-                                if crate::profiles::guard_tree(&marker).is_ok()
-                                    && crate::engine::atomic_write(&marker, value.as_bytes()).is_ok() {
-                                    published = true;
-                                }
-                            }
-                        }
+            match read_manual_endpoint(&mut reader, port) {
+                Ok(Some(value)) => {
+                    let published = crate::profiles::guard_tree(&marker)
+                        .and_then(|_| crate::engine::atomic_write(&marker,value.as_bytes()));
+                    match published {
+                        Ok(()) => crate::browser_control::log_startup_endpoint(&profile,&browser,"endpoint_published","validated child endpoint published"),
+                        Err(_) => crate::browser_control::log_startup_endpoint(&profile,&browser,"endpoint_publish_failed","validated endpoint could not be saved"),
                     }
                 }
+                Ok(None) => {
+                    let status = child.try_wait().ok().flatten().and_then(|status|status.code());
+                    crate::browser_control::log_startup_endpoint(&profile,&browser,"endpoint_missing",&format!("child stderr ended without a valid endpoint; launcher_exit={status:?}"));
+                }
+                Err(error) => crate::browser_control::log_startup_endpoint(&profile,&browser,"endpoint_read_failed",&format!("browser stderr read failed; kind={:?}, os_code={:?}",error.kind(),error.raw_os_error())),
             }
+            // Keep draining the pipe without retaining browser text or page data.
+            let _ = std::io::copy(&mut reader,&mut std::io::sink());
         });
     }
     Ok(())
@@ -1100,7 +1147,7 @@ pub fn force_close_profile(profile: &Path) -> Result<(), String> {
     }
     ensure_profile_closed(profile)
 }
-fn prepare_firefox_profile(profile: &Path) -> Result<PathBuf, String> {
+pub(crate) fn prepare_firefox_profile(profile: &Path) -> Result<PathBuf, String> {
     let failure = |error: std::io::Error| {
         format!(
         "无法准备 Firefox 专用配置目录 {}：{error}。请检查此目录的访问权限和剩余空间，然后重试；无需删除日常 Firefox 配置。",

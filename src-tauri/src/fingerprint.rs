@@ -13,6 +13,17 @@ pub struct Settings {
     pub audio_noise: bool,
     pub media_noise: bool,
 }
+impl Settings {
+    /// A persisted seed alone does not require script injection or control.
+    pub fn requires_injection(&self) -> bool {
+        self.enabled
+            && (self.canvas_noise
+                || self.font_noise
+                || self.webgl_noise
+                || self.audio_noise
+                || self.media_noise)
+    }
+}
 pub fn seed() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| "系统随机数不可用")?;

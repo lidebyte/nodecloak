@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "多设备同步会自动合并普通配置变更，并在同时上传时自动重试，减少不必要的冲突提示。 / Multi-device sync merges compatible configuration changes and retries simultaneous uploads, reducing unnecessary conflict prompts.",
-  "副本关闭并完成同步后自动释放占用，切换到另一台设备使用更顺畅。 / Profiles release their sync lock after closing and syncing, making device handoff smoother.",
-  "同步界面分别显示“等待同步”和需要处理的数据分歧；等待项自动重试，本机登录数据继续保留。 / Sync separates waiting items from conflicting data. Waiting items retry automatically, while local website login data is preserved."
+  "改善 Firefox 稳定指纹与网站登录的兼容性，日常手动使用与 MCP 自动化分别运行。 / Improves Firefox stable-fingerprint compatibility with website sign-in and keeps manual browsing separate from MCP automation.",
+  "修复 Firefox 使用自定义时区等区域设置时，启动页面被空白页覆盖、等待超时的问题。 / Fixes blank-page replacement and startup timeouts when Firefox uses custom time zones or regional settings.",
+  "改善浏览器启动状态检测，明确区分指纹初始化与页面检测失败，并保留分阶段诊断记录。 / Improves browser startup detection, distinguishes fingerprint initialization from page-readiness failures, and retains diagnostic stages."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

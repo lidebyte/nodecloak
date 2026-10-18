@@ -1168,7 +1168,7 @@ pub fn views(root: &Path, runtime: &Runtime) -> Result<Vec<ProfileView>, String>
             has_password: p.proxy.credential_ref.is_some(),
             proxy_ready: !p.active_proxy.as_ref().unwrap_or(&p.proxy).custom()
                 || relays.contains_key(&p.id),
-            regional_ready: !crate::regional::needs_control_for(
+            regional_ready: !crate::regional::manual_needs_control_for(
                 &p.browser,
                 p.active_preferences.as_ref().unwrap_or(&p.preferences),
             ) || runtime.1.ready(&p.id),

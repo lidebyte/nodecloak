@@ -48,6 +48,7 @@ jobs:
       - run: npm test
       - run: npm run test:session-codec
       - run: node --test scripts/fingerprint.checks.mjs
+      - run: npm run test:firefox-extension
       - run: node --test scripts/mcp-page.checks.mjs
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -93,6 +94,13 @@ jobs:
         run: node scripts/collect-release-assets.mjs ${{ matrix.platform }}
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      - name: Verify native Firefox fingerprint and regional startup on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          NODECLOAK_TEST_HEADLESS_BROWSERS: '1'
+          NODECLOAK_TEST_FIREFOX_NATIVE_HOST: ${{ github.workspace }}/src-tauri/target/release/nodecloak
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked native_firefox_signed_fingerprint_launch_and_disable -- --ignored --nocapture --test-threads=1
       - name: Verify Start menu shortcuts on installs and updates
         if: runner.os == 'Windows'
         run: node --test scripts/windows-shortcut-checks.mjs

@@ -2,7 +2,7 @@ import {invoke} from '@tauri-apps/api/core';
 import {native} from './bridge';
 import type {BrowserId,Check} from './domain';
 import type {SharedProfileGrant} from './profile-sharing';
-import {fingerprintDefaults,type FingerprintSettings} from './profile-fingerprint';
+import {fingerprintDefaults,fingerprintNeedsInjection,type FingerprintSettings} from './profile-fingerprint';
 export type ProxyMode='direct'|'system'|'http'|'https'|'socks5';
 export interface LocalProxy {mode:'http'|'https'|'socks5';host:string;port:number}
 export interface ProxyConfig {mode:ProxyMode;host:string;port:number;username:string;credentialRef?:string|null;preProxy?:LocalProxy|null;apiUrl?:string|null}
@@ -12,7 +12,7 @@ export interface IpRegion {ip:string;country:string;city:string;language:string;
 export interface ResolvedRegion {language:string;timezone:string|null;latitude:number|null;longitude:number|null;accuracy:number;ipRegion:IpRegion|null}
 export const regionalDefaults=():RegionalSettings=>({enabled:false,languageMode:'custom',timezoneMode:'system',timezone:'UTC',locationMode:'system',latitude:1.3521,longitude:103.8198,accuracy:100});
 export const needsRegionalControl=(p:Preferences)=>p.regional.languageMode==='ip'||p.regional.timezoneMode!=='system'||p.regional.locationMode!=='system'||p.advanced.hardwareConcurrency>0||p.advanced.viewportWidth>0;
-export const requiresBrowserControl=(browser:BrowserId,p:Preferences)=>Boolean(p.fingerprint?.enabled)||p.regional.languageMode==='ip'||p.regional.timezoneMode!=='system'||p.regional.locationMode!=='system'||p.advanced.viewportWidth>0||browser!=='firefox'&&p.advanced.hardwareConcurrency>0;
+export const requiresBrowserControl=(browser:BrowserId,p:Preferences)=>browser!=='firefox'&&(fingerprintNeedsInjection(p.fingerprint)||needsRegionalControl(p));
 export interface AdvancedSettings {notifications:PermissionMode;location:PermissionMode|'allow';camera:PermissionMode;microphone:PermissionMode;blockImages:boolean;blockWebgl:boolean;resistFingerprinting:boolean;doNotTrack:'inherit'|'on'|'off';webRtc:'inherit'|'default'|'public'|'proxy';blockWebgpu:boolean;blockSpeech:boolean;blockBattery:boolean;canvasProtection:boolean;hardwareConcurrency:number;viewportWidth:number;viewportHeight:number}
 export const advancedDefaults=():AdvancedSettings=>({notifications:'ask',location:'ask',camera:'ask',microphone:'ask',blockImages:false,blockWebgl:false,resistFingerprinting:false,doNotTrack:'inherit',webRtc:'inherit',blockWebgpu:false,blockSpeech:false,blockBattery:false,canvasProtection:false,hardwareConcurrency:0,viewportWidth:0,viewportHeight:0});
 export interface Preferences {language:string;privacy:boolean;fontRestriction:boolean;startupUrl:string;advanced:AdvancedSettings;regional:RegionalSettings;fingerprint?:FingerprintSettings}

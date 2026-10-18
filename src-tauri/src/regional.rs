@@ -54,7 +54,9 @@ pub struct ResolvedRegion {
     pub ip_region: Option<IpRegion>,
 }
 pub fn needs_control(p: &Preferences) -> bool {
-    p.fingerprint.as_ref().is_some_and(|f| f.enabled)
+    p.fingerprint
+        .as_ref()
+        .is_some_and(|f| f.requires_injection())
         || p.regional.language_mode == "ip"
         || p.regional.timezone_mode != "system"
         || p.regional.location_mode != "system"
@@ -62,12 +64,17 @@ pub fn needs_control(p: &Preferences) -> bool {
         || p.advanced.viewport_width > 0
 }
 pub fn needs_control_for(browser: &str, p: &Preferences) -> bool {
-    p.fingerprint.as_ref().is_some_and(|f| f.enabled)
+    p.fingerprint
+        .as_ref()
+        .is_some_and(|f| f.requires_injection())
         || p.regional.language_mode == "ip"
         || p.regional.timezone_mode != "system"
         || p.regional.location_mode != "system"
         || p.advanced.viewport_width > 0
         || (browser != "firefox" && p.advanced.hardware_concurrency > 0)
+}
+pub fn manual_needs_control_for(browser: &str, p: &Preferences) -> bool {
+    browser != "firefox" && needs_control_for(browser, p)
 }
 /// Compatibility for saved settings from before per-profile sources were removed.
 pub fn normalize_sources(p: &mut Preferences) -> bool {
@@ -328,6 +335,68 @@ pub fn resolve(p: &Preferences, ip: Option<IpRegion>) -> Result<ResolvedRegion, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn firefox_manual_noise_uses_the_signed_companion_without_losing_regional_requests() {
+        let mut p = Preferences::default();
+        p.fingerprint = Some(crate::fingerprint::fresh().unwrap());
+        assert!(!manual_needs_control_for("firefox", &p));
+        assert!(manual_needs_control_for("chrome", &p));
+        assert!(manual_needs_control_for("edge", &p));
+        assert!(needs_control_for("firefox", &p)); // Explicit MCP still applies settings.
+        p.regional.timezone_mode = "custom".into();
+        p.regional.timezone = "Asia/Tokyo".into();
+        assert!(!manual_needs_control_for("firefox", &p)); // Native per-context configuration, no WebDriver.
+        p.fingerprint = None;
+        p.regional.language_mode = "ip".into();
+        p.regional.location_mode = "ip".into();
+        p.advanced.viewport_width = 1280;
+        p.advanced.viewport_height = 800;
+        assert!(!manual_needs_control_for("firefox", &p));
+        assert!(manual_needs_control_for("chrome", &p));
+    }
+    #[test]
+    fn saved_seed_without_active_noise_does_not_require_browser_control() {
+        let mut p = Preferences::default();
+        let quiet = crate::fingerprint::Settings {
+            version: 1,
+            seed: "37".repeat(32),
+            enabled: true,
+            canvas_noise: false,
+            font_noise: false,
+            webgl_noise: false,
+            audio_noise: false,
+            media_noise: false,
+        };
+        p.fingerprint = Some(quiet.clone());
+        assert!(!needs_control(&p));
+        for browser in ["chrome", "edge", "firefox"] {
+            assert!(
+                !needs_control_for(browser, &p),
+                "{browser}: idle seed starts control"
+            );
+            for flag in 0..5 {
+                let mut active = quiet.clone();
+                match flag {
+                    0 => active.canvas_noise = true,
+                    1 => active.font_noise = true,
+                    2 => active.webgl_noise = true,
+                    3 => active.audio_noise = true,
+                    _ => active.media_noise = true,
+                }
+                p.fingerprint = Some(active.clone());
+                assert!(needs_control(&p));
+                assert!(needs_control_for(browser, &p));
+                active.enabled = false;
+                p.fingerprint = Some(active);
+                assert!(!needs_control_for(browser, &p));
+            }
+            p.fingerprint = Some(quiet.clone());
+            p.regional.timezone_mode = "custom".into();
+            p.regional.timezone = "Asia/Tokyo".into();
+            assert!(needs_control_for(browser, &p));
+            p.regional.timezone_mode = "system".into();
+        }
+    }
     #[test]
     fn firefox_native_hardware_limit_does_not_require_an_automation_connection() {
         let mut p = Preferences::default();

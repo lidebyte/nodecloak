@@ -31,6 +31,9 @@ describe('simplified regional settings',()=>{
   });
   it('explains the native-language fallback when IP matching enables automation',()=>{
     const draft=defaults();draft.preferences.fingerprint=undefined;draft.preferences.regional.languageMode='ip';
+    const firefox=renderToStaticMarkup(<ProfileRegion draft={draft} onChange={()=>{}} match={null} matching={false} onMatch={()=>{}}/>);
+    expect(firefox).not.toContain('自动化模式标记');
+    draft.browser='chrome';
     const html=renderToStaticMarkup(<ProfileRegion draft={draft} onChange={()=>{}} match={null} matching={false} onMatch={()=>{}}/>);
     expect(html).toContain('若网页验证反复失败，请改为自定义语言后重启副本');
     draft.preferences.regional.languageMode='custom';

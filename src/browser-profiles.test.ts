@@ -39,7 +39,7 @@ describe('browser profiles',()=>{
 
   it('uses Firefox native concurrency preferences without enabling its automation interface',async()=>{
     const api=await import('./browser-profiles');const prefs=api.defaults().preferences;prefs.fingerprint=undefined;prefs.advanced.hardwareConcurrency=4;
-    expect(api.requiresBrowserControl('firefox',prefs)).toBe(false);expect(api.requiresBrowserControl('chrome',prefs)).toBe(true);prefs.advanced.viewportWidth=1280;expect(api.requiresBrowserControl('firefox',prefs)).toBe(true);
+    expect(api.requiresBrowserControl('firefox',prefs)).toBe(false);expect(api.requiresBrowserControl('chrome',prefs)).toBe(true);prefs.advanced.viewportWidth=1280;expect(api.requiresBrowserControl('firefox',prefs)).toBe(false);
   });
   it('requires bounded hardware and viewport values and preserves them through save/copy',async()=>{
     const api=await import('./browser-profiles');const d=api.defaults();d.name='hardware';Object.assign(d.preferences.advanced,{hardwareConcurrency:4,viewportWidth:1280,viewportHeight:800});

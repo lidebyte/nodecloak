@@ -7,6 +7,7 @@ src-tauri/gen/
 .qa/
 *.log
 *.tsbuildinfo
+__pycache__/
 .DS_Store
 .env
 .env.*

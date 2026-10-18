@@ -29,6 +29,9 @@ mod startup_tests;
 pub(crate) fn log_capture_failure(path: &Path, browser: &str, attempt: usize, error: &str) {
     recovery::log(path, browser, "session_capture_failed", attempt, error);
 }
+pub(crate) fn log_startup_endpoint(path: &Path, browser: &str, event: &str, detail: &str) {
+    recovery::log(path, browser, event, 0, detail);
+}
 
 /// The caller opts into automation explicitly; profile settings never grant it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,7 +463,7 @@ pub(crate) fn endpoint(browser: &str, path: &Path) -> Result<String, String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("无法连接此副本的本地区域控制接口；请更新浏览器并重新启动".into())
+    Err("等待此副本的本地配置接口超时；请重新启动，诊断信息已记录到日志".into())
 }
 struct BrowserControl {
     diagnostic: Option<(PathBuf, String)>,
@@ -1755,7 +1758,8 @@ mod tests {
                             ("text/html", "<script>parent.postMessage({frame:{timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])}},'*')</script>".into())
                         } else if route.starts_with("/separation") {
                             ("text/html", r#"<!doctype html><title>Manual settings test</title><script>
-                            const main={webdriver:navigator.webdriver,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])};
+                            const main={webdriver:navigator.webdriver,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),cookie:document.cookie};
+                            if(location.search==='?store')document.cookie='nodecloak-fixture=kept; Max-Age=3600; SameSite=Lax';
                             const worker=new Promise(resolve=>{const w=new Worker('/separation-worker');w.onmessage=e=>{w.terminate();resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'worker timeout'}),10000)});
                             const frame=new Promise(resolve=>{addEventListener('message',e=>{if(e.data.frame)resolve(e.data.frame)});const f=document.createElement('iframe');f.src=location.origin.replace('127.0.0.1','localhost')+'/separation-frame';document.documentElement.append(f);setTimeout(()=>resolve({error:'frame timeout'}),10000)});
                             Promise.all([worker,frame]).then(([worker,frame])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({main,worker,frame}))));
@@ -1770,7 +1774,7 @@ mod tests {
                             ("text/html",r#"<script>const frame={hardware:navigator.hardwareConcurrency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset(),visibility:document.visibilityState};navigator.permissions.query({name:'geolocation'}).then(p=>frame.permission=p.state);let done=false;const send=geo=>{if(done)return;done=true;frame.geo=geo;frame.visibilityNow=document.visibilityState;parent.postMessage({frame},'*')};navigator.geolocation.getCurrentPosition(p=>send({latitude:p.coords.latitude,longitude:p.coords.longitude}),e=>send({error:e.code}),{timeout:8000});setTimeout(()=>send({error:'timeout'}),9000);</script>"#.into())
                         } else {
                             ("text/html",r#"<!doctype html><title>NodeCloak region verification</title><p>Verifying isolated browser settings</p><script>
-                    const snapshot=()=>({hardware:navigator.hardwareConcurrency,webdriver:navigator.webdriver,language:navigator.language,languages:[...navigator.languages],locale:Intl.DateTimeFormat().resolvedOptions().locale,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset()});
+                    const snapshot=()=>({hardware:navigator.hardwareConcurrency,webdriver:navigator.webdriver,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),language:navigator.language,languages:[...navigator.languages],locale:Intl.DateTimeFormat().resolvedOptions().locale,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,jan:new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),jul:new Date('2026-07-15T12:00:00Z').getTimezoneOffset()});
                     const first=snapshot();first.tag=location.pathname;first.visibility=document.visibilityState;first.focus=document.hasFocus();first.dnt=navigator.doNotTrack;first.width=innerWidth;first.height=innerHeight;first.webgl=!!document.createElement('canvas').getContext('webgl');window.progress={};
                     const privacy=(async()=>{first.webgpu=!!(navigator.gpu&&await navigator.gpu.requestAdapter());if(window.speechSynthesis){await new Promise(r=>setTimeout(r,300));first.voices=speechSynthesis.getVoices().length;}else first.voices=0;})();
                     const worker=new Promise(resolve=>{const w=new Worker(URL.createObjectURL(new Blob(['postMessage(('+snapshot.toString()+')())'],{type:'application/javascript'})));w.onmessage=e=>{w.terminate();window.progress.worker=e.data;resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'timeout'}),10000)});
@@ -1951,6 +1955,188 @@ mod tests {
         };
         browser.show();
         browser
+    }
+    #[test]
+    #[ignore = "Installs the signed companion in a disposable Firefox, then verifies real app launch and toggling"]
+    fn native_firefox_signed_fingerprint_launch_and_disable() {
+        assert!(std::env::var_os("NODECLOAK_TEST_FIREFOX_NATIVE_HOST").is_some(), "Set a standalone app native-host executable for this opt-in check");
+        struct Guard { path: PathBuf, root: tempfile::TempDir }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = platform::close_profile(&self.path);
+                let _ = platform::force_close_profile(&self.path);
+                #[cfg(windows)]
+                {
+                    use winreg::{RegKey, enums::*};
+                    let key_path = r"Software\Mozilla\NativeMessagingHosts\com.nodecloak.fingerprint";
+                    let owner = self.root.path().canonicalize().unwrap_or_else(|_| self.root.path().to_path_buf()).join("firefox-privacy/com.nodecloak.fingerprint.json");
+                    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+                    if let Ok(key) = hkcu.open_subkey_with_flags(key_path, KEY_READ | KEY_WOW64_64KEY) {
+                        let value: Result<String, _> = key.get_value("");
+                        if value.is_ok_and(|v| Path::new(&v) == owner) {
+                            drop(key);
+                            let _ = hkcu.delete_subkey_with_flags(key_path, KEY_WOW64_64KEY);
+                        }
+                    }
+                }
+            }
+        }
+        let fixture = Fixture::new();
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let prefs = Preferences { startup_url: fixture.url("/separation?store"), fingerprint: Some(crate::fingerprint::fresh().unwrap()), ..Preferences::default() };
+        let mut draft = Draft { name: "Signed privacy regression".into(), browser: "firefox".into(), notes: String::new(), tags: vec![], password: None, clear_password: false, proxy: ProxyConfig { mode: "direct".into(), ..ProxyConfig::default() }, preferences: prefs };
+        let p = profiles::create(&canonical, draft.clone(), None).unwrap();
+        let path = profiles::path(&canonical, &p).unwrap();
+        let _guard = Guard { path: path.clone(), root };
+        let runtime = profiles::Runtime::default();
+        let original_seed = p.preferences.fingerprint.as_ref().unwrap().seed.clone();
+        let switches = if std::env::var_os("NODECLOAK_TEST_REGIONS_ONLY").is_some() { vec![true] } else { vec![true,true,false,true] };
+        for (run, enabled) in switches.into_iter().enumerate() {
+            if run > 0 { draft.preferences.startup_url = fixture.url("/separation?read"); }
+            draft.preferences.fingerprint.as_mut().unwrap().enabled = enabled;
+            profiles::update(&canonical, &p.id, draft.clone()).unwrap();
+            crate::profile_commands::launch(&canonical, &p.id, "startup", &runtime).unwrap();
+            let report = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
+            assert_eq!(report["main"]["webdriver"], false, "manual Firefox is automated: {report}");
+            assert_eq!(report["main"]["marker"], enabled, "companion did not follow the saved switch: {report}");
+            assert_eq!(report["frame"]["marker"], enabled, "frame protection did not follow the saved switch: {report}");
+            if run > 0 { assert_eq!(report["main"]["cookie"], "nodecloak-fixture=kept", "installation/toggling lost persisted site data"); }
+            assert!(!runtime.1.ready(&p.id));
+            assert!(!runtime.1.automation_ready(&p.id));
+            assert_eq!(profiles::get(&canonical, &p.id, false).unwrap().preferences.fingerprint.as_ref().unwrap().seed, original_seed);
+            println!("Firefox signed app launch enabled={enabled}: first document/frame protected as requested; native webdriver=false");
+            platform::close_profile(&path).unwrap();
+        }
+        draft.preferences.regional.enabled = true;
+        draft.preferences.language = "de-DE,de,en".into();
+        draft.preferences.regional.timezone_mode = "custom".into();
+        draft.preferences.regional.timezone = "America/Los_Angeles".into();
+        draft.preferences.regional.location_mode = "custom".into();
+        draft.preferences.regional.latitude = 1.3521;
+        draft.preferences.regional.longitude = 103.8198;
+        draft.preferences.advanced.location = PermissionMode::Allow;
+        draft.preferences.advanced.hardware_concurrency = 4;
+        draft.preferences.advanced.viewport_width = 1000;
+        draft.preferences.advanced.viewport_height = 700;
+        for ip in [false, true] {
+            if ip {
+                draft.preferences.regional.language_mode = "ip".into();
+                draft.preferences.regional.timezone_mode = "ip".into();
+                draft.preferences.regional.location_mode = "ip".into();
+            }
+            draft.preferences.startup_url = fixture.url(if ip {"/ip-native"} else {"/custom-native"});
+            profiles::update(&canonical, &p.id, draft.clone()).unwrap();
+            crate::profile_commands::launch_with_lookup(&canonical, &p.id, "startup", &runtime, &fixture.url("/region")).unwrap();
+            let _ = platform::focus_profile(&path);
+            let report = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
+            println!("Firefox synthetic native region ip={ip}: {report}");
+            assert_eq!(report["webdriver"], false, "regional settings started WebDriver: {report}");
+            assert_eq!(report["marker"], true, "regional settings lost fingerprint protection: {report}");
+            assert_eq!(report["width"], 1000, "native viewport width: {report}");
+            assert_eq!(report["height"], 700, "native viewport height: {report}");
+            let (language,zone,jan,jul,lat,lng) = if ip {("ja-JP","Asia/Tokyo",-540,-540,35.68,139.69)} else {("de-DE","America/Los_Angeles",480,420,1.3521,103.8198)};
+            if report["geo"].get("error").is_some() {
+                // A manual native window cannot bypass Firefox's visibility
+                // requirement. The separate visible/headless native fixture
+                // verifies real coordinates, including popup and COOP cases.
+                assert_eq!(report["visibility"], "hidden", "visible location failed: {report}");
+                assert_eq!(report["geo"]["error"], 3, "unexpected location failure: {report}");
+                assert_eq!(report["permission"], "granted");
+                assert_eq!(report["language"],language);
+                assert_eq!(report["locale"],language);
+                assert!(report["header"].as_str().unwrap().starts_with(language));
+                for context in [&report,&report["worker"],&report["frame"]] {
+                    assert_eq!(context["timezone"],zone);assert_eq!(context["jan"],jan);assert_eq!(context["jul"],jul);
+                }
+            } else { check(&report,language,zone,jan,jul,lat,lng); }
+            assert!(!runtime.1.ready(&p.id));
+            platform::close_profile(&path).unwrap();
+            use base64::Engine;
+            let geo_snapshot = crate::firefox::snapshot(&path,"geo.provider.network.url").unwrap();
+            let uri = geo_snapshot["runtime"].as_str().unwrap();
+            let geo_bytes = base64::engine::general_purpose::STANDARD.decode(uri.split_once("base64,").unwrap().1).unwrap();
+            let native_provider:Value = serde_json::from_slice(&geo_bytes).unwrap();
+            assert_eq!(native_provider["location"]["lat"],lat);
+            assert_eq!(native_provider["location"]["lng"],lng);
+            for (key, expected) in [("devtools.chrome.enabled",Value::Null),("devtools.debugger.remote-enabled",Value::Null)] {
+                let values = crate::firefox::snapshot(&path,key).unwrap();
+                assert_eq!(values["user"], expected, "startup debugger preference leaked");
+                assert!(values["runtime"].is_null() || values["runtime"] == false, "runtime debugger preference leaked: {values}");
+            }
+            println!("Firefox native region ip={ip}: first document, worker/frame, native location configuration, viewport and fingerprint pass without WebDriver");
+        }
+        draft.preferences.startup_url = fixture.url("/never-release-on-failed-ip");
+        profiles::update(&canonical,&p.id,draft.clone()).unwrap();
+        let error = crate::profile_commands::launch_with_lookup(&canonical,&p.id,"startup",&runtime,&fixture.url("/bad-ip-provider")).unwrap_err();
+        assert!(error.contains("区域"), "unexpected lookup failure: {error}");
+        assert!(fixture.reports.recv_timeout(Duration::from_millis(500)).is_err(), "IP failure released target document");
+        platform::ensure_profile_closed(&path).unwrap();
+        draft.preferences.regional = crate::regional::RegionalSettings::default();
+        draft.preferences.advanced.viewport_width = 0;
+        draft.preferences.advanced.viewport_height = 0;
+        draft.preferences.startup_url = fixture.url("/separation?read");
+        profiles::update(&canonical,&p.id,draft.clone()).unwrap();
+        crate::profile_commands::launch(&canonical,&p.id,"startup",&runtime).unwrap();
+        let reset = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
+        assert_eq!(reset["main"]["webdriver"],false);
+        assert_eq!(reset["main"]["cookie"],"nodecloak-fixture=kept");
+        assert!(!path.join("nodecloak-geolocation-original.json").exists());
+        assert!(!path.join("nodecloak-firefox-region-debug-original.json").exists());
+        platform::close_profile(&path).unwrap();
+        // Built-in local diagnostics must not be redirected by an HTTP content
+        // principal: Firefox rejects HTTP -> file/about navigation.
+        let local_page = canonical.join("local-destination.html");
+        std::fs::write(&local_page, format!("<!doctype html><script>fetch({}+encodeURIComponent(JSON.stringify({{stage:'local-document',webdriver:navigator.webdriver}})))</script>", json!(fixture.url("/report?data=")))).unwrap();
+        crate::firefox_extension::launch(&path, reqwest::Url::from_file_path(&local_page).unwrap().as_str(), "direct", None).unwrap();
+        let report = fixture.reports.recv_timeout(Duration::from_secs(15)).expect("local destination was not opened");
+        assert_eq!(report["stage"], "local-document");
+        assert_eq!(report["webdriver"], false);
+    }
+    #[test]
+    #[ignore = "Starts a disposable Firefox through the app launch path with an idle fingerprint seed"]
+    fn native_firefox_idle_fingerprint_uses_normal_app_launch() {
+        struct ProfileGuard { path: PathBuf, _root: tempfile::TempDir }
+        impl Drop for ProfileGuard {
+            fn drop(&mut self) {
+                let _ = platform::close_profile(&self.path);
+                let _ = platform::force_close_profile(&self.path);
+            }
+        }
+        let fixture = Fixture::new();
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let seed = "37".repeat(32);
+        let prefs = Preferences {
+            startup_url: fixture.url("/separation"),
+            fingerprint: Some(crate::fingerprint::Settings {
+                version: 1, seed: seed.clone(), enabled: true,
+                canvas_noise: false, font_noise: false, webgl_noise: false,
+                audio_noise: false, media_noise: false,
+            }),
+            ..Preferences::default()
+        };
+        let draft = Draft {
+            name: "Idle fingerprint regression".into(), browser: "firefox".into(),
+            notes: String::new(), tags: vec![], password: None, clear_password: false,
+            proxy: ProxyConfig { mode: "direct".into(), ..ProxyConfig::default() },
+            preferences: prefs,
+        };
+        let p = profiles::create(&canonical, draft, None).unwrap();
+        let path = profiles::path(&canonical, &p).unwrap();
+        let _guard = ProfileGuard { path: path.clone(), _root: root };
+        let runtime = profiles::Runtime::default();
+        crate::profile_commands::launch(&canonical, &p.id, "startup", &runtime).unwrap();
+        let report = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
+        assert_eq!(report["main"]["webdriver"], false, "idle settings started WebDriver: {report}");
+        assert_eq!(report["main"]["marker"], false, "idle settings injected a script");
+        assert!(!runtime.1.ready(&p.id));
+        assert!(!runtime.1.automation_ready(&p.id));
+        let saved = profiles::get(&canonical, &p.id, false).unwrap();
+        assert!(saved.preferences.fingerprint.as_ref().unwrap().enabled);
+        assert_eq!(saved.preferences.fingerprint.as_ref().unwrap().seed, seed);
+        assert!(!path.join("WebDriverBiDiServer.json").exists());
+        println!("Firefox app launch: idle fingerprint seed retained; no WebDriver, preload or controller");
     }
     #[test]
     #[ignore = "Starts isolated installed browsers to verify manual fingerprint startup"]

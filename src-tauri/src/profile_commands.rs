@@ -136,7 +136,7 @@ fn launch_with_purpose(
             return Err("RESTART_REQUIRED: 此副本未启用 MCP 自动化，请关闭后通过 MCP 启动".into());
         }
         if destination == "startup" || destination == "focus" {
-            if crate::regional::needs_control_for(
+            if crate::regional::manual_needs_control_for(
                 &p.browser,
                 p.active_preferences.as_ref().unwrap_or(&p.preferences),
             ) && !runtime.1.ready(id)
@@ -145,7 +145,7 @@ fn launch_with_purpose(
             }
             return platform::focus_profile(&path);
         }
-        if crate::regional::needs_control_for(
+        if runtime.1.ready(id) || crate::regional::manual_needs_control_for(
             &p.browser,
             p.active_preferences.as_ref().unwrap_or(&p.preferences),
         ) {
@@ -170,8 +170,17 @@ fn launch_with_purpose(
     }
     crate::cloud::session_sync::before_launch(root, id)?;
     let p = profiles::get(root, id, false)?;
-    if automation || crate::regional::needs_control_for(&p.browser, &p.preferences) {
-        runtime.1.stop(id);
+    runtime.1.stop(id);
+    let port = tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
+    let use_extension = !automation && crate::firefox_extension::eligible(&p.browser, &p.preferences);
+    if p.browser == "firefox" {
+        crate::firefox_region::recover(&path)?;
+        if let Err(error) = crate::firefox_extension::prepare(root, &path, &p.preferences, use_extension, &p.proxy.mode, port) {
+            runtime.0.lock().map_err(|_| "代理管理器不可用")?.remove(id);
+            return Err(error);
+        }
+    }
+    if automation || crate::regional::manual_needs_control_for(&p.browser, &p.preferences) {
         let mut keep_browser = false;
         let result = (|| -> Result<(), String> {
             let mut resolved = crate::regional::initial(&p.preferences)?;
@@ -180,8 +189,6 @@ fn launch_with_purpose(
                     resolved.language = last.language.clone();
                 }
             }
-            let port =
-                tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
             for attempt in 0..2 {
                 let mut planned = p.clone();
                 if p.preferences.regional.language_mode == "ip" {
@@ -262,12 +269,19 @@ fn launch_with_purpose(
     if p.browser == "firefox" {
         crate::firefox::prepare_geolocation(&path, None)?;
     }
-    let port = tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
     let url = destination_url(root, &p, destination)?;
     profiles::mark_started(root, id, port, runtime.proxy_endpoint(id)?)?;
-    if let Err(error) =
+    let use_native_region = p.browser == "firefox" && crate::firefox_region::required(&p.preferences);
+    let result = if use_native_region {
+        crate::firefox_region::launch(&path, &url, &p.preferences, &p.proxy.mode, port, lookup_url)
+            .and_then(|region| profiles::remember_region(root, id, region))
+    } else if use_extension {
+        crate::firefox_extension::launch(&path, &url, &p.proxy.mode, port)
+    } else {
         platform::spawn_browser_with_proxy(&p.browser, &path, &url, &p.proxy.mode, port)
-    {
+    };
+    if let Err(error) = result {
+        if use_extension || use_native_region { let _ = platform::close_profile(&path); }
         runtime.0.lock().map_err(|_| "代理管理器不可用")?.remove(id);
         return Err(error);
     }
