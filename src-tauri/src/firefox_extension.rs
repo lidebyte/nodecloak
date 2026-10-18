@@ -81,6 +81,25 @@ fn pinned_package(root: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(windows)]
+fn registered_host_is_ours(existing: &Path, expected: &Path) -> bool {
+    let resolve = |path: &Path| -> Option<PathBuf> {
+        if !path.is_absolute() || crate::profiles::guard_tree(path).is_err() {
+            return None;
+        }
+        // Debug launches can store a \\?\ path while an installed app uses
+        // the ordinary spelling. Compare normalized paths, preserving the
+        // guard against symlinked or foreign registrations. A deleted manifest
+        // can be recreated only when its real parent and filename still match.
+        path.canonicalize()
+            .ok()
+            .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
+    };
+    resolve(existing)
+        .zip(resolve(expected))
+        .is_some_and(|(a, b)| a == b)
+}
+
 fn register_host(root: &Path) -> Result<(), String> {
     let folder = root.join("firefox-privacy");
     let path = folder.join("com.nodecloak.fingerprint.json");
@@ -106,7 +125,7 @@ fn register_host(root: &Path) -> Result<(), String> {
                         let existing: String = key
                             .get_value("")
                             .map_err(|_| "Firefox 扩展宿主已被其他配置占用")?;
-                        if Path::new(&existing) != path {
+                        if !registered_host_is_ours(Path::new(&existing), &path) {
                             return Err("Firefox 扩展宿主已被其他配置占用，原配置已保留".into());
                         }
                     }
@@ -122,7 +141,7 @@ fn register_host(root: &Path) -> Result<(), String> {
             let existing: String = key
                 .get_value("")
                 .map_err(|_| "Firefox 扩展宿主已被其他配置占用")?;
-            if Path::new(&existing) != path {
+            if !registered_host_is_ours(Path::new(&existing), &path) {
                 return Err("Firefox 扩展宿主注册发生变化，原配置已保留".into());
             }
         }
@@ -569,6 +588,28 @@ fn reply(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(windows)]
+    #[test]
+    fn same_windows_native_manifest_survives_normal_and_extended_path_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("com.nodecloak.fingerprint.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let extended = file.canonicalize().unwrap();
+        let normal = PathBuf::from(extended.to_string_lossy().strip_prefix(r"\\?\").unwrap());
+        assert!(registered_host_is_ours(&extended, &normal));
+        assert!(registered_host_is_ours(&normal, &extended));
+        let foreign = root.path().join("foreign.json");
+        std::fs::write(&foreign, b"{}").unwrap();
+        assert!(!registered_host_is_ours(&foreign, &normal));
+        std::fs::remove_file(&file).unwrap();
+        assert!(registered_host_is_ours(&extended, &normal));
+        assert!(!registered_host_is_ours(&foreign, &normal));
+        assert!(!registered_host_is_ours(
+            Path::new("com.nodecloak.fingerprint.json"),
+            &normal
+        ));
+    }
 
     #[test]
     fn missing_detection_page_is_distinguished_from_an_unready_extension() {
