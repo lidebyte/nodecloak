@@ -269,13 +269,8 @@ fn bootstrap(
             "Marionette:Quit",
             serde_json::json!({"flags":["eAttemptQuit"]}),
         )?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !crate::platform::profile_process_ids(&profile)?.is_empty() {
-            if Instant::now() >= deadline {
-                return Err("Firefox 扩展安装窗口尚未退出，请关闭后重试".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        crate::platform::wait_profile_closed(&profile, Duration::from_secs(10))
+            .map_err(|error| format!("Firefox 扩展安装窗口尚未退出，请关闭后重试：{error}"))?;
         Ok(())
     })();
     if result.is_err() {

@@ -620,6 +620,22 @@ mod profile_tests {
         assert!(ensure_profile_closed(dir.path()).is_ok());
         assert!(dir.path().join("parent.lock").exists());
     }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn closing_waits_for_the_profile_lock_after_the_main_process_exits() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(true)
+            .share_mode(0).open(dir.path().join("parent.lock")).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(lock);
+        });
+        let result = close_profile(dir.path());
+        release.join().unwrap();
+        assert!(result.is_ok(), "shutdown cleanup must finish within the normal close deadline: {result:?}");
+        assert!(ensure_profile_closed(dir.path()).is_ok());
+    }
     #[test]
     fn utc_offset_is_verified_even_when_timezone_name_matches() {
         assert!(verify_timezone_values("utc", &target_timezone("utc").unwrap(), 0).is_ok());
@@ -1102,13 +1118,23 @@ pub fn close_profile(profile: &Path) -> Result<(), String> {
     for pid in ids {
         output("/bin/kill", &["-TERM", &pid.to_string()])?;
     }
-    for _ in 0..16 {
-        if profile_process_ids(profile)?.is_empty() {
-            return ensure_profile_closed(profile);
+    wait_profile_closed(profile, std::time::Duration::from_secs(8))
+}
+
+pub(crate) fn wait_profile_closed(profile: &Path, timeout: std::time::Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        // The main process can disappear before helper processes or the
+        // Firefox profile lock are released. Wait for the complete closed
+        // state, preserving the last concrete error if shutdown stays blocked.
+        match ensure_profile_closed(profile) {
+            Ok(()) => return Ok(()),
+            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => {}
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(500)
+            .min(deadline.saturating_duration_since(std::time::Instant::now())));
     }
-    Err("浏览器仍在运行。请保存输入并处理浏览器的关闭提示，代理保持运行；完成后重试。".into())
 }
 
 /// Grant enforcement: a browser close prompt cannot prolong an expired authorization.
