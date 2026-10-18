@@ -1509,6 +1509,25 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn fixture_does_not_send_a_page_before_receiving_a_complete_request() {
+        let fixture = Fixture::new();
+        for request in [b"".as_slice(), b"GET /separation HTTP/1.1\r\nHost: localhost\r\n".as_slice()] {
+            let mut stream = TcpStream::connect(("127.0.0.1", fixture.port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
+            stream.write_all(request).unwrap();
+            let mut response = [0; 256];
+            assert_eq!(stream.read(&mut response).unwrap(), 0,
+                "speculative or incomplete connections must not receive executable HTML");
+        }
+        let mut stream = TcpStream::connect(("127.0.0.1", fixture.port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
+        stream.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404"));
+        assert!(!response.contains("<script>"));
+    }
     struct Fixture {
         port: u16,
         reports: mpsc::Receiver<Value>,
@@ -1681,6 +1700,7 @@ mod tests {
                     };
                     let tx = tx.clone();
                     std::thread::spawn(move || {
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .unwrap();
@@ -1698,14 +1718,16 @@ mod tests {
                                 break;
                             }
                         }
+                        // A preconnected socket is not a request. In particular,
+                        // never queue a default HTML response after its read
+                        // times out: a browser can reuse it for another URL.
+                        if bytes.len() > 16384 || !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                            return;
+                        }
                         let request = String::from_utf8_lossy(&bytes);
-                        let route = request
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .split_whitespace()
-                            .nth(1)
-                            .unwrap_or("/");
+                        let mut line = request.lines().next().unwrap_or("").split_whitespace();
+                        let (Some("GET"), Some(route), Some("HTTP/1.1"), None) =
+                            (line.next(), line.next(), line.next(), line.next()) else { return; };
 
                         let normalized = reqwest::Url::parse(route).ok().map(|url| {
                             format!(
@@ -1715,6 +1737,15 @@ mod tests {
                             )
                         });
                         let route = normalized.as_deref().unwrap_or(route);
+                        let generic = matches!(route.split('?').next().unwrap_or(route),
+                            "/privacy" | "/normal" | "/first" | "/second" | "/new-tab" |
+                            "/custom-native" | "/ip-native" | "/launch-ip" | "/live-ip" |
+                            "/never-release-on-failed-ip");
+                        if !generic && !["/region", "/report?", "/popup-", "/separation", "/fingerprint", "/frame"]
+                            .iter().any(|prefix| route.starts_with(prefix)) {
+                            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            return;
+                        }
                         if route.starts_with("/popup-redirect") {
                             let response = format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/popup-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                             let _ = stream.write_all(response.as_bytes());
