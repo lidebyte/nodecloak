@@ -2022,6 +2022,15 @@ mod tests {
         let mut draft = Draft { name: "Signed privacy regression".into(), browser: "firefox".into(), notes: String::new(), tags: vec![], password: None, clear_password: false, proxy: ProxyConfig { mode: "direct".into(), ..ProxyConfig::default() }, preferences: prefs };
         let p = profiles::create(&canonical, draft.clone(), None).unwrap();
         let path = profiles::path(&canonical, &p).unwrap();
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("NODECLOAK_TEST_HEADLESS_BROWSERS").is_some() {
+            // Mozilla's headless geolocation tests disable the unavailable OS
+            // settings dialog. This belongs only to this disposable fixture;
+            // the product never changes the user's system permission policy.
+            let mut file = std::fs::OpenOptions::new().create(true).append(true)
+                .open(path.join("user.js")).unwrap();
+            writeln!(file, "\nuser_pref(\"geo.prompt.open_system_prefs\", false);").unwrap();
+        }
         let _guard = Guard { path: path.clone(), root };
         let runtime = profiles::Runtime::default();
         let original_seed = p.preferences.fingerprint.as_ref().unwrap().seed.clone();
@@ -2078,23 +2087,16 @@ mod tests {
             }
             if cfg!(target_os = "macos")
                 && std::env::var_os("NODECLOAK_TEST_HEADLESS_BROWSERS").is_some() {
-                // macOS's system grant can keep Permissions API at "prompt"
-                // even when the synthetic provider delivers a native position.
-                // Check each actual result independently; never manufacture a
-                // grant or count a blocked frame as verified coordinate delivery.
+                // The system Permissions API can remain prompt. Actual native
+                // coordinate delivery must succeed in both documents with the
+                // fixture-only OS-dialog setting above; errors are not waived.
                 for (context, frame) in [(&report,false),(&report["frame"],true)] {
                     let geo = &context["geo"];
-                    if let Some(error) = geo.get("error") {
-                        assert_eq!(context["permission"],"prompt");
-                        assert!(error == 1 || (frame && error == "timeout"),"unexpected system location result: {context}");
-                        assert!(geo.get("latitude").is_none() && geo.get("longitude").is_none());
-                        println!("macOS headless system location grant unavailable (frame={frame}): DOM coordinates not verified; native provider configuration checked below");
-                    } else {
-                        assert!(context["permission"] == "prompt" || context["permission"] == "granted");
-                        assert!((geo["latitude"].as_f64().unwrap()-lat).abs() < 0.000001);
-                        assert!((geo["longitude"].as_f64().unwrap()-lng).abs() < 0.000001);
-                        println!("macOS native synthetic coordinates verified (frame={frame}); permission query={}",context["permission"]);
-                    }
+                    assert!(geo.get("error").is_none(),"native synthetic position failed (frame={frame}): {context}");
+                    assert!(matches!(context["permission"].as_str(),Some("prompt" | "granted" | "denied")));
+                    assert!((geo["latitude"].as_f64().unwrap()-lat).abs() < 0.000001);
+                    assert!((geo["longitude"].as_f64().unwrap()-lng).abs() < 0.000001);
+                    println!("macOS native synthetic coordinates verified (frame={frame}); permission query={}",context["permission"]);
                 }
             } else if report["geo"].get("error").is_some() {
                 assert_eq!(report["visibility"], "hidden", "visible location failed: {report}");

@@ -154,12 +154,12 @@ details are fixed stage descriptions without destination URLs, seeds or payloads
 - macOS CI runs the native app-path regression on ARM64 and Intel, including
   first-document/frame protection, repeated starts, disabling/re-enabling,
   cookie preservation, regional signals, viewport and provider configuration.
-  The hosted headless runner has no interactive macOS Location Services grant:
-  its Permissions API can remain at prompt even when the synthetic provider
-  delivers coordinates. Every delivered position is checked exactly; blocked
-  main/frame outcomes are recorded separately without a coordinate-delivery
-  claim. Native OS authorization
-  remains unchanged in the product. Mozilla tracks this interaction at
+  The hosted headless runner has no interactive macOS Location Services grant.
+  Its disposable test profile uses Mozilla's `geo.prompt.open_system_prefs=false`
+  setting, and exact synthetic coordinates are required in main and frame.
+  OS-dependent Permissions API labels are recorded separately, while persisted
+  browser allow/provider settings are checked. Native OS authorization remains
+  unchanged in the product. Mozilla documents the test setting at
   https://bugzilla.mozilla.org/show_bug.cgi?id=2033385.
 - No Linux runtime tests or Firefox 140-through-157 coverage claimed.
   Older Firefox versions lacking native regional APIs receive an update error.
