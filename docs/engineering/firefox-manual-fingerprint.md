@@ -151,7 +151,15 @@ details are fixed stage descriptions without destination URLs, seeds or payloads
   a real-browser regression covers the correction. No other important blocker
   reported. Final actual desktop-app Google/Claude manual checks remain pending;
   do not claim end-user login fixed before the result.
-- No macOS/Linux runtime tests or Firefox 140-through-157 coverage claimed.
+- macOS CI runs the native app-path regression on ARM64 and Intel, including
+  first-document/frame protection, repeated starts, disabling/re-enabling,
+  cookie preservation, regional signals, viewport and provider configuration.
+  The hosted headless runner has no interactive macOS Location Services grant:
+  only its exact permission-denied/prompt outcome is accepted, and no macOS DOM
+  coordinate-delivery claim is made for that outcome. Native OS authorization
+  remains unchanged in the product. Mozilla tracks this interaction at
+  https://bugzilla.mozilla.org/show_bug.cgi?id=2033385.
+- No Linux runtime tests or Firefox 140-through-157 coverage claimed.
   Older Firefox versions lacking native regional APIs receive an update error.
   First installation/removal may briefly open a blank setup window.
 
