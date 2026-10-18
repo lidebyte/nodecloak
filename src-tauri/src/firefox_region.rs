@@ -456,7 +456,8 @@ mod tests {
     #[test]
     fn interrupted_setup_restores_only_recorded_preferences() {
         let root = tempfile::tempdir().unwrap();
-        let p = root.path();
+        let canonical = root.path().canonicalize().unwrap();
+        let p = canonical.as_path();
         let before = DEBUG_PREFS
             .iter()
             .map(|(k, _)| (k.to_string(), json!({"user":null,"runtime":null})))

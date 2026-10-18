@@ -573,17 +573,18 @@ mod tests {
     #[test]
     fn missing_detection_page_is_distinguished_from_an_unready_extension() {
         let root = tempfile::tempdir().unwrap();
+        let profile = root.path().canonicalize().unwrap();
         // A failed regional handoff produces no GET at all, so it must not be
         // reported as proof that an installed extension is disabled.
         let result = guarded_launch_with_timeout(
-            root.path(),
+            &profile,
             "https://example.test/private-destination",
             true,
             |_| Ok(()),
             Duration::from_millis(20),
         );
         assert!(result.unwrap_err().contains("未收到检测页请求"));
-        let log = std::fs::read_to_string(root.path().join("nodecloak-control.jsonl")).unwrap();
+        let log = std::fs::read_to_string(profile.join("nodecloak-control.jsonl")).unwrap();
         assert!(log.contains("readiness_page_missing"));
         assert!(!log.contains("private-destination"));
     }

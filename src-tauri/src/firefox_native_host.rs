@@ -125,9 +125,10 @@ mod tests {
     #[test]
     fn native_host_returns_only_validated_profile_settings() {
         let root = tempfile::tempdir().unwrap();
+        let profile = root.path().canonicalize().unwrap();
         let settings = crate::fingerprint::fresh().unwrap();
         std::fs::write(
-            root.path().join("nodecloak-fingerprint-extension.json"),
+            profile.join("nodecloak-fingerprint-extension.json"),
             serde_json::to_vec(&settings).unwrap(),
         )
         .unwrap();
@@ -135,7 +136,7 @@ mod tests {
         exchange(
             &mut Cursor::new(request(json!({"type":"get_settings"}))),
             &mut output,
-            root.path(),
+            &profile,
         )
         .unwrap();
         assert_eq!(response(&output), json!({"fingerprint":settings}));
@@ -143,6 +144,7 @@ mod tests {
     #[test]
     fn native_host_rejects_unknown_or_oversized_requests_without_loading_settings() {
         let root = tempfile::tempdir().unwrap();
+        let profile = root.path().canonicalize().unwrap();
         for bytes in [
             request(json!({"type":"get_settings","path":"cookies.sqlite"})),
             request(json!({"type":"evaluate","code":"alert(1)"})),
@@ -151,13 +153,14 @@ mod tests {
             vec![4, 0, 0, 0, b'{'],
         ] {
             let mut output = Vec::new();
-            assert!(exchange(&mut Cursor::new(bytes), &mut output, root.path()).is_err());
+            assert!(exchange(&mut Cursor::new(bytes), &mut output, &profile).is_err());
             assert!(output.is_empty());
         }
     }
     #[test]
     fn native_host_fails_closed_for_missing_disabled_future_or_corrupt_profile_settings() {
         let root = tempfile::tempdir().unwrap();
+        let profile = root.path().canonicalize().unwrap();
         let settings = crate::fingerprint::fresh().unwrap();
         let valid = serde_json::to_value(&settings).unwrap();
         for value in [
@@ -174,7 +177,7 @@ mod tests {
                 v
             }),
         ] {
-            let file = root.path().join("nodecloak-fingerprint-extension.json");
+            let file = profile.join("nodecloak-fingerprint-extension.json");
             if let Some(value) = value {
                 std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
             }
@@ -182,7 +185,7 @@ mod tests {
             assert!(exchange(
                 &mut Cursor::new(request(json!({"type":"get_settings"}))),
                 &mut output,
-                root.path()
+                &profile
             )
             .is_err());
             assert!(output.is_empty());
