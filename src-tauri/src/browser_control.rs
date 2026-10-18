@@ -2070,32 +2070,36 @@ mod tests {
             assert_eq!(report["width"], 1000, "native viewport width: {report}");
             assert_eq!(report["height"], 700, "native viewport height: {report}");
             let (language,zone,jan,jul,lat,lng) = if ip {("ja-JP","Asia/Tokyo",-540,-540,35.68,139.69)} else {("de-DE","America/Los_Angeles",480,420,1.3521,103.8198)};
-            if report["geo"].get("error").is_some() {
-                // Hosted macOS runners have no interactive Location Services
-                // grant. Keep the native OS permission policy in this app-path
-                // check, and distinguish its exact denial from broken settings.
-                if cfg!(target_os = "macos")
-                    && std::env::var_os("NODECLOAK_TEST_HEADLESS_BROWSERS").is_some()
-                    && report["geo"]["error"] == 1 {
-                    assert_eq!(report["permission"], "prompt", "unexpected system permission result: {report}");
-                    assert_eq!(report["frame"]["permission"], "prompt");
-                    assert!(report["frame"]["geo"]["error"] == "timeout" || report["frame"]["geo"]["error"] == 1,
-                        "unexpected frame location failure: {report}");
-                    assert!(report["geo"].get("latitude").is_none());
-                    assert!(report["frame"]["geo"].get("latitude").is_none());
-                    println!("macOS headless system location grant unavailable: native provider configuration checked below; DOM coordinate delivery not verified");
-                } else {
-                    // Native Geolocation also waits for document visibility.
-                    assert_eq!(report["visibility"], "hidden", "visible location failed: {report}");
-                    assert_eq!(report["geo"]["error"], 3, "unexpected location failure: {report}");
-                    assert_eq!(report["permission"], "granted");
+            assert_eq!(report["language"],language);
+            assert_eq!(report["locale"],language);
+            assert!(report["header"].as_str().unwrap().starts_with(language));
+            for context in [&report,&report["worker"],&report["frame"]] {
+                assert_eq!(context["timezone"],zone);assert_eq!(context["jan"],jan);assert_eq!(context["jul"],jul);
+            }
+            if cfg!(target_os = "macos")
+                && std::env::var_os("NODECLOAK_TEST_HEADLESS_BROWSERS").is_some() {
+                // macOS's system grant can keep Permissions API at "prompt"
+                // even when the synthetic provider delivers a native position.
+                // Check each actual result independently; never manufacture a
+                // grant or count a blocked frame as verified coordinate delivery.
+                for (context, frame) in [(&report,false),(&report["frame"],true)] {
+                    let geo = &context["geo"];
+                    if let Some(error) = geo.get("error") {
+                        assert_eq!(context["permission"],"prompt");
+                        assert!(error == 1 || (frame && error == "timeout"),"unexpected system location result: {context}");
+                        assert!(geo.get("latitude").is_none() && geo.get("longitude").is_none());
+                        println!("macOS headless system location grant unavailable (frame={frame}): DOM coordinates not verified; native provider configuration checked below");
+                    } else {
+                        assert!(context["permission"] == "prompt" || context["permission"] == "granted");
+                        assert!((geo["latitude"].as_f64().unwrap()-lat).abs() < 0.000001);
+                        assert!((geo["longitude"].as_f64().unwrap()-lng).abs() < 0.000001);
+                        println!("macOS native synthetic coordinates verified (frame={frame}); permission query={}",context["permission"]);
+                    }
                 }
-                assert_eq!(report["language"],language);
-                assert_eq!(report["locale"],language);
-                assert!(report["header"].as_str().unwrap().starts_with(language));
-                for context in [&report,&report["worker"],&report["frame"]] {
-                    assert_eq!(context["timezone"],zone);assert_eq!(context["jan"],jan);assert_eq!(context["jul"],jul);
-                }
+            } else if report["geo"].get("error").is_some() {
+                assert_eq!(report["visibility"], "hidden", "visible location failed: {report}");
+                assert_eq!(report["geo"]["error"], 3, "unexpected location failure: {report}");
+                assert_eq!(report["permission"], "granted");
             } else { check(&report,language,zone,jan,jul,lat,lng); }
             assert!(!runtime.1.ready(&p.id));
             platform::close_profile(&path).unwrap();

@@ -155,8 +155,10 @@ details are fixed stage descriptions without destination URLs, seeds or payloads
   first-document/frame protection, repeated starts, disabling/re-enabling,
   cookie preservation, regional signals, viewport and provider configuration.
   The hosted headless runner has no interactive macOS Location Services grant:
-  only its exact permission-denied/prompt outcome is accepted, and no macOS DOM
-  coordinate-delivery claim is made for that outcome. Native OS authorization
+  its Permissions API can remain at prompt even when the synthetic provider
+  delivers coordinates. Every delivered position is checked exactly; blocked
+  main/frame outcomes are recorded separately without a coordinate-delivery
+  claim. Native OS authorization
   remains unchanged in the product. Mozilla tracks this interaction at
   https://bugzilla.mozilla.org/show_bug.cgi?id=2033385.
 - No Linux runtime tests or Firefox 140-through-157 coverage claimed.
