@@ -269,7 +269,7 @@ fn bootstrap(
             "Marionette:Quit",
             serde_json::json!({"flags":["eAttemptQuit"]}),
         )?;
-        crate::platform::wait_profile_closed(&profile, Duration::from_secs(10))
+        wait_setup_exit(socket, &profile, Duration::from_secs(30))
             .map_err(|error| format!("Firefox 扩展安装窗口尚未退出，请关闭后重试：{error}"))?;
         Ok(())
     })();
@@ -282,6 +282,21 @@ fn bootstrap(
         .map(|(key, old)| crate::firefox::snapshot(&profile, &key).map(|now| (key, now, old)))
         .collect::<Result<Vec<_>, _>>()?;
     crate::firefox::apply(&profile, &restore, false)?;
+    result
+}
+
+fn wait_setup_exit(socket: TcpStream, profile: &Path, timeout: Duration) -> Result<(), String> {
+    // Quit acknowledges shutdown start, not completion. Release the installation
+    // transport before waiting for Firefox and its helpers to finish flushing.
+    let _ = socket.shutdown(std::net::Shutdown::Both);
+    drop(socket);
+    let started = Instant::now();
+    let result = crate::platform::wait_profile_closed(profile, timeout);
+    let detail = format!("installation shutdown {}; elapsed_ms={}; main_processes={:?}",
+        if result.is_ok() { "complete" } else { "timed out" },
+        started.elapsed().as_millis(),
+        crate::platform::profile_process_ids(profile).ok().map(|ids| ids.len()));
+    crate::browser_control::log_startup_endpoint(profile, "firefox", "extension_setup_shutdown", &detail);
     result
 }
 
@@ -582,6 +597,27 @@ fn reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn setup_disconnects_before_waiting_for_browser_profile_release() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(true)
+            .share_mode(0).open(directory.path().join("parent.lock")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
+            let mut byte = [0];
+            let eof = peer.read(&mut byte);
+            drop(lock);
+            eof
+        });
+        let result = wait_setup_exit(socket, directory.path(), Duration::from_secs(3));
+        assert_eq!(peer.join().unwrap().unwrap(), 0);
+        assert!(result.is_ok(), "setup must disconnect before waiting for profile release: {result:?}");
+    }
     use serde_json::json;
 
     #[cfg(windows)]
