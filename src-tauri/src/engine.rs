@@ -1115,6 +1115,9 @@ mod tests {
         let dedicated = profile(dir.path(), "edge").unwrap();
         fs::create_dir_all(&dedicated).unwrap();
         fs::write(dedicated.join("SingletonLock"), "test lock").unwrap();
+        // File existence is not native lock ownership on macOS.
+        let lock_owner=fs::OpenOptions::new().read(true).write(true).open(dedicated.join("SingletonLock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock_owner).unwrap();
         let result = repair_readiness(dir.path(), "edge", &["dns".into(), "cli".into()]).unwrap();
         assert!(!result.ready);
         assert!(history(dir.path()).unwrap().is_empty());

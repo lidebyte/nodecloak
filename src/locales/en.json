@@ -1484,5 +1484,13 @@
   "复制日志": "Copy logs",
   "复制失败，请检查剪贴板权限": "Copy failed. Check clipboard permissions.",
   "显示最近 200 条诊断，包含启动、接口连接与恢复记录。": "Shows the latest 200 diagnostics, including startup, connection and recovery events.",
-  "无法读取副本启动日志": "Could not read profile startup logs"
+  "无法读取副本启动日志": "Could not read profile startup logs",
+  "浏览器副本锁类型异常；原文件已保留": "Unexpected browser profile lock type. The original file was preserved.",
+  "此副本仍被浏览器占用，请先从该浏览器菜单退出后重试": "This profile is still in use. Quit its browser from the browser menu before retrying.",
+  "浏览器副本锁在检查期间发生变化，请重试": "The profile lock changed during inspection. Please retry.",
+  "浏览器副本锁格式无效；原文件已保留": "Invalid profile lock format. The original file was preserved.",
+  "浏览器副本锁进程无效；原文件已保留": "Invalid profile lock process. The original file was preserved.",
+  "此副本的锁来自其他主机；请确认原设备已退出浏览器，原文件已保留": "The profile lock belongs to another host. Confirm its browser has quit on the original device. The file was preserved.",
+  "此副本的锁进程仍在运行，请先正常退出该浏览器；原文件已保留": "The profile lock process is still running. Quit that browser normally. The original file was preserved.",
+  "无法确认副本锁的主机信息": "Could not verify the host associated with the profile lock."
 }

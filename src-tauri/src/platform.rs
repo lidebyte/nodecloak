@@ -4,6 +4,8 @@ use std::{
 };
 #[cfg(windows)]
 mod endpoint;
+#[cfg(any(test, target_os = "macos"))]
+mod singleton;
 
 pub fn command(program: &str) -> Command {
     let mut cmd = Command::new(program);
@@ -442,7 +444,10 @@ pub fn ensure_profile_closed(profile: &Path) -> Result<(), String> {
             ));
         }
     }
-    // Chrome's SingletonLock is present on macOS while the profile is open.
+    #[cfg(target_os = "macos")]
+    singleton::check(profile)?;
+    // Preserve existing non-Mac behavior. Existence alone is not macOS lock ownership.
+    #[cfg(not(target_os = "macos"))]
     if profile.join("SingletonLock").symlink_metadata().is_ok() {
         return Err(
             "专用浏览器仍被锁定。请关闭窗口；若已退出，请重启浏览器后正常退出再重试。".into(),
