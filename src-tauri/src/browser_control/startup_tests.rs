@@ -2,6 +2,28 @@
 use super::*;
 use std::net::TcpListener;
 
+#[cfg(windows)]
+#[test]
+#[ignore = "Starts an installed Edge in a disposable profile and verifies manual endpoint delivery"]
+fn native_edge_settings_endpoint_survives_launcher_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("edge");
+    std::fs::create_dir_all(&path).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = platform::force_close_profile(&self.0); } }
+    let _cleanup = Cleanup(path.clone());
+    platform::spawn_settings_browser("edge", &path, "direct", None).unwrap();
+    let url = endpoint("edge", &path).unwrap();
+    let socket = recovery::connect_socket(&url).unwrap();
+    let mut protocol = Protocol {document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None};
+    let targets = protocol.call("Target.getTargets", json!({}), None).unwrap();
+    let target = targets["targetInfos"].as_array().unwrap().iter().find(|t| t["type"] == "page").unwrap();
+    let attached = protocol.call("Target.attachToTarget", json!({"targetId":target["targetId"],"flatten":true}), None).unwrap();
+    let session = attached["sessionId"].as_str().unwrap();
+    let result = protocol.call("Runtime.evaluate", json!({"expression":"navigator.webdriver","returnByValue":true}), Some(session)).unwrap();
+    assert_eq!(result["result"]["value"], false, "manual browser must remain non-automated");
+}
+
 #[test]
 fn firefox_ip_initialization_preserves_internal_and_restored_tabs() {
     for existing_blank in [false, true] {

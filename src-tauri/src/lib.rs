@@ -14,6 +14,7 @@ mod fingerprint;
 mod fonts;
 mod platform;
 mod profile_commands;
+mod profile_diagnostics;
 mod profiles;
 mod proxy;
 mod regional;
@@ -606,6 +607,7 @@ pub fn run() {
             set_interface_language,
             get_system_languages,
             profile_commands::list_profiles,
+            profile_commands::read_profile_diagnostics,
             profile_commands::save_profile,
             profile_commands::delete_profile,
             profile_commands::restore_profile,

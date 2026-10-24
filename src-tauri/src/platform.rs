@@ -2,6 +2,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+#[cfg(windows)]
+mod endpoint;
 
 pub fn command(program: &str) -> Command {
     let mut cmd = Command::new(program);
@@ -978,7 +980,17 @@ fn spawn_browser_impl(
         // server. Only the validated marker is persisted; raw stderr is discarded.
         std::thread::spawn(move || {
             let mut reader = std::io::BufReader::new(stderr);
-            match read_manual_endpoint(&mut reader, port) {
+            let mut discovered = read_manual_endpoint(&mut reader, port);
+            #[cfg(windows)]
+            if !matches!(&discovered, Ok(Some(_))) {
+                crate::browser_control::log_startup_endpoint(&profile,&browser,"endpoint_handoff","launcher output unavailable; checking profile-owned listener");
+                discovered = endpoint::discover(&profile, port).map(Some)
+                    .map_err(|error| {
+                        crate::browser_control::log_startup_endpoint(&profile,&browser,"endpoint_discovery_failed",&error);
+                        std::io::Error::other(error)
+                    });
+            }
+            match discovered {
                 Ok(Some(value)) => {
                     let published = crate::profiles::guard_tree(&marker)
                         .and_then(|_| crate::engine::atomic_write(&marker,value.as_bytes()));

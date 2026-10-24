@@ -1473,5 +1473,16 @@
   "配置更新后将自动继续同步。": "Sync resumes automatically after the configuration updates.",
   "另一台设备正在使用，结束后将自动同步；接管会影响该设备的后续同步。": "Another device is using this profile. Sync resumes when it finishes. Taking over affects its later sync.",
   "等待其他设备完成同步后自动重试。": "Sync retries automatically after the other device finishes.",
-  "等待另一台设备结束使用后完成删除。": "Deletion completes after the other device finishes using the profile."
+  "等待另一台设备结束使用后完成删除。": "Deletion completes after the other device finishes using the profile.",
+  "启动日志": "Startup logs",
+  "查看启动日志": "View startup logs",
+  "关闭启动日志": "Close startup logs",
+  "副本诊断记录": "Profile diagnostics",
+  "正在读取日志…": "Reading logs…",
+  "暂无启动日志": "No startup logs yet",
+  "刷新日志": "Refresh logs",
+  "复制日志": "Copy logs",
+  "复制失败，请检查剪贴板权限": "Copy failed. Check clipboard permissions.",
+  "显示最近 200 条诊断，包含启动、接口连接与恢复记录。": "Shows the latest 200 diagnostics, including startup, connection and recovery events.",
+  "无法读取副本启动日志": "Could not read profile startup logs"
 }

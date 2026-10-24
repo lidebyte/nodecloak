@@ -1,0 +1,42 @@
+// @vitest-environment jsdom
+import {act} from 'react';
+import {createRoot,type Root} from 'react-dom/client';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+import BrowserProfiles from './BrowserProfiles';
+import * as profiles from './browser-profiles';
+import {setLanguage} from './i18n';
+import ProfileDiagnostics from './ProfileDiagnostics';
+import * as diagnostics from './profile-diagnostics';
+vi.mock('./bridge',()=>({native:false}));
+let host:HTMLDivElement,root:Root;
+beforeEach(()=>{localStorage.clear();setLanguage('zh');Object.assign(globalThis,{IS_REACT_ACT_ENVIRONMENT:true});HTMLDialogElement.prototype.showModal=function(){this.open=true;};HTMLDialogElement.prototype.close=function(){this.open=false;};host=document.createElement('div');document.body.append(host);root=createRoot(host);});
+afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.restoreAllMocks();});
+const button=(text:string)=>Array.from(host.querySelectorAll('button')).find(b=>b.textContent?.trim()===text);
+it('offers profile-specific diagnostics immediately after a startup failure and from its menu',async()=>{
+ const p=(await profiles.listProfiles())[0];
+ vi.spyOn(profiles,'startProfile').mockRejectedValue(new Error('等待此副本的本地配置接口超时；请重新启动，诊断信息已记录到日志'));
+ await act(async()=>root.render(<BrowserProfiles busy={false} onBusyChange={()=>{}} onSelect={()=>{}}/>));
+ await act(async()=>button('启动')!.click());
+ expect(button('查看启动日志')).toBeDefined();
+ await act(async()=>button('查看启动日志')!.click());
+ const dialog=host.querySelector('dialog[open]');
+ expect(dialog?.textContent).toContain(p.name);
+ expect(dialog?.textContent).toContain('暂无启动日志');
+ await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="关闭启动日志"]')!.click());
+ await act(async()=>host.querySelector<HTMLButtonElement>(`[aria-label="${p.name} 更多操作"]`)!.click());
+ expect(button('启动日志')).toBeDefined();
+});
+it('refreshes live diagnostics and copies the selected profile report',async()=>{
+ const entry={time:'2026-10-25T00:00:00Z',browser:'edge',event:'endpoint_handoff',attempt:0,detail:'launcher handoff'};
+ const read=vi.spyOn(diagnostics,'readProfileDiagnostics').mockResolvedValue({profileId:'one',name:'Losangels',logPath:'C:/profile/nodecloak-control.jsonl',entries:[entry]});
+ const writeText=vi.fn().mockResolvedValue(undefined);
+ Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true});
+ await act(async()=>root.render(<ProfileDiagnostics profile={{id:'one',name:'Losangels'}} onClose={()=>{}}/>));
+ expect(host.textContent).toContain('endpoint_handoff');expect(host.textContent).toContain('C:/profile/nodecloak-control.jsonl');
+ read.mockResolvedValue({profileId:'one',name:'Losangels',logPath:'C:/profile/nodecloak-control.jsonl',entries:[{...entry,event:'endpoint_published',detail:'ready'}]});
+ await act(async()=>button('刷新日志')!.click());
+ expect(host.textContent).toContain('endpoint_published');expect(host.textContent).not.toContain('launcher handoff');
+ await act(async()=>button('复制日志')!.click());
+ expect(JSON.parse(writeText.mock.calls[0][0])).toMatchObject({profileId:'one',name:'Losangels',entries:[{event:'endpoint_published'}]});
+ expect(host.textContent).toContain('已复制');
+});

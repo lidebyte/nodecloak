@@ -33,6 +33,13 @@ pub async fn list_profiles(app: tauri::AppHandle) -> Result<Vec<ProfileView>, St
     operation(app, |root, runtime| profiles::views(root, runtime)).await
 }
 #[tauri::command]
+pub async fn read_profile_diagnostics(app: tauri::AppHandle, id:String) -> Result<crate::profile_diagnostics::Report,String> {
+    let root=app.state::<data_root::DataRoot>().0.clone();
+    // Viewing startup progress must not wait for the launch operation lock.
+    tauri::async_runtime::spawn_blocking(move||crate::profile_diagnostics::read(&root,&id))
+        .await.map_err(|_|"无法读取副本启动日志")?
+}
+#[tauri::command]
 pub async fn save_profile(
     app: tauri::AppHandle,
     id: Option<String>,
