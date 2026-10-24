@@ -6,6 +6,7 @@ on:
     paths:
       - src-tauri/src/platform.rs
       - src-tauri/src/platform/singleton.rs
+      - src-tauri/src/profile_diagnostics.rs
       - .github/workflows/macos-profile-lock-check.yml
 permissions:
   contents: read
@@ -41,9 +42,11 @@ jobs:
           fi
           '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' --version
           '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version
-      - name: Native locks and complete Rust regression
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Native lock unit regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked platform::singleton -- --nocapture
       - name: Three native Edge and Chrome close/reopen cycles
         env:
           NODECLOAK_TEST_HEADLESS_BROWSERS: '1'
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked native_macos_chromium_profiles_reopen_with_persistent_singleton_files -- --ignored --nocapture --test-threads=1
+      - name: Complete Rust regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked

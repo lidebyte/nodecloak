@@ -109,19 +109,16 @@ mod tests {
     }
     #[test]
     fn missing_logs_are_empty_and_rotation_retains_only_recent_structured_entries() {
-        let d = tempfile::tempdir().unwrap();
-        assert!(read_entries(d.path()).unwrap().is_empty());
+        let temporary = tempfile::tempdir().unwrap();
+        let d = temporary.path().canonicalize().unwrap();
+        assert!(read_entries(&d).unwrap().is_empty());
+        std::fs::write(d.join("nodecloak-control.previous.jsonl"), line("previous")).unwrap();
         std::fs::write(
-            d.path().join("nodecloak-control.previous.jsonl"),
-            line("previous"),
-        )
-        .unwrap();
-        std::fs::write(
-            d.path().join("nodecloak-control.jsonl"),
+            d.join("nodecloak-control.jsonl"),
             line("current") + "partial {",
         )
         .unwrap();
-        let entries = read_entries(d.path()).unwrap();
+        let entries = read_entries(&d).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].event, "previous");
         assert_eq!(entries[1].event, "current");
@@ -129,37 +126,39 @@ mod tests {
             .unwrap()
             .contains("not exposed"));
         std::fs::write(
-            d.path().join("nodecloak-control.jsonl"),
+            d.join("nodecloak-control.jsonl"),
             line("latest").repeat(500),
         )
         .unwrap();
-        assert_eq!(read_entries(d.path()).unwrap().len(), 200);
+        assert_eq!(read_entries(&d).unwrap().len(), 200);
     }
     #[test]
     fn bounded_tail_skips_partial_and_non_record_data() {
-        let d = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let d = temporary.path().canonicalize().unwrap();
         std::fs::write(
-            d.path().join("nodecloak-control.jsonl"),
+            d.join("nodecloak-control.jsonl"),
             "x".repeat(300 * 1024) + "\n" + &line("last"),
         )
         .unwrap();
-        let entries = read_entries(d.path()).unwrap();
+        let entries = read_entries(&d).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event, "last");
     }
     #[test]
     fn only_registry_profiles_can_select_logs() {
-        let d = tempfile::tempdir().unwrap();
-        assert!(read(d.path(), "../other").is_err());
-        assert!(read(d.path(), &"a".repeat(32)).is_err());
+        let temporary = tempfile::tempdir().unwrap();
+        let d = temporary.path().canonicalize().unwrap();
+        assert!(read(&d, "../other").is_err());
+        assert!(read(&d, &"a".repeat(32)).is_err());
     }
     #[cfg(unix)]
     #[test]
     fn symlink_logs_are_rejected() {
-        let d = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let d = temporary.path().canonicalize().unwrap();
         let outside = tempfile::NamedTempFile::new().unwrap();
-        std::os::unix::fs::symlink(outside.path(), d.path().join("nodecloak-control.jsonl"))
-            .unwrap();
-        assert!(read_entries(d.path()).is_err());
+        std::os::unix::fs::symlink(outside.path(), d.join("nodecloak-control.jsonl")).unwrap();
+        assert!(read_entries(&d).is_err());
     }
 }
