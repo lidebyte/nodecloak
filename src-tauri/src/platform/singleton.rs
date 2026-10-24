@@ -8,6 +8,12 @@ fn failure(error: std::io::Error) -> String {
         error.raw_os_error()
     )
 }
+fn finish_probe(file: std::fs::File, result: Result<(), String>) -> Result<(), String> {
+    // A concurrent spawn can inherit another reference to this open file description
+    // until exec. Drop alone need not release flock before browser startup.
+    fs2::FileExt::unlock(&file).map_err(failure)?;
+    result
+}
 fn idle_regular_file(path: &Path) -> Result<(), String> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
@@ -30,19 +36,22 @@ fn idle_regular_file(path: &Path) -> Result<(), String> {
             failure(error)
         }
     })?;
-    let current = std::fs::symlink_metadata(path).map_err(failure)?;
-    if !current.is_file() || current.file_type().is_symlink() {
-        return Err("浏览器副本锁在检查期间发生变化，请重试".into());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if opened.dev() != current.dev() || opened.ino() != current.ino() {
+    let result = (|| {
+        let current = std::fs::symlink_metadata(path).map_err(failure)?;
+        if !current.is_file() || current.file_type().is_symlink() {
             return Err("浏览器副本锁在检查期间发生变化，请重试".into());
         }
-    }
-    // Closing releases only our transient advisory lock. Never unlink or rewrite.
-    Ok(())
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened.dev() != current.dev() || opened.ino() != current.ino() {
+                return Err("浏览器副本锁在检查期间发生变化，请重试".into());
+            }
+        }
+        Ok(())
+    })();
+    // Release even when validation fails; never unlink or rewrite browser data.
+    finish_probe(file, result)
 }
 fn stale_link(
     target: &Path,
@@ -189,7 +198,7 @@ mod tests {
                             continue;
                         }
                     };
-                stream.set_nonblocking(false).unwrap();
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(std::time::Duration::from_millis(300)))
                         .unwrap();
@@ -262,7 +271,8 @@ mod tests {
     #[test]
     fn active_native_lock_blocks_until_released_without_deleting_data() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("SingletonLock");
+        let root = root.path().canonicalize().unwrap();
+        let path = root.join("SingletonLock");
         std::fs::write(&path, b"keep").unwrap();
         let owner = std::fs::OpenOptions::new()
             .read(true)
@@ -270,9 +280,38 @@ mod tests {
             .open(&path)
             .unwrap();
         fs2::FileExt::lock_exclusive(&owner).unwrap();
-        assert!(check(root.path()).is_err());
+        assert!(check(&root).is_err());
+        fs2::FileExt::unlock(&owner).unwrap();
         drop(owner);
-        assert!(check(root.path()).is_ok());
+        let result = check(&root);
+        assert!(result.is_ok(), "after releasing owner: {result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn explicit_probe_release_frees_shared_description_on_success_and_error() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let path = root.join("SingletonLock");
+        std::fs::write(&path, b"keep").unwrap();
+        for validation in [Ok(()), Err("identity changed".to_owned())] {
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            fs2::FileExt::lock_exclusive(&probe).unwrap();
+            let inherited = probe.try_clone().unwrap();
+            assert!(check(&root).is_err());
+            assert_eq!(finish_probe(probe, validation.clone()), validation);
+            // Keep the duplicate alive: implicit close alone cannot free this lock.
+            let result = check(&root);
+            assert!(
+                result.is_ok(),
+                "shared-description probe release: {result:?}"
+            );
+            drop(inherited);
+        }
         assert_eq!(std::fs::read(&path).unwrap(), b"keep");
     }
     #[test]
