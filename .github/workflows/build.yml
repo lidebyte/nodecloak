@@ -39,6 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
       - run: npm ci
       - name: Check version and tag
         run: node scripts/check-release-version.mjs
