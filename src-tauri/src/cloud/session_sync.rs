@@ -1043,6 +1043,8 @@ mod launch_tests {
             "隔离浏览器连接中断", "隔离浏览器连接已关闭", "无法启动隔离浏览器", "无法连接隔离浏览器",
             "无法进入隔离网站存储",
             "无法进入隔离网站存储（Firefox；code=unknown error）",
+            "浏览器拒绝登录数据操作 browsingContext.navigate",
+            "浏览器拒绝登录数据操作 browsingContext.navigate（code=unknown error，reason=NS_ERROR_ABORT）",
             "Firefox 隔离网站存储页面受特殊内容限制，已保留本机数据",
             "网站存储超过同步容量限制，本机数据已保留",
             "网站存储包含不可迁移的值，保留本机数据",
@@ -1059,7 +1061,7 @@ mod launch_tests {
                 assert!(error.is_none());
             }
         }
-        for message in ["云端配置已变化", "lease_held", "无法读取网站存储", "登录快照无效"] {
+        for message in ["云端配置已变化", "lease_held", "无法读取网站存储", "登录快照无效", "浏览器拒绝登录数据操作 Storage.getCookies（code=invalid argument）"] {
             let mut error = None;
             assert_eq!(local_launch_snapshot(Err(message.into()), true, true, &mut error).err().as_deref(), Some(message));
             assert!(error.is_none());

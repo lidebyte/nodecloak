@@ -381,6 +381,8 @@ pub(super) fn capture_transport_failure(error: &str) -> bool {
 }
 pub(super) fn capture_local_launch_failure(error: &str) -> bool {
     capture_transport_failure(error) || error == FIREFOX_WEB_CONTEXT_ERROR
+        || error == "浏览器拒绝登录数据操作 browsingContext.navigate"
+        || error.starts_with("浏览器拒绝登录数据操作 browsingContext.navigate（")
         || error == "无法进入隔离网站存储" || error.starts_with("无法进入隔离网站存储（")
         || ["网站存储超过同步容量限制，本机数据已保留", "网站存储包含不可迁移的值，保留本机数据",
             "隔离网站存储被浏览器阻止，本机数据已保留"].contains(&error)
@@ -629,7 +631,18 @@ impl Browser {
                 .is_some_and(|m|m.to_ascii_lowercase().contains("system access")) {
                 return Err(FIREFOX_WEB_CONTEXT_ERROR.into());
             }
-            return Err(format!("浏览器拒绝登录数据操作 {method}"));
+            // Never include browser messages or URLs: they may contain login data.
+            let codes=["unknown error","invalid argument","no such frame","no such window",
+                "no such context","unsupported operation","unknown command","invalid session id"];
+            let code=v["error"].as_str().filter(|code|codes.contains(code)).unwrap_or("other");
+            let message=v["message"].as_str().unwrap_or("");
+            let reasons=["NS_ERROR_ABORT","NS_BINDING_ABORTED","NS_ERROR_UNKNOWN_HOST",
+                "NS_ERROR_CONNECTION_REFUSED","NS_ERROR_PROXY_CONNECTION_REFUSED",
+                "NS_ERROR_MALFORMED_URI","NS_ERROR_DOM_BAD_URI","NS_ERROR_DOM_SECURITY_ERR",
+                "NS_ERROR_NET_INTERRUPT","NS_ERROR_NET_RESET","NS_ERROR_OFFLINE"];
+            let reason=reasons.iter().find(|reason|message.contains(**reason));
+            return Err(format!("浏览器拒绝登录数据操作 {method}（code={code}{}）",
+                reason.map(|reason|format!("，reason={reason}")).unwrap_or_default()));
         }
         Ok(v["result"].clone())
     }
@@ -984,7 +997,9 @@ struct Stage {
     temp: tempfile::TempDir,
     path: PathBuf,
     firefox_prefs: Vec<(String, Option<Vec<u8>>)>,
+    firefox_extensions: Option<PathBuf>,
 }
+const FIREFOX_EXTENSION_STATE: [&str;3] = ["extensions","extensions.json","addonStartup.json.lz4"];
 impl Stage {
     fn new(browser: &str, profile: &Path) -> Result<Self, String> {
         profiles::guard_tree(profile)?;
@@ -1002,7 +1017,21 @@ impl Stage {
             std::fs::create_dir(&path).map_err(|_| "无法创建临时副本")?
         };
         let mut firefox_prefs = Vec::new();
+        let mut firefox_extensions = None;
         if browser == "firefox" {
+            // Offline storage documents must not run profile extensions. In
+            // particular, the privacy companion cannot authenticate a temporary
+            // clone and correctly cancels its navigation. Keep all packages and
+            // metadata outside the codec profile, restoring them before commit.
+            let backup=temp.path().join("extension-state");
+            std::fs::create_dir(&backup).map_err(|_|"无法保存临时副本扩展")?;
+            for name in FIREFOX_EXTENSION_STATE {
+                let source=path.join(name);
+                if source.exists() {
+                    std::fs::rename(source,backup.join(name)).map_err(|_|"无法隔离临时副本扩展")?;
+                }
+            }
+            firefox_extensions=Some(backup);
             for name in ["user.js", "prefs.js"] {
                 firefox_prefs.push((name.into(), std::fs::read(path.join(name)).ok()));
             }
@@ -1014,15 +1043,33 @@ impl Stage {
             // system access to BiDi. Both preferences are restored byte-for-byte
             // before staged data can replace the real profile.
             user.extend_from_slice(b"user_pref(\"browser.tabs.remote.separatePrivilegedMozillaWebContentProcess\",false);\nuser_pref(\"browser.tabs.remote.separatedMozillaDomains\",\"\");\n");
+            user.extend_from_slice(b"user_pref(\"extensions.enabledScopes\",0);\n");
             engine::atomic_write(&path.join("user.js"), &user)?;
         }
         Ok(Self {
             temp,
             path,
             firefox_prefs,
+            firefox_extensions,
         })
     }
     fn restore_prefs(&self) -> Result<(), String> {
+        if let Some(backup)=&self.firefox_extensions {
+            for name in FIREFOX_EXTENSION_STATE {
+                let target=self.path.join(name);
+                profiles::guard_tree(&target)?;
+                if target.is_dir() {
+                    std::fs::remove_dir_all(&target).map_err(|_|"无法清理临时扩展状态")?;
+                } else if target.exists() {
+                    std::fs::remove_file(&target).map_err(|_|"无法清理临时扩展状态")?;
+                }
+                let source=backup.join(name);
+                if source.is_dir() {copy_tree(&source,&target,&mut 0)?;}
+                else if source.exists() {
+                    std::fs::copy(source,target).map_err(|_|"无法恢复副本扩展")?;
+                }
+            }
+        }
         for (n, v) in &self.firefox_prefs {
             let p = self.path.join(n);
             if let Some(v) = v {
@@ -1304,6 +1351,49 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn offline_firefox_stage_restores_extensions_and_metadata_after_commit() {
+        let root=tempfile::tempdir().unwrap();
+        let profile=root.path().join("profile");
+        std::fs::create_dir_all(profile.join("extensions")).unwrap();
+        let originals=[("extensions/fingerprint@nodecloak.com.xpi",b"signed-extension".as_slice()),
+            ("extensions.json",b"original extension metadata".as_slice()),
+            ("addonStartup.json.lz4",b"original startup cache".as_slice()),
+            ("user.js",b"user_pref(\"custom.sentinel\",true);".as_slice()),
+            ("prefs.js",b"original preferences".as_slice()),
+            ("cookie-sentinel",b"original login data".as_slice())];
+        for (name,bytes) in originals {std::fs::write(profile.join(name),bytes).unwrap();}
+        let stage=Stage::new("firefox",&profile).unwrap();
+        for name in ["extensions","extensions.json","addonStartup.json.lz4"] {
+            assert!(!stage.path.join(name).exists(),"offline codec still loads {name}");
+        }
+        for (name,bytes) in originals {assert_eq!(std::fs::read(profile.join(name)).unwrap(),bytes);}
+        std::fs::create_dir_all(stage.path.join("extensions")).unwrap();
+        std::fs::write(stage.path.join("extensions/unwanted-generated.xpi"),b"generated").unwrap();
+        std::fs::write(stage.path.join("extensions.json"),b"generated metadata").unwrap();
+        stage.commit(&profile).unwrap();
+        for (name,bytes) in originals {assert_eq!(std::fs::read(profile.join(name)).unwrap(),bytes,"changed {name}");}
+        assert!(!profile.join("extensions/unwanted-generated.xpi").exists());
+        let blank=root.path().join("blank");
+        std::fs::create_dir(&blank).unwrap();
+        let stage=Stage::new("firefox",&blank).unwrap();
+        std::fs::write(stage.path.join("extensions.json"),b"generated metadata").unwrap();
+        stage.commit(&blank).unwrap();
+        for name in ["extensions","extensions.json","addonStartup.json.lz4","user.js","prefs.js"] {
+            assert!(!blank.join(name).exists(),"created missing original {name}");
+        }
+    }
+    #[test]
+    fn navigation_rejection_retains_only_safe_protocol_diagnostics() {
+        let error=Browser::result(json!({"type":"error","error":"unknown error",
+            "message":"Navigation failed NS_ERROR_ABORT https://private.example/token"}),"browsingContext.navigate").unwrap_err();
+        assert!(error.contains("code=unknown error"),"{error}");
+        assert!(error.contains("reason=NS_ERROR_ABORT"),"{error}");
+        assert!(!error.contains("private.example"));
+        let error=Browser::result(json!({"type":"error","error":"private-secret","message":"private-secret"}),"browsingContext.navigate").unwrap_err();
+        assert!(error.contains("code=other"));
+        assert!(!error.contains("private-secret"));
+    }
+    #[test]
     fn codec_results_preserve_values_and_only_report_fixed_error_categories() {
         assert_eq!(codec_result(json!({"ok":true,"value":{"local":[["key","value"]],"databases":[]}})).unwrap()["local"][0][1], "value");
         for (code, expected) in [("NC_LIMIT","网站存储超过同步容量限制，本机数据已保留"),
@@ -1410,6 +1500,21 @@ mod tests {
         std::fs::write(profile.join("user.js"), original).unwrap();
         let original_prefs = b"user_pref(\"custom.prefs.sentinel\",\"keep\");\n";
         std::fs::write(profile.join("prefs.js"), original_prefs).unwrap();
+        // Real browser import/export must preserve addon data as well as the
+        // packages themselves, even though the codec never executes addons.
+        let addon_state=[
+            ("extensions/fingerprint@nodecloak.com.xpi",include_bytes!("../../resources/firefox/nodecloak-fingerprint-0.1.0.xpi").as_slice()),
+            ("extensions.json",br#"{"schemaVersion":39,"addons":[{"id":"fingerprint@nodecloak.com","active":true,"userDisabled":false}]}"#.as_slice()),
+            ("addonStartup.json.lz4",b"synthetic original addon startup metadata".as_slice()),
+            ("browser-extension-data/fingerprint@nodecloak.com/storage.js",br#"{"sentinel":"keep-extension-data"}"#.as_slice()),
+            ("extension-settings.json",br#"{"version":3,"prefs":{},"syntheticSentinel":"keep-settings"}"#.as_slice()),
+            ("extension-preferences.json",br#"{"version":1,"syntheticSentinel":"keep-preferences"}"#.as_slice()),
+        ];
+        for (name,bytes) in addon_state {
+            let file=profile.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file,bytes).unwrap();
+        }
         let input = Snapshot::parse(json!({"schema":1,"cookies":[],"origins":[
             {"origin":"https://accounts.firefox.com","state":{"local":[["synthetic-account","keep-account"]],"databases":[]}},
             {"origin":"https://addons.mozilla.org","state":{"local":[["synthetic-addon","keep-addon"]],"databases":[]}}
@@ -1418,10 +1523,12 @@ mod tests {
         assert_eq!(restored.bytes().unwrap(), input.bytes().unwrap());
         assert_eq!(std::fs::read(profile.join("user.js")).unwrap(), original);
         assert_eq!(std::fs::read(profile.join("prefs.js")).unwrap(), original_prefs);
+        for (name,bytes) in addon_state {assert_eq!(std::fs::read(profile.join(name)).unwrap(),bytes,"import changed addon state {name}");}
         let captured = export_profile("firefox", &profile).unwrap();
         assert_eq!(captured.bytes().unwrap(), input.bytes().unwrap());
         assert_eq!(std::fs::read(profile.join("user.js")).unwrap(), original);
         assert_eq!(std::fs::read(profile.join("prefs.js")).unwrap(), original_prefs);
+        for (name,bytes) in addon_state {assert_eq!(std::fs::read(profile.join(name)).unwrap(),bytes,"export changed addon state {name}");}
         let stage = Stage::new("firefox", &profile).unwrap();
         let mut browser = Browser::launch("firefox", &stage.path).unwrap();
         browser.site(&SiteKey{origin:"https://large.example".into(),partition_key:None}).unwrap();

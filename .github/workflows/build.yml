@@ -71,6 +71,20 @@ jobs:
         run: |
           cargo build --manifest-path src-tauri/Cargo.toml --locked
           NODECLOAK_TEST_FIREFOX_NATIVE_HOST="$GITHUB_WORKSPACE/src-tauri/target/debug/nodecloak" cargo test --manifest-path src-tauri/Cargo.toml --locked native_firefox_signed_fingerprint_launch_and_disable -- --ignored --nocapture --test-threads=1
+      - name: Verify Firefox offline session storage on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked installed_firefox_mozilla_web_storage_roundtrip -- --ignored --nocapture --test-threads=1
+      - name: Verify Firefox offline session storage on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'C:/Program Files/Mozilla Firefox/firefox.exe')) {
+            choco install firefox --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked installed_firefox_mozilla_web_storage_roundtrip -- --ignored --nocapture --test-threads=1
+          exit $LASTEXITCODE
       - name: Import Developer ID and validate notarization credentials
         if: env.MACOS_NOTARIZE == 'true'
         run: node scripts/macos-signing.mjs prepare
