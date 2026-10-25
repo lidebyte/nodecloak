@@ -1789,8 +1789,8 @@ mod tests {
                             ("text/html", "<script>parent.postMessage({frame:{timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])}},'*')</script>".into())
                         } else if route.starts_with("/separation") {
                             ("text/html", r#"<!doctype html><title>Manual settings test</title><script>
-                            const main={webdriver:navigator.webdriver,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),cookie:document.cookie};
-                            if(location.search==='?store')document.cookie='nodecloak-fixture=kept; Max-Age=3600; SameSite=Lax';
+                            const main={webdriver:navigator.webdriver,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),cookie:document.cookie,route:location.pathname+location.search,documentId:crypto.randomUUID()};
+                            if(new URLSearchParams(location.search).has('store')){document.cookie='nodecloak-fixture=kept; Max-Age=3600; SameSite=Lax';main.cookieAfterStore=document.cookie;}
                             const worker=new Promise(resolve=>{const w=new Worker('/separation-worker');w.onmessage=e=>{w.terminate();resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'worker timeout'}),10000)});
                             const frame=new Promise(resolve=>{addEventListener('message',e=>{if(e.data.frame)resolve(e.data.frame)});const f=document.createElement('iframe');f.src=location.origin.replace('127.0.0.1','localhost')+'/separation-frame';document.documentElement.append(f);setTimeout(()=>resolve({error:'frame timeout'}),10000)});
                             Promise.all([worker,frame]).then(([worker,frame])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({main,worker,frame}))));
@@ -2036,11 +2036,14 @@ mod tests {
         let original_seed = p.preferences.fingerprint.as_ref().unwrap().seed.clone();
         let switches = if std::env::var_os("NODECLOAK_TEST_REGIONS_ONLY").is_some() { vec![true] } else { vec![true,true,false,true] };
         for (run, enabled) in switches.into_iter().enumerate() {
-            if run > 0 { draft.preferences.startup_url = fixture.url("/separation?read"); }
+            let route = format!("/separation?{}&run={}", if run==0 {"store"} else {"read"}, uuid::Uuid::new_v4());
+            draft.preferences.startup_url = fixture.url(&route);
             draft.preferences.fingerprint.as_mut().unwrap().enabled = enabled;
             profiles::update(&canonical, &p.id, draft.clone()).unwrap();
             crate::profile_commands::launch(&canonical, &p.id, "startup", &runtime).unwrap();
             let report = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
+            assert_eq!(report["main"]["route"],route,"stale document report: {report}");
+            if run==0 { assert_eq!(report["main"]["cookieAfterStore"],"nodecloak-fixture=kept","synthetic cookie write failed: {report}"); }
             assert_eq!(report["main"]["webdriver"], false, "manual Firefox is automated: {report}");
             assert_eq!(report["main"]["marker"], enabled, "companion did not follow the saved switch: {report}");
             assert_eq!(report["frame"]["marker"], enabled, "frame protection did not follow the saved switch: {report}");
@@ -2049,7 +2052,20 @@ mod tests {
             assert!(!runtime.1.automation_ready(&p.id));
             assert_eq!(profiles::get(&canonical, &p.id, false).unwrap().preferences.fingerprint.as_ref().unwrap().seed, original_seed);
             println!("Firefox signed app launch enabled={enabled}: first document/frame protected as requested; native webdriver=false");
+            #[cfg(target_os="macos")]
+            if std::env::var_os("NODECLOAK_TEST_LEGACY_TERM").is_some() {
+                for pid in platform::profile_process_ids(&path).unwrap() {
+                    let status=std::process::Command::new("/bin/kill").args(["-TERM",&pid.to_string()]).status().unwrap();
+                    assert!(status.success());
+                }
+                platform::wait_profile_closed(&path,Duration::from_secs(8)).unwrap();
+            } else { platform::close_profile(&path).unwrap(); }
+            #[cfg(not(target_os="macos"))]
             platform::close_profile(&path).unwrap();
+            let db=rusqlite::Connection::open_with_flags(path.join("cookies.sqlite"),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let cookies=db.prepare("SELECT host,path,value,expiry,originAttributes FROM moz_cookies WHERE name='nodecloak-fixture'").unwrap().query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,String>(4)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            println!("Firefox synthetic persisted cookies after close run={run}: {cookies:?}");
+            assert!(cookies.iter().any(|(host,_,value,expiry,_)|host=="127.0.0.1"&&value=="kept"&&*expiry>0),"normal close did not persist synthetic cookie: {cookies:?}");
         }
         draft.preferences.regional.enabled = true;
         draft.preferences.language = "de-DE,de,en".into();

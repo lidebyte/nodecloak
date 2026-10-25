@@ -1133,7 +1133,14 @@ pub fn close_profile(profile: &Path) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     for pid in ids {
-        output("/bin/kill", &["-TERM", &pid.to_string()])?;
+        // SIGTERM does not reliably run Firefox's storage shutdown phases.
+        // Address only this profile's main PID, never every app of that name.
+        let script = format!("ObjC.import('AppKit'); const app=$.NSRunningApplication.runningApplicationWithProcessIdentifier({pid}); if(!app.isNil() && !app.terminate) throw new Error('Browser refused normal quit');");
+        if let Err(error) = output("/usr/bin/osascript", &["-l", "JavaScript", "-e", &script]) {
+            if profile_process_ids(profile)?.contains(&pid) {
+                return Err(error);
+            }
+        }
     }
     wait_profile_closed(profile, std::time::Duration::from_secs(8))
 }
