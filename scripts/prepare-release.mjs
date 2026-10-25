@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "改善 Firefox 稳定指纹与网站登录的兼容性，日常手动使用与 MCP 自动化分别运行。 / Improves Firefox stable-fingerprint compatibility with website sign-in and keeps manual browsing separate from MCP automation.",
-  "修复 Firefox 使用自定义时区等区域设置时，启动页面被空白页覆盖、等待超时的问题。 / Fixes blank-page replacement and startup timeouts when Firefox uses custom time zones or regional settings.",
-  "改善浏览器启动状态检测，明确区分指纹初始化与页面检测失败，并保留分阶段诊断记录。 / Improves browser startup detection, distinguishes fingerprint initialization from page-readiness failures, and retains diagnostic stages."
+  "修复 macOS 浏览器退出后，残留锁文件导致副本反复提示锁定、无法再次启动的问题。 / Fixes idle browser lock files preventing profiles from reopening on macOS.",
+  "修复部分 Windows Edge 副本启动时，浏览器已打开但仍提示本地配置接口超时的问题。 / Fixes local configuration endpoint timeouts after Windows Edge has opened.",
+  "新增启动日志入口，可从副本菜单或启动错误提示中查看、刷新和复制诊断记录。 / Adds startup logs that can be viewed, refreshed and copied from profile menus or startup errors."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');
