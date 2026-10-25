@@ -64,6 +64,10 @@ pub async fn delete_profile(app: tauri::AppHandle, id: String, purge: bool) -> R
     .await
 }
 #[tauri::command]
+pub async fn reset_profile(app: tauri::AppHandle,id: String,reset_proxy: bool) -> Result<(),String> {
+    operation(app,move |root,runtime|profiles::reset::reset(root,&id,reset_proxy,runtime)).await
+}
+#[tauri::command]
 pub async fn restore_profile(app: tauri::AppHandle, id: String) -> Result<(), String> {
     operation(app, move |root, _| {
         crate::cloud::sharing::editable(root, &id)?;

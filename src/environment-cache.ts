@@ -17,7 +17,7 @@ const isScan=(value:unknown):value is Scan=>{
       &&typeof check.value==='string'&&typeof check.detail==='string'&&typeof check.fixable==='boolean');
 };
 export const createEnvironmentCache=(provided?:StorageAccess)=>{
-  const memory=new Map<string,Scan>(),histories=new Map<string,RepairRecord[]>();
+  const memory=new Map<string,Scan>(),histories=new Map<string,RepairRecord[]>(),forgotten=new Set<string>();
   const entries=():{key:string;scan:Scan}[]=>{
     try{
       const raw=(provided??localStorage).getItem(storageKey);if(!raw||raw.length>512000)return [];
@@ -28,16 +28,21 @@ export const createEnvironmentCache=(provided?:StorageAccess)=>{
   };
   return {
     readScan:(scope:EnvironmentScope):Scan|null=>{
-      const key=environmentScopeKey(scope),scan=memory.get(key)??entries().find(entry=>entry.key===key)?.scan;
+      const key=environmentScopeKey(scope);if(forgotten.has(key))return null;
+      const scan=memory.get(key)??entries().find(entry=>entry.key===key)?.scan;
       return scan&&(scope.profileId===null||scan.browser===scope.browser)?structuredClone(scan):null;
     },
     saveScan:(scope:EnvironmentScope,scan:Scan)=>{
       if(!isScan(scan)||scan.browser!==scope.browser)return;
-      const key=environmentScopeKey(scope);memory.set(key,structuredClone(scan));
+      const key=environmentScopeKey(scope);forgotten.delete(key);memory.set(key,structuredClone(scan));
       try{(provided??localStorage).setItem(storageKey,JSON.stringify({version:1,entries:[...entries().filter(entry=>entry.key!==key),{key,scan}].slice(-20)}));}catch{/* Keep the successful observation in memory if storage is unavailable. */}
     },
     readHistory:(scope:EnvironmentScope)=>histories.get(environmentScopeKey(scope))??null,
     saveHistory:(scope:EnvironmentScope,records:RepairRecord[])=>{histories.set(environmentScopeKey(scope),records);},
     clearHistories:()=>histories.clear(),
+    forget:(scope:EnvironmentScope)=>{
+      const key=environmentScopeKey(scope);forgotten.add(key);memory.delete(key);histories.delete(key);
+      try{(provided??localStorage).setItem(storageKey,JSON.stringify({version:1,entries:entries().filter(entry=>entry.key!==key)}));}catch{/* Do not reuse a reset profile's stale observation in this session. */}
+    },
   };
 };

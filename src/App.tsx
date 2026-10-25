@@ -149,6 +149,13 @@ export default function App() {
     historyGeneration.current++;historyRequests.current.clear();
     observationCache.current!.clearHistories();setHistoryLoading(new Set());
   }
+  function handleProfileReset(p:BrowserProfile) {
+    const scope={browser:p.browser,profileId:p.id,native};
+    observationCache.current!.forget(scope);
+    setReports(current=>{const next={...current};delete next[p.id];return next;});
+    if(currentScope.current.profileId===p.id){navigationGeneration.current++;historyGeneration.current++;setScan(null);setHistory([]);}
+    void loadProfileOptions().then(list=>{if(currentScope.current.profileId===p.id)setActiveProfileState(list.find(item=>item.id===p.id)??null);}).catch(error=>notify(String(error),true));
+  }
   function restoreObservations(target:BrowserId,profileId:string|null) {
     const scope={browser:target,profileId,native};currentScope.current=scope;
     setScan(observationCache.current!.readScan(scope));
@@ -266,7 +273,7 @@ export default function App() {
 
         <AppUpdates expanded={page === 'settings'} busy={!!busy} onBusyChange={value=>setBusy(value?'正在更新应用':null)} />
         {(page==='account'||page==='devices')&&cloud.status.account&&<AccountDialog inline cloud={{...cloud,panel:page}}/>}
-        {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} onShare={setShareProfile} onManageSharing={()=>setPage('sharing')} syncConflicts={cloud.status.conflicts} onResolveSync={openSyncConflict} onSyncStatusChange={()=>void cloud.reload()} busy={!!busy||sharing.busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
+        {page==='profiles'&&<BrowserProfiles onSelect={(p,history)=>void selectProfile(p,history)} onShare={setShareProfile} onManageSharing={()=>setPage('sharing')} syncConflicts={cloud.status.conflicts} onResolveSync={openSyncConflict} onSyncStatusChange={()=>void cloud.reload()} onProfileReset={handleProfileReset} busy={!!busy||sharing.busy} onBusyChange={value=>setBusy(value?'正在管理浏览器副本':null)}/>}
         {page==='sharing'&&<SharingWorkspace sharing={sharing} cloud={cloud}/>}
         <ShareProfileDialog profile={shareProfile} sharing={sharing} cloud={cloud} onClose={()=>setShareProfile(null)}/>
         {activeProfile&&['overview','history'].includes(page)&&<div className="active-profile-bar"><div className={page==='overview'?'overview-profile-identity':undefined}>{page==='overview'?<label className="overview-profile-picker"><span>{t("当前副本")}</span><SelectMenu menuMinWidth={320} noWrap label={t("切换浏览器副本")} disabled={!!busy} value={activeProfile.id} onOpen={()=>void loadProfileOptions().catch(e=>notify(String(e),true))} onChange={value=>{const p=profileOptions.find(p=>p.id===value);if(p&&p.id!==activeProfile.id)void selectProfile(p);}} options={(!profileOptions.some(p=>p.id===activeProfile.id)?[activeProfile,...profileOptions]:profileOptions).map(p=>({value:p.id,label:`${p.name} · ${browserNames[p.browser]}`,icon:<BrowserIcon browser={p.browser}/>}))} /></label>:<strong>{activeProfile.name}</strong>}<span>{t(browserNames[browser])} · {t(activeProfile.proxy.mode==='system'?'系统代理':activeProfile.proxy.mode==='direct'?'直连':activeProfile.proxy.host+':'+activeProfile.proxy.port)}</span></div><button disabled={!!busy} className={page==='overview'?'selected':''} onClick={()=>setPage('overview')}>{t("环境检测")}</button><button disabled={!!busy} className={page==='history'?'selected':''} onClick={()=>void navigate('history')}>{t("修复记录")}</button><button disabled={!!busy} onClick={()=>setPage('profiles')}>{t("返回列表")}</button></div>}

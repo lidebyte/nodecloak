@@ -217,6 +217,7 @@ fn apply(c: &Connection, p: &profiles::Profile, b: &mut Binding, o: &Object) -> 
     b.pending_session = None;
     b.session_dirty = false;
     b.file_stamp = Some(stamp(&p.browser, &path)?);
+    profiles::reset::acknowledge_session(&c.root,&p.id,&c.account_id()?)?;
     Ok(())
 }
 fn publish(
@@ -243,6 +244,7 @@ fn publish(
     b.pending_session = None;
     b.session_dirty = false;
     b.file_stamp = Some(stamp(&p.browser, &profiles::path(&c.root, p)?)?);
+    profiles::reset::acknowledge_session(&c.root,&p.id,&c.account_id()?)?;
     Ok(())
 }
 fn config_conflicted(c: &Connection, account: &str, id: &str) -> bool {
@@ -317,6 +319,7 @@ fn reconcile(
     let path = profiles::path(&c.root, p)?;
     let base_rev = b.session_baseline.as_ref().map(|o| o.revision).unwrap_or(0);
     let remote_rev = remote.map(|o| o.revision).unwrap_or(0);
+    let reset_pending=profiles::reset::session_pending(&c.root,&p.id,&account)?;
     if profiles::running(&c.root, p)? {
         if remote_rev != base_rev {
             if let Some(o) = remote {
@@ -335,8 +338,16 @@ fn reconcile(
         }
         return Ok(SessionPreparation::Complete);
     }
+    if reset_pending && remote_rev!=base_rev {
+        // An explicit local reset must never satisfy the "empty first sync"
+        // import rule. Concurrent cloud changes still require an explicit choice.
+        b.pending_session=remote.map(|o|cache(c,o)).transpose()?;
+        b.session_dirty=true;
+        conflict(c,&p.id,b,&p.name,"login_state_changed",remote_rev)?;
+        return Ok(if allow_local_launch {SessionPreparation::LocalOnly} else {SessionPreparation::Complete});
+    }
     let file_stamp = stamp(&p.browser, &path)?;
-    let changed = b.file_stamp.as_ref() != Some(&file_stamp) || b.session_dirty;
+    let changed = b.file_stamp.as_ref() != Some(&file_stamp) || b.session_dirty || reset_pending;
     if !changed && remote_rev == base_rev {
         c.disk
             .accounts
@@ -347,7 +358,9 @@ fn reconcile(
         return Ok(SessionPreparation::Complete);
     }
     let Some(local) = local_launch_snapshot(
-        browser_session::export_profile(&p.browser, &path),
+        if reset_pending && file_stamp==format!("{:x}",Sha256::digest([])) {
+            Ok(Snapshot::empty())
+        } else {browser_session::export_profile(&p.browser, &path)},
         allow_local_launch, p.received_share.is_none(),
         &mut c.disk.accounts.get_mut(&account).unwrap().last_error,
     )? else {
@@ -362,6 +375,11 @@ fn reconcile(
         .retain(|x| x.local_id != p.id || x.kind != "session");
     let local_hash = hash(&local)?;
     let local_changed = b.session_hash.as_ref() != Some(&local_hash);
+    if reset_pending {
+        lease(c,b,false)?;
+        publish(c,p,b,&local,base_rev,b.session_baseline.as_ref().is_some_and(|o|o.deleted))?;
+        return Ok(SessionPreparation::Complete);
+    }
     if remote_rev == 0 && base_rev > 0 {
         conflict(c, &p.id, b, &p.name, "cloud_object_missing", 0)?;
         return Ok(SessionPreparation::Complete);
@@ -644,11 +662,9 @@ pub(super) fn prepare_launch(mut c: &mut Connection, id: &str) -> Result<(), Str
             reconcile(&mut c, &p, &mut b, remote.as_ref(), true)?,
             SessionPreparation::LocalOnly
         );
-        if c.disk.accounts[&account]
-            .conflicts
-            .iter()
-            .any(|x| x.local_id == id)
-        {
+        let conflicts=c.disk.accounts[&account].conflicts.iter().filter(|x|x.local_id==id).collect::<Vec<_>>();
+        let reset_local_only=local_only && profiles::reset::session_pending(root,id,&account)? && conflicts.iter().all(|x|x.kind=="session");
+        if !conflicts.is_empty() && !reset_local_only {
             return Err("副本或登录状态有冲突，请在账号同步中选择保留本地、云端或两份".into());
         };
         if local_only {
@@ -779,6 +795,9 @@ pub fn resolve(
     let _ = runtime;
     c.disk.save(&c.root)
 }
+
+#[cfg(test)]
+mod reset_tests;
 
 #[cfg(test)]
 mod launch_tests {

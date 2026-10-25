@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
+pub(crate) mod reset;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -306,10 +307,20 @@ pub(crate) fn guard_tree(root: &Path) -> Result<(), String> {
     Ok(())
 }
 pub fn load(root: &Path) -> Result<Vec<Profile>, String> {
+    let _reset=reset::lock()?;
+    load_unlocked(root)
+}
+/// The expiry watchdog must not initialize profiles or wait for reset cleanup.
+pub(crate) fn load_snapshot(root: &Path) -> Result<Vec<Profile>,String> { load_registry(root,false) }
+fn load_unlocked(root: &Path) -> Result<Vec<Profile>, String> {
+    load_registry(root,true)
+}
+fn load_registry(root: &Path,recover_reset: bool) -> Result<Vec<Profile>, String> {
     guard_tree(root)?;
     let file = root.join("profiles.json");
     guard_tree(&file)?;
     if !file.exists() {
+        if !recover_reset {return Err("副本清单不存在".into());}
         let profiles = ["chrome", "edge", "firefox"]
             .into_iter()
             .map(|browser| Profile {
@@ -368,6 +379,7 @@ pub fn load(root: &Path) -> Result<Vec<Profile>, String> {
             return Err("副本清单包含无效或重复条目".into());
         }
     }
+    if recover_reset {reset::recover(root, &mut registry.profiles)?;}
     for profile in &mut registry.profiles {
         let browser_name = match profile.browser.as_str() {
             "chrome" => "Chrome",

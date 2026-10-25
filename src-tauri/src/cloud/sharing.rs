@@ -453,7 +453,7 @@ pub async fn sharing_action(app: tauri::AppHandle, action: Action) -> Result<Val
     }).await.map_err(|_|"共享操作未完成")?
 }
 fn close(root: &Path, id: &str, runtime: &profiles::Runtime) -> Result<(), String> {
-    let result = profiles::load(root).and_then(|all| match all.iter().find(|p| p.id == id) {
+    let result = profiles::load_snapshot(root).and_then(|all| match all.iter().find(|p| p.id == id) {
         Some(p) => profiles::path(root, p).and_then(|path| platform::force_close_profile(&path)),
         None => Ok(()),
     });
@@ -526,8 +526,8 @@ pub fn start(app: tauri::AppHandle) {
                 }
             }
             let account=Disk::load(root).ok().and_then(|d|d.account).map(|a|a.id);
-            let store=match Store::load(root){Ok(s)=>s,Err(_)=>{if let Ok(remembered)=deadlines().lock(){for id in remembered.keys(){close_async(&app,id,"authorizationFailed");}}if let Ok(all)=profiles::load(root){for p in all.iter().filter(|p|p.received_share.is_some()){close_async(&app,&p.id,"authorizationFailed");}}std::thread::sleep(Duration::from_secs(1));continue}};
-            let all=profiles::load(root).unwrap_or_default();
+            let store=match Store::load(root){Ok(s)=>s,Err(_)=>{if let Ok(remembered)=deadlines().lock(){for id in remembered.keys(){close_async(&app,id,"authorizationFailed");}}if let Ok(all)=profiles::load_snapshot(root){for p in all.iter().filter(|p|p.received_share.is_some()){close_async(&app,&p.id,"authorizationFailed");}}std::thread::sleep(Duration::from_secs(1));continue}};
+            let all=profiles::load_snapshot(root).unwrap_or_default();
             let processes=platform::browser_processes();
             let running=all.iter().filter_map(|p|profiles::path(root,p).ok().filter(|path|!platform::profile_ids_from(&processes,path).is_empty()).map(|_|p.id.clone())).collect::<std::collections::BTreeSet<_>>();
             for p in all.iter().filter(|p|p.received_share.is_some() && !store.bindings.contains_key(&p.id)){if running.contains(&p.id){close_async(&app,&p.id,"authorizationFailed");}}

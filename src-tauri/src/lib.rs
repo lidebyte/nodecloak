@@ -609,6 +609,7 @@ pub fn run() {
             profile_commands::list_profiles,
             profile_commands::read_profile_diagnostics,
             profile_commands::save_profile,
+            profile_commands::reset_profile,
             profile_commands::delete_profile,
             profile_commands::restore_profile,
             profile_commands::test_profile_proxy,

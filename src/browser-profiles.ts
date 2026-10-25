@@ -123,6 +123,13 @@ export async function closeProfile(id:string){if(native)return invoke<void>('clo
 export async function restartProfile(id:string){if(native)return invoke<void>('restart_profile',{id});get(id).running=true;get(id).pendingRestart=false;saveDemo();}
 export async function deleteProfile(id:string,purge=false){if(native)return invoke<void>('delete_profile',{id,purge});const p=get(id);if(p.running)throw new Error('请先关闭副本');if(purge){if(!p.deletedAt)throw new Error('请先移至最近删除');demo=data().filter(p=>p.id!==id);}else{p.deletedAt=new Date().toISOString();}saveDemo();}
 export async function restoreProfile(id:string){if(native)return invoke<void>('restore_profile',{id});get(id).deletedAt=null;saveDemo();}
+export async function resetProfile(id:string,resetProxy=false){
+ if(native)return invoke<void>('reset_profile',{id,resetProxy});
+ const p=get(id);if(p.deletedAt)throw new Error('副本不存在或已删除');if(p.running)throw new Error('请先关闭副本再重置环境');if(p.sharing)throw new Error('收到的共享副本不能修改、复制、转分享或导出');
+ p.preferences=defaults().preferences;p.pendingRestart=false;p.lastTest=null;p.lastRegion=null;p.activeProxyEndpoint=null;
+ if(resetProxy){p.proxy=defaults().proxy;p.hasPassword=false;}
+ p.updatedAt=new Date().toISOString();saveDemo();
+}
 export async function quitApplication(closeProfiles:boolean){if(native)return invoke<void>('quit_application',{closeProfiles});if(!closeProfiles&&data().some(p=>p.running))throw new Error('仍有运行中的副本');for(const p of data())p.running=false;saveDemo();}
 
 export async function prepareApplicationUpdate(){if(native)return invoke<void>('prepare_application_update');for(const p of data())p.running=false;saveDemo();}
