@@ -1353,7 +1353,8 @@ mod tests {
     #[test]
     fn offline_firefox_stage_restores_extensions_and_metadata_after_commit() {
         let root=tempfile::tempdir().unwrap();
-        let profile=root.path().join("profile");
+        let canonical=root.path().canonicalize().unwrap();
+        let profile=canonical.join("profile");
         std::fs::create_dir_all(profile.join("extensions")).unwrap();
         let originals=[("extensions/fingerprint@nodecloak.com.xpi",b"signed-extension".as_slice()),
             ("extensions.json",b"original extension metadata".as_slice()),
@@ -1373,7 +1374,7 @@ mod tests {
         stage.commit(&profile).unwrap();
         for (name,bytes) in originals {assert_eq!(std::fs::read(profile.join(name)).unwrap(),bytes,"changed {name}");}
         assert!(!profile.join("extensions/unwanted-generated.xpi").exists());
-        let blank=root.path().join("blank");
+        let blank=canonical.join("blank");
         std::fs::create_dir(&blank).unwrap();
         let stage=Stage::new("firefox",&blank).unwrap();
         std::fs::write(stage.path.join("extensions.json"),b"generated metadata").unwrap();
