@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "修复 Firefox 开启稳定指纹后，登录状态同步失败导致副本无法启动的问题。 / Fixes Firefox profile startup failures caused by sign-in state sync when stable fingerprinting is enabled.",
-  "改善 Firefox 登录状态同步兼容性，保留已有扩展、Cookie 和网站存储。 / Improves Firefox sign-in state sync compatibility while preserving existing extensions, cookies and site storage.",
-  "部分登录数据读取异常时，自己创建的副本可使用本机数据启动，并保留更清晰的诊断记录。 / Allows owned profiles to start with local data when sign-in data capture fails, with clearer diagnostic records."
+  "修复 Chrome / Edge 开启稳定指纹后，使用一段时间可能出现区域连接中断并关闭副本的问题。 / Fixes Chrome / Edge profile disconnections and unexpected closure during extended use with stable fingerprints enabled.",
+  "改善后台任务初始化和自动重连，保留原有稳定指纹与区域设置，并记录具体诊断。 / Improves background task initialization and automatic reconnection while retaining stable fingerprints, regional settings and detailed diagnostics.",
+  "修复列表底部副本的操作菜单超出窗口，无法看到删除按钮的问题；小窗口支持菜单内部滚动。 / Keeps profile action menus within the window so Delete remains accessible, with menu scrolling in smaller windows."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

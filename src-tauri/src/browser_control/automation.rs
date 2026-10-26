@@ -1018,12 +1018,12 @@ mod tree_tests {
             }
             let mut controller = BrowserControl {
                 diagnostic:None,plan: ControlPlan { profile_settings: false, automation: true },
-                protocol: Protocol {document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None},
+                protocol: Protocol {worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None},
                 firefox:false,region:regional::initial(&crate::profiles::Preferences::default()).unwrap(),
                 permission:PermissionMode::Ask,primary:"live-session".into(),sessions:HashSet::new(),
                 targets:HashMap::from([("live".into(),"live-session".into()),("closing-page".into(),"closing-page-session".into()),("closing-frame".into(),"closing-frame-session".into()),("live-frame".into(),"live-frame-session".into())]),
                 workers:HashSet::new(),pages:HashSet::new(),advanced:Default::default(),fingerprint:None,
-                fingerprint_sessions:HashSet::new(),fingerprint_workers:HashMap::new(),internal_workers:HashSet::new(),
+                fingerprint_sessions:HashSet::new(),internal_workers:HashSet::new(),
                 automation_fatal:None,automation_dialogs:HashMap::new(),automation_warnings:Vec::new(),automation_cleanup:Vec::new(),
                 download_lease:None,download_subscribed:false,download_checked:Instant::now(),
             };

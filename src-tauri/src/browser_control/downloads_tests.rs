@@ -89,7 +89,7 @@ impl Fixture {
         let control = BrowserControl {
             diagnostic:None,plan: ControlPlan { profile_settings: false, automation: true },
             protocol: Protocol {
-                document_setups:HashMap::new(),barrier_owner:None,socket,
+                worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,
@@ -106,7 +106,6 @@ impl Fixture {
             advanced: Default::default(),
             fingerprint: None,
             fingerprint_sessions: HashSet::new(),
-            fingerprint_workers: HashMap::new(),
             internal_workers: HashSet::new(),
             automation_fatal: None,
             automation_dialogs: HashMap::new(),

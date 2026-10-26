@@ -12,7 +12,7 @@ fn disconnect_keeps_transport_diagnostic_instead_of_erasing_it() {
     });
     let (socket, _) = tungstenite::connect(format!("ws://{address}")).unwrap();
     let mut protocol = Protocol {
-        document_setups:HashMap::new(),barrier_owner:None,socket,
+        worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,
         next: 0,
         events: VecDeque::new(),
         last_error: None,

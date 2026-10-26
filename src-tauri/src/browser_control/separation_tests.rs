@@ -270,7 +270,7 @@ fn rejected_popup_protection_never_resumes_first_document() {
             methods
         });
         let socket = recovery::connect_socket(&format!("ws://{address}")).unwrap();
-        let mut protocol = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
+        let mut protocol = Protocol { worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
         let result = protocol.configure_document("popup", vec![
             ("Page.enable",json!({})),
             ("Page.addScriptToEvaluateOnNewDocument",json!({"source":"/* fixture */"})),
@@ -331,7 +331,7 @@ fn delayed_popup_keeps_its_pause_without_blocking_other_tabs_then_initializes() 
         methods
     });
     let socket = recovery::connect_socket(&format!("ws://{address}")).unwrap();
-    let mut protocol = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
+    let mut protocol = Protocol { worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
     let started = Instant::now();
     protocol.configure_document("popup", vec![
         ("Page.enable",json!({})),
@@ -392,7 +392,7 @@ fn settings_update_during_barrier_release_waits_for_a_new_generation() {
         premature_update
     });
     let socket = recovery::connect_socket(&format!("ws://{address}")).unwrap();
-    let mut protocol = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
+    let mut protocol = Protocol { worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
     protocol.configure_document("popup", vec![
         ("Emulation.setTimezoneOverride",json!({"timezoneId":"Europe/London"})),
         ("Runtime.runIfWaitingForDebugger",json!({})),
@@ -447,7 +447,7 @@ fn late_protection_rejection_retains_the_only_first_script_barrier() {
         methods
     });
     let socket = recovery::connect_socket(&format!("ws://{address}")).unwrap();
-    let mut protocol = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
+    let mut protocol = Protocol { worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
     protocol.configure_document("failed",vec![
         ("Page.addScriptToEvaluateOnNewDocument",json!({"source":1})),
         ("Runtime.runIfWaitingForDebugger",json!({})),

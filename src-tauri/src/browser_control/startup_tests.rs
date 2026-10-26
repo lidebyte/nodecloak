@@ -15,7 +15,7 @@ fn native_edge_settings_endpoint_survives_launcher_handoff() {
     platform::spawn_settings_browser("edge", &path, "direct", None).unwrap();
     let url = endpoint("edge", &path).unwrap();
     let socket = recovery::connect_socket(&url).unwrap();
-    let mut protocol = Protocol {document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None};
+    let mut protocol = Protocol {worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None};
     let targets = protocol.call("Target.getTargets", json!({}), None).unwrap();
     let target = targets["targetInfos"].as_array().unwrap().iter().find(|t| t["type"] == "page").unwrap();
     let attached = protocol.call("Target.attachToTarget", json!({"targetId":target["targetId"],"flatten":true}), None).unwrap();

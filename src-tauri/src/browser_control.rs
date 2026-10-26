@@ -19,6 +19,7 @@ use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 mod automation;
 mod downloads;
 mod recovery;
+mod worker_setup;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
@@ -185,6 +186,7 @@ struct DocumentSetup {
 }
 struct Protocol {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    worker_setups: HashMap<String, worker_setup::WorkerSetup>,
     document_setups: HashMap<String, DocumentSetup>,
     barrier_owner: Option<String>,
     next: u64,
@@ -329,6 +331,7 @@ impl Protocol {
         Ok(true)
     }
     fn check_document_delays(&mut self) {
+        self.check_worker_delays();
         for (session, setup) in &mut self.document_setups {
             if !setup.ready && setup.error.is_none() && !setup.delayed && setup.started.elapsed() >= Duration::from_secs(15) {
                 setup.delayed = true;
@@ -342,7 +345,7 @@ impl Protocol {
         let result = match self.socket.read() {
             Ok(Message::Text(text)) => {
                 let value: Value = serde_json::from_str(&text).map_err(|_| "浏览器控制响应格式无效")?;
-                if self.route_document_reply(&value)? { Ok(None) } else { Ok(Some(value)) }
+                if self.route_worker_reply(&value)? || self.route_document_reply(&value)? { Ok(None) } else { Ok(Some(value)) }
             },
             Ok(Message::Close(frame)) => Err(format!("浏览器控制连接关闭（WebSocket Close，code={}）", frame.map(|f| u16::from(f.code)).unwrap_or(1005))),
             Ok(_) => Ok(None),
@@ -480,7 +483,6 @@ struct BrowserControl {
     advanced: crate::profiles::AdvancedSettings,
     fingerprint: Option<crate::fingerprint::Settings>,
     fingerprint_sessions: HashSet<String>,
-    fingerprint_workers: HashMap<String, String>,
     internal_workers: HashSet<String>,
     automation_fatal:Option<String>,
     automation_dialogs:HashMap<String,Value>,
@@ -509,7 +511,7 @@ impl BrowserControl {
             diagnostic: Some((path.to_path_buf(), browser.to_owned())),
             plan,
             protocol: Protocol {
-                document_setups:HashMap::new(),barrier_owner:None,socket,
+                worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,
@@ -527,7 +529,6 @@ impl BrowserControl {
             advanced,
             fingerprint,
             fingerprint_sessions: HashSet::new(),
-            fingerprint_workers: HashMap::new(),
             internal_workers: HashSet::new(),
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
@@ -609,42 +610,8 @@ impl BrowserControl {
             return Ok(());
         }
         if !self.firefox {
-            if let Some(session) = session.filter(|s| !self.workers.contains(*s)) {
-                return self.apply_document(session);
-            }
-        }
-        if !self.firefox {
-            if let (Some(session), Some(settings)) =
-                (session, self.fingerprint.as_ref().filter(|f| f.enabled))
-            {
-                if !self.fingerprint_sessions.contains(session) {
-                    let script = crate::fingerprint::script(settings)?;
-                    if !self.workers.contains(session) {
-                        self.protocol.call(
-                            "Page.addScriptToEvaluateOnNewDocument",
-                            json!({"source":script}),
-                            Some(session),
-                        )?;
-                    } else if !self.internal_workers.contains(session) {
-                        // A new Worker has no usable global while waiting for the
-                        // debugger. Pause its first script, then protect that realm.
-                        self.protocol
-                            .call("Debugger.enable", json!({}), Some(session))?;
-                        let breakpoint = self.protocol.call(
-                            "Debugger.setInstrumentationBreakpoint",
-                            json!({"instrumentation":"beforeScriptExecution"}),
-                            Some(session),
-                        )?;
-                        self.fingerprint_workers.insert(
-                            session.into(),
-                            breakpoint["breakpointId"]
-                                .as_str()
-                                .ok_or("Worker 指纹预加载断点无效")?
-                                .into(),
-                        );
-                    }
-                    self.fingerprint_sessions.insert(session.into());
-                }
+            if let Some(session) = session {
+                return if self.workers.contains(session) { self.apply_worker(session, false) } else { self.apply_document(session) };
             }
         }
         let locale = self.region.language.split(',').next().unwrap_or("en-US");
@@ -727,6 +694,22 @@ impl BrowserControl {
         }
         Ok(())
     }
+    fn apply_worker(&mut self, session: &str, waiting: bool) -> Result<(), String> {
+        let mut commands = vec![("Emulation.setLocaleOverride", json!({"locale":self.region.language.split(',').next().unwrap_or("en-US")}))];
+        if self.advanced.hardware_concurrency > 0 {
+            commands.push(("Emulation.setHardwareConcurrencyOverride", json!({"hardwareConcurrency":self.advanced.hardware_concurrency})));
+        }
+        if let Some(timezone) = &self.region.timezone {
+            commands.push(("Emulation.setTimezoneOverride", json!({"timezoneId":timezone})));
+        }
+        commands.push(("Target.setAutoAttach", self.auto_attach(false)));
+        let script = self.fingerprint.as_ref().filter(|f|f.enabled)
+            .filter(|_|!self.internal_workers.contains(session) && !self.fingerprint_sessions.contains(session))
+            .map(crate::fingerprint::script).transpose()?;
+        self.protocol.configure_worker(session, commands, script, waiting)?;
+        self.fingerprint_sessions.insert(session.into());
+        Ok(())
+    }
     fn apply_document(&mut self, session: &str) -> Result<(), String> {
         let mut commands = Vec::new();
         let preload = self.fingerprint.as_ref().filter(|f| f.enabled)
@@ -786,42 +769,7 @@ impl BrowserControl {
                 if event["method"]=="Page.javascriptDialogClosed"||event["method"]=="browsingContext.userPromptClosed"{self.forget_dialog(&event);continue;}
                 if event["method"]=="Page.javascriptDialogOpening"||event["method"]=="browsingContext.userPromptOpened"{self.remember_dialog(&event);continue;}
             }
-            if event["method"] == "Debugger.paused" {
-                if let Some(session) = event["sessionId"].as_str() {
-                    if event["params"]["reason"] == "instrumentation"
-                        && self.fingerprint_workers.contains_key(session)
-                    {
-                        if let Some(frame) =
-                            event["params"]["callFrames"][0]["callFrameId"].as_str()
-                        {
-                            if let Some(settings) = &self.fingerprint {
-                                self.protocol.call("Debugger.evaluateOnCallFrame",json!({"callFrameId":frame,"expression":crate::fingerprint::script(settings)?,"returnByValue":true,"silent":true}),Some(session))?;
-                            }
-                        } else {
-                            return Err("Worker 指纹初始化未获得执行上下文".into());
-                        }
-                        let breakpoint = self.fingerprint_workers.remove(session).unwrap();
-                        self.protocol.call(
-                            "Debugger.removeBreakpoint",
-                            json!({"breakpointId":breakpoint}),
-                            Some(session),
-                        )?;
-                        // Disable while still paused: this resumes execution and removes
-                        // our debugger before a self-closing Worker can disappear.
-                        if let Err(error) =
-                            self.protocol
-                                .call("Debugger.disable", json!({}), Some(session))
-                        {
-                            if !self.protocol.last_error.as_deref().is_some_and(|message| {
-                                message.contains("Session with given id not found")
-                                    || message.contains("Target closed")
-                            }) {
-                                return Err(error);
-                            }
-                        }
-                    }
-                }
-            } else if event["method"] == "Target.attachedToTarget" {
+            if event["method"] == "Target.attachedToTarget" {
                 let params = &event["params"];
 
                 let session = params["sessionId"]
@@ -853,12 +801,11 @@ impl BrowserControl {
                     // Documents initialize asynchronously; Worker commands can
                     // observe a normal detach at any point in this sequence.
                     let setup: Result<(), String> = (|| {
-                        self.apply(Some(&session))?;
-                        if !self.plan.profile_settings || self.workers.contains(&session) {
+                        if self.plan.profile_settings && self.workers.contains(&session) {
+                            self.apply_worker(&session, params["waitingForDebugger"].as_bool().unwrap_or(false))?;
+                        } else { self.apply(Some(&session))?; }
+                        if !self.plan.profile_settings {
                             self.protocol.call("Target.setAutoAttach",self.auto_attach(false),Some(&session))?;
-                            if self.plan.profile_settings {
-                                self.protocol.call("Runtime.runIfWaitingForDebugger", json!({}), Some(&session))?;
-                            }
                         }
                         Ok(())
                     })();
@@ -870,29 +817,30 @@ impl BrowserControl {
                         return Err(error);
                     }
                 }
-            } else if event["method"].as_str().is_some_and(|method| method.starts_with("NodeCloak.documentSetup")) {
+            } else if event["method"].as_str().is_some_and(|method| method.starts_with("NodeCloak.documentSetup") || method.starts_with("NodeCloak.workerSetup")) {
                 let method = event["method"].as_str().unwrap();
-                let detail = if method == "NodeCloak.documentSetupDelayed" {
-                    format!("renderer setup pending; tab retained and protection pause preserved; commands={}", event["params"]["pending"])
-                } else if method == "NodeCloak.documentSetupFailed" {
-                    format!("{}; tab retained without releasing protection pause", event["params"]["error"].as_str().unwrap_or("setup rejected"))
+                let worker = method.starts_with("NodeCloak.workerSetup");
+                let detail = if method.ends_with("Delayed") {
+                    format!("{}; phase={}; commands={}", if worker { "background task setup pending; other targets remain available" } else { "renderer setup pending; tab retained and protection pause preserved" }, if worker { event["params"]["phase"].as_str().unwrap_or("unknown") } else { "document" }, event["params"]["pending"])
+                } else if method.ends_with("Failed") {
+                    format!("{}; {}", event["params"]["error"].as_str().unwrap_or("setup rejected"), if worker { "background task settings not confirmed; other targets retained" } else { "tab retained without releasing protection pause" })
                 } else { "delayed renderer initialized; original settings applied".into() };
                 if let Some((path, browser)) = &self.diagnostic {
-                    recovery::log(path, browser, match method {
-                        "NodeCloak.documentSetupDelayed"=>"target_setup_delayed",
-                        "NodeCloak.documentSetupFailed"=>"target_setup_failed", _=>"target_setup_ready",
+                    recovery::log(path, browser, match (worker, method.rsplit("Setup").next().unwrap_or("")) {
+                        (true,"Delayed")=>"worker_setup_delayed", (true,"Failed")=>"worker_setup_failed", (true,_)=>"worker_setup_ready",
+                        (false,"Delayed")=>"target_setup_delayed", (false,"Failed")=>"target_setup_failed", _=>"target_setup_ready",
                     }, 0, &detail);
                 }
-                if method == "NodeCloak.documentSetupFailed" && self.automation_warnings.len() < 16 { self.automation_warnings.push(detail); }
+                if method.ends_with("Failed") && self.automation_warnings.len() < 16 { self.automation_warnings.push(detail); }
             } else if event["method"] == "Target.detachedFromTarget" {
                 if let Some(session) = event["params"]["sessionId"].as_str() {
                     self.protocol.document_setups.remove(session);
+                    self.protocol.worker_setups.remove(session);
                     if self.protocol.barrier_owner.as_deref() == Some(session) { self.protocol.barrier_owner = None; }
                     self.sessions.remove(session);
                     self.workers.remove(session);
                     self.pages.remove(session);
                     self.fingerprint_sessions.remove(session);
-                    self.fingerprint_workers.remove(session);
                     self.internal_workers.remove(session);
                     self.targets.retain(|_, attached| attached != session);
                     self.automation_dialogs.remove(session);
@@ -1267,7 +1215,10 @@ mod tests {
                 let mut detached = false;
                 while let Ok(Message::Text(raw)) = ws.read() {
                     let command: Value = serde_json::from_str(&raw).unwrap();
-                    if !detached && command["method"] == detach_at {
+                    if detach_at == "delayed-worker" && command["method"] == "Debugger.enable" {
+                        ws.send(Message::Text(json!({"id":navigation["id"],"result":{"frameId":"main"}}).to_string().into())).unwrap();
+                        detached = true;
+                    } else if !detached && command["method"] == detach_at {
                         ws.send(Message::Text(json!({"method":"Target.detachedFromTarget","params":{"sessionId":"short-worker"}}).to_string().into())).unwrap();
                         ws.send(Message::Text(json!({"id":navigation["id"],"result":{"frameId":"main"}}).to_string().into())).unwrap();
                         detached = true;
@@ -1317,7 +1268,7 @@ mod tests {
             BrowserControl {
                 diagnostic:None,plan: ControlPlan { profile_settings: true, automation: false },
                 protocol: Protocol {
-                    document_setups:HashMap::new(),barrier_owner:None,socket,
+                    worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,
                     next: 0,
                     events: VecDeque::new(),
                     last_error: None,
@@ -1335,8 +1286,7 @@ mod tests {
                 advanced: Default::default(),
                 fingerprint: None,
                 fingerprint_sessions: HashSet::new(),
-                fingerprint_workers: HashMap::new(),
-                internal_workers: HashSet::new(),
+                    internal_workers: HashSet::new(),
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
@@ -1347,6 +1297,19 @@ mod tests {
             },
             server,
         )
+    }
+    #[test]
+    fn delayed_worker_initialization_keeps_other_pages_responsive() {
+        let (mut state, server) = navigation_fixture_with_worker(false, Some("delayed-worker"));
+        state.fingerprint = Some(crate::fingerprint::fresh().unwrap());
+        let started = Instant::now();
+        let navigation = state.open("https://example.invalid/", false);
+        let responsive = state.protocol.call("Runtime.evaluate", json!({"expression":"1"}), Some("main"));
+        drop(state);
+        server.join().unwrap();
+        assert!(navigation.is_ok(), "one delayed Worker interrupted navigation: {navigation:?}");
+        assert!(responsive.is_ok(), "one delayed Worker interrupted another page");
+        assert!(started.elapsed() < Duration::from_secs(3), "Worker setup blocked the protocol pump");
     }
     #[test]
     fn terminated_worker_during_setup_does_not_interrupt_browser_control() {
@@ -1435,7 +1398,7 @@ mod tests {
         let mut state = BrowserControl {
             diagnostic:None,plan: ControlPlan { profile_settings: true, automation: false },
             protocol: Protocol {
-                document_setups:HashMap::new(),barrier_owner:None,socket,
+                worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,
                 next: 0,
                 events: VecDeque::new(),
                 last_error: None,
@@ -1453,7 +1416,6 @@ mod tests {
             advanced: Default::default(),
             fingerprint: None,
             fingerprint_sessions: HashSet::new(),
-            fingerprint_workers: HashMap::new(),
             internal_workers: HashSet::new(),
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
@@ -1783,6 +1745,20 @@ mod tests {
                             fetch('/report?data='+encodeURIComponent(JSON.stringify(first)));
                             setTimeout(()=>fetch('/report?data='+encodeURIComponent(JSON.stringify({stage:'popup-alive',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone}))),8000);
                             </script>"#.into())
+                        } else if route.starts_with("/separation-workers") {
+                            ("text/html", r#"<!doctype html><title>Concurrent worker setup</title><script>
+                            const heldWorkers=[];const jobs=Array.from({length:8},()=>new Promise(resolve=>{
+                              const w=new Worker('/separation-worker');heldWorkers.push(w);w.onmessage=e=>resolve(e.data);
+                              w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'worker timeout'}),25000);
+                            }));
+                            for(let i=0;i<8;i++)jobs.push(new Promise(resolve=>{
+                              const w=new SharedWorker('/separation-shared-worker?i='+i);heldWorkers.push(w);w.port.onmessage=e=>resolve(e.data);
+                              w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'shared worker timeout'}),25000);
+                            }));
+                            Promise.all(jobs).then(workers=>fetch('/report?data='+encodeURIComponent(JSON.stringify({workers}))));
+                            </script>"#.into())
+                        } else if route.starts_with("/separation-shared-worker") {
+                            ("application/javascript", "const first={timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])};onconnect=e=>e.ports[0].postMessage(first);".into())
                         } else if route.starts_with("/separation-worker") {
                             ("application/javascript", "postMessage({timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')])});".into())
                         } else if route.starts_with("/separation-frame") {
@@ -1862,6 +1838,7 @@ mod tests {
     }
     include!("browser_control/download_checks.rs");
     include!("browser_control/recovery_checks.rs");
+    include!("browser_control/worker_checks.rs");
 
     struct TempBrowser {
         path: PathBuf,
@@ -1907,6 +1884,7 @@ mod tests {
     }
     impl TempBrowser {
         fn show(&self) {
+            if std::env::var_os("NODECLOAK_TEST_HEADLESS_BROWSERS").is_some() { return; }
             platform::focus_profile(&self.path).unwrap();
             #[cfg(windows)]
             {
@@ -2263,7 +2241,7 @@ mod tests {
             // A second connection drives only this disposable test profile, as
             // a native user gesture; the settings controller handles the popup.
             let socket = recovery::connect_socket(&endpoint(engine, &browser.path).unwrap()).unwrap();
-            let mut driver = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
+            let mut driver = Protocol { worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket, next: 0, events: VecDeque::new(), last_error: None, navigation: None, reconnect_endpoint: None };
             if std::env::var_os("NODECLOAK_POPUP_DORMANT").is_some() {
                 let target = driver.call("Target.createTarget", json!({"url":"","background":true}), None).unwrap()["targetId"].clone();
                 // Longer than the old 15-second destructive initialization deadline.
@@ -2317,7 +2295,7 @@ mod tests {
             state.open(&fixture.url("/popup-opener?noopener"),false).unwrap();
             assert_eq!(fixture.reports.recv_timeout(Duration::from_secs(20)).unwrap()["stage"],"opener");
             let socket = recovery::connect_socket(&endpoint(engine,&browser.path).unwrap()).unwrap();
-            let mut driver = Protocol { document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None };
+            let mut driver = Protocol { worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None };
             let targets = driver.call("Target.getTargets",json!({}),None).unwrap();
             let parent = targets["targetInfos"].as_array().unwrap().iter().find(|t|t["url"].as_str().is_some_and(|u|u.contains("/popup-opener"))).unwrap()["targetId"].clone();
             let attached = driver.call("Target.attachToTarget",json!({"targetId":parent,"flatten":true}),None).unwrap();
