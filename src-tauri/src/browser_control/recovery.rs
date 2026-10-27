@@ -32,6 +32,13 @@ pub(super) fn transport_error(error: &tungstenite::Error) -> String {
 pub(super) fn connect_socket(
     endpoint: &str,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
+    connect_socket_with_budget(endpoint, Duration::from_secs(15))
+}
+
+fn connect_socket_with_budget(
+    endpoint: &str,
+    budget: Duration,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
     let url = reqwest::Url::parse(endpoint).map_err(|_| "本地控制接口地址无效")?;
     if url.scheme() != "ws"
         || !matches!(
@@ -44,20 +51,25 @@ pub(super) fn connect_socket(
     let address = SocketAddr::from(([127, 0, 0, 1], url.port().ok_or("控制接口端口无效")?));
     let stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .map_err(|e| format!("无法连接本地浏览器接口（{}）", transport_error(&e.into())))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|e| e.to_string())?;
-    let (mut socket, _) =
-        tungstenite::client(endpoint, MaybeTlsStream::Plain(stream)).map_err(|e| match e {
-            tungstenite::HandshakeError::Failure(error) => {
-                format!("本地浏览器接口握手失败（{}）", transport_error(&error))
+    // Keep tungstenite's partial HTTP handshake state across WouldBlock. A
+    // browser under load may accept TCP before it can send the upgrade reply.
+    // Starting a fresh handshake would discard buffered bytes or resend it.
+    stream.set_nonblocking(true).map_err(|e|e.to_string())?;
+    let deadline=Instant::now()+budget;
+    let mut step=tungstenite::client(endpoint, MaybeTlsStream::Plain(stream));
+    let (mut socket, _) = loop {
+        match step {
+            Ok(result)=>break result,
+            Err(tungstenite::HandshakeError::Failure(error))=>return Err(format!("本地浏览器接口握手失败（{}）",transport_error(&error))),
+            Err(tungstenite::HandshakeError::Interrupted(pending))=>{
+                if Instant::now()>=deadline{return Err("本地浏览器接口握手超时".into());}
+                std::thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())));
+                step=pending.handshake();
             }
-            tungstenite::HandshakeError::Interrupted(_) => "本地浏览器接口握手未完成".into(),
-        })?;
+        }
+    };
     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream.set_nonblocking(false).map_err(|e|e.to_string())?;
         stream
             .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
@@ -275,6 +287,47 @@ impl BrowserControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delayed_valid_handshake_preserves_the_same_connection() {
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint=format!("ws://{}",listener.local_addr().unwrap());
+        let server=std::thread::spawn(move||{
+            let (peer,_)=listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(2300));
+            tungstenite::accept(peer).map(|_|()).map_err(|_|())
+        });
+        let result=connect_socket(&endpoint);
+        let accepted=server.join().unwrap();
+        assert!(result.is_ok(),"valid delayed handshake failed: {:?}",result.err());
+        assert!(accepted.is_ok());
+    }
+    #[test]
+    fn handshake_wait_is_bounded_and_rejected_upgrades_stay_rejected() {
+        for reject in [false,true] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint=format!("ws://{}",listener.local_addr().unwrap());
+            let server=std::thread::spawn(move||{
+                let (mut peer,_)=listener.accept().unwrap();
+                if reject {
+                    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    let mut header=Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        assert!(header.len()<16384);
+                        let mut byte=[0];
+                        std::io::Read::read_exact(&mut peer,&mut byte).unwrap();
+                        header.push(byte[0]);
+                    }
+                    peer.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n").unwrap();
+                }else{std::thread::sleep(Duration::from_millis(250));}
+            });
+            let started=Instant::now();
+            let error=connect_socket_with_budget(&endpoint,Duration::from_millis(80)).err().unwrap();
+            assert!(started.elapsed()<Duration::from_secs(1));
+            if reject {assert!(error.contains("HTTP status=403"));}
+            else {assert!(error.contains("握手超时"));}
+            server.join().unwrap();
+        }
+    }
     #[test]
     fn exit_grace_suppresses_last_process_race_and_honors_stop() {
         let stop = AtomicBool::new(false);
