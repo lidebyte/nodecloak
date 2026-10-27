@@ -1,12 +1,13 @@
 // Runs only in a synthetic, network-intercepted page of an isolated managed profile.
 // No executable source or constructors are accepted from synchronized data.
 (() => {
- const MAX_NODES=50000,MAX_STRING=1<<20,MAX_RECORDS=50000;
+ const MAX_NODES=50000,MAX_STRING=64<<20,MAX_BYTES=64<<20,MAX_RECORDS=50000;
  const typed={Uint8Array,Uint8ClampedArray,Int8Array,Int16Array,Uint16Array,Int32Array,Uint32Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,DataView};
  const fail=message=>{throw new Error(message);};
  const bytesToBase64=bytes=>{let text='';for(let i=0;i<bytes.length;i+=8192)text+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(text);};
  const base64ToBytes=text=>{if(typeof text!=='string'||text.length>2*MAX_STRING)fail('NC_LIMIT');return Uint8Array.from(atob(text),x=>x.charCodeAt(0));};
  const string=s=>{if(typeof s!=='string'||s.length>MAX_STRING)fail('NC_LIMIT');return s;};
+ const checkBytes=state=>{if(new Blob([JSON.stringify(state)]).size>MAX_BYTES)fail('NC_LIMIT');};
  async function pack(value){
   const nodes=[],seen=new WeakMap();
   async function encode(v,depth=0){
@@ -73,10 +74,11 @@
    for(const store of records){const encoded=[];for(const[k,v]of store.rows)encoded.push([await pack(k),await pack(v)]);stores.push({...store,rows:encoded});}
    databases.push({name:entry.name,version:db.version,stores});
   }finally{db.close();}}
-  const state={local,databases};if(JSON.stringify(state).length>8<<20)fail('NC_LIMIT');return state;
+  const state={local,databases};checkBytes(state);return state;
  }
  async function importOrigin(state){
   if(!state||!Array.isArray(state.local)||state.local.length>MAX_RECORDS||!Array.isArray(state.databases)||state.databases.length>100)fail('NC_INVALID_GRAPH');
+  checkBytes(state);
   const databases=[];for(const d of state.databases){if(!d||typeof d.name!=='string'||d.name.length>1000||!Number.isSafeInteger(d.version)||d.version<1||!Array.isArray(d.stores)||d.stores.length>100)fail('NC_INVALID_GRAPH');const stores=[];for(const s of d.stores){if(!s||typeof s.name!=='string'||s.name.length>1000||!Array.isArray(s.rows)||s.rows.length>MAX_RECORDS||!Array.isArray(s.indexes)||s.indexes.length>100||typeof s.autoIncrement!=='boolean')fail('NC_INVALID_GRAPH');const rows=[];for(const pair of s.rows){if(!Array.isArray(pair)||pair.length!==2)fail('NC_INVALID_GRAPH');rows.push([await unpack(pair[0]),await unpack(pair[1])]);}stores.push({...s,rows});}databases.push({...d,stores});}
   const local=state.local.map(pair=>{if(!Array.isArray(pair)||pair.length!==2)fail('NC_INVALID_GRAPH');return [string(pair[0]),string(pair[1])];});
   for(const d of await indexedDB.databases()){if(d.name)await deleted(d.name);}localStorage.clear();for(const[k,v]of local)localStorage.setItem(k,v);

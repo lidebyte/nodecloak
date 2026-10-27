@@ -145,6 +145,11 @@ func (s *Server) shareLockAccounts(ctx context.Context, tx pgx.Tx, i identity, o
 	return nil
 }
 func (s *Server) shareCreate(w http.ResponseWriter, r *http.Request, i identity) {
+	release, allowed := beginSnapshotTransfer(w, r, snapshotWireLimit)
+	if !allowed {
+		return
+	}
+	defer release()
 	var in struct {
 		ID              string    `json:"id"`
 		SourceProfileID string    `json:"sourceProfileId"`
@@ -164,14 +169,14 @@ func (s *Server) shareCreate(w http.ResponseWriter, r *http.Request, i identity)
 			Envelope  string `json:"envelope"`
 		} `json:"envelopes"`
 	}
-	if !decode(w, r, &in, 14<<20) {
+	if !decode(w, r, &in, snapshotWireLimit) {
 		return
 	}
 	now := s.now().UTC()
 	email, ok := normalizedEmail(in.RecipientEmail)
 	in.ProfileName = strings.TrimSpace(in.ProfileName)
 	in.RecipientName = strings.TrimSpace(in.RecipientName)
-	if !validID(in.ID) || !validID(in.RecipientID) || in.RecipientID == i.Account || !ok || in.RecipientName == "" || len([]rune(in.RecipientName)) > 60 || !validShareDeadline(in.ExpiresAt, now) || in.Writer != i.Device || len(in.SourceProfileID) == 0 || len(in.SourceProfileID) > 256 || in.ProfileName == "" || len([]rune(in.ProfileName)) > 60 || (in.Browser != "chrome" && in.Browser != "edge" && in.Browser != "firefox") || len(in.Note) > 2000 || len(in.Payload) < 16 || len(in.Payload) > 12<<20 || len(in.Envelopes) == 0 || len(in.Envelopes) > 100 {
+	if !validID(in.ID) || !validID(in.RecipientID) || in.RecipientID == i.Account || !ok || in.RecipientName == "" || len([]rune(in.RecipientName)) > 60 || !validShareDeadline(in.ExpiresAt, now) || in.Writer != i.Device || len(in.SourceProfileID) == 0 || len(in.SourceProfileID) > 256 || in.ProfileName == "" || len([]rune(in.ProfileName)) > 60 || (in.Browser != "chrome" && in.Browser != "edge" && in.Browser != "firefox") || len(in.Note) > 2000 || len(in.Payload) < 16 || int64(len(in.Payload)) > snapshotWireLimit || len(in.Envelopes) == 0 || len(in.Envelopes) > 100 {
 		failure(w, 400, "invalid_share")
 		return
 	}
@@ -544,6 +549,11 @@ func (s *Server) shareRead(w http.ResponseWriter, r *http.Request, i identity, w
 	reply(w, 200, out)
 }
 func (s *Server) sharePayload(w http.ResponseWriter, r *http.Request, i identity) {
+	release, allowed := beginSnapshotTransfer(w, r, snapshotWireLimit)
+	if !allowed {
+		return
+	}
+	defer release()
 	s.shareRead(w, r, i, true)
 }
 func (s *Server) shareAuthorize(w http.ResponseWriter, r *http.Request, i identity) {

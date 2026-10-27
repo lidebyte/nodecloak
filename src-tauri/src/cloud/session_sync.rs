@@ -33,10 +33,13 @@ pub(crate) fn cache(c: &Connection, o: &Object) -> Result<Object, String> {
 pub(crate) fn cached(c: &Connection, o: &Object) -> Result<Object, String> {
     let file = cache_path(c, o)?;
     profiles::guard_tree(&file)?;
-    let b = std::fs::read(file).map_err(|_| "本机加密基线缺失，请保留本地数据并重新同步")?;
-    if b.len() > 12 << 20 {
+    use std::io::Read;
+    let f=std::fs::File::open(file).map_err(|_| "本机加密基线缺失，请保留本地数据并重新同步")?;
+    if f.metadata().map_err(|_| "无法读取本机登录记录")?.len()>super::session_limits::WIRE_BYTES as u64 {
         return Err("本机登录记录过大".into());
-    };
+    }
+    let mut b=Vec::new();f.take((super::session_limits::WIRE_BYTES+1) as u64).read_to_end(&mut b).map_err(|_| "无法读取本机登录记录")?;
+    if b.len()>super::session_limits::WIRE_BYTES {return Err("本机登录记录过大".into());}
     let full: Object = serde_json::from_slice(&b).map_err(|_| "本机登录记录损坏")?;
     if full.id != o.id
         || full.revision != o.revision

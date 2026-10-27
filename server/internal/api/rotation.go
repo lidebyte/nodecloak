@@ -25,6 +25,11 @@ func (s *Server) authorizeTx(ctx context.Context, tx pgx.Tx, i identity, approve
 	return nil
 }
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request, i identity) {
+	release, allowed := beginSnapshotTransfer(w, r, 360<<20)
+	if !allowed {
+		return
+	}
+	defer release()
 	var in struct {
 		BaseEpoch int    `json:"baseEpoch"`
 		Revoke    string `json:"revokeDevice"`
@@ -132,7 +137,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request, i identity) {
 	var size int64
 	for _, o := range in.Objects {
 		old, ok := objects[o.ID+":"+o.Kind]
-		if !ok || old.Revision != o.Base || old.Deleted != o.Deleted || old.Generation != o.Generation || len(o.Payload) == 0 || len(o.Payload) > 12<<20 {
+		if !ok || old.Revision != o.Base || old.Deleted != o.Deleted || old.Generation != o.Generation || len(o.Payload) == 0 || int64(len(o.Payload)) > snapshotWireLimit || o.Kind == "config" && int64(len(o.Payload)) > smallSnapshotWireLimit {
 			failure(w, 409, "revision_conflict")
 			return
 		}

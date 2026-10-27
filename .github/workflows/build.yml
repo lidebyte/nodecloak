@@ -110,6 +110,9 @@ jobs:
           }
           cargo test --manifest-path src-tauri/Cargo.toml --locked installed_firefox_mozilla_web_storage_roundtrip -- --ignored --nocapture --test-threads=1
           exit $LASTEXITCODE
+      - name: Verify large login snapshots in all installed browsers
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked installed_browsers_large_session_roundtrip -- --ignored --nocapture --test-threads=1
       - name: Verify saved browser pages after profile restart
         shell: bash
         run: |

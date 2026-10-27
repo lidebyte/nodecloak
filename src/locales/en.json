@@ -1,4 +1,8 @@
 {
+  "登录快照超过 64 MiB，本机数据已保留": "The login snapshot exceeds 64 MiB. Local data has been preserved.",
+  "登录快照压缩数据无效，本机数据已保留": "The compressed login snapshot is invalid. Local data has been preserved.",
+  "此登录快照需要更新 NodeCloak 后才能读取，本机数据已保留": "Update NodeCloak to read this login snapshot. Local data has been preserved.",
+  "云端服务暂不支持此快照大小，请更新服务后重试；本机数据已保留": "The cloud service does not yet support this snapshot size. Update the service and retry. Local data has been preserved.",
   "待恢复副本": "Profile awaiting recovery",
   "本机缺少这份副本的配置，需要恢复或停止同步": "This profile's local configuration is missing. Restore it or stop syncing.",
   "配置问题": "Configuration issue",

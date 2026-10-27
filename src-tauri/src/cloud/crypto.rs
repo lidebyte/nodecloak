@@ -88,7 +88,7 @@ mod roster_tests {
         assert_ne!(vault_code("account", &root), vault_code("other", &root));
     }
 }
-const MAX_PLAINTEXT: usize = 8 << 20;
+use super::session_limits::{FRAME_HEADER_BYTES, LEGACY_BYTES, SNAPSHOT_BYTES, TOO_LARGE};
 const ERROR: &str = "加密数据校验失败，身份、版本或密钥不匹配";
 #[derive(Clone, Copy, Serialize)]
 pub struct Context<'a> {
@@ -158,31 +158,43 @@ fn decode<const N: usize>(s: &str) -> Result<[u8; N], String> {
         .map_err(|_| ERROR.into())
 }
 pub fn seal(root: &[u8; 32], ctx: &Context, plain: &[u8]) -> Result<Envelope, String> {
-    if plain.len() > MAX_PLAINTEXT {
-        return Err("同步数据超过 8 MB 限制".into());
+    if plain.len() > SNAPSHOT_BYTES {
+        return Err(TOO_LARGE.into());
     };
-    let aad = ctx.aad()?;
+    let version=if plain.len()>LEGACY_BYTES {2} else {1};
+    let frame=if version==2 {Some(super::session_payload::encode(plain)?)} else {None};
+    let data=frame.as_ref().map(|v|v.as_slice()).unwrap_or(plain);
+    let aad = envelope_aad(ctx,version)?;
     let key = random_key()?;
     let n = nonce()?;
     let kn = nonce()?;
     let mut wrap_aad = b"nodecloak-data-key-v1:".to_vec();
     wrap_aad.extend(&aad);
     Ok(Envelope {
-        version: 1,
+        version,
         nonce: B64.encode(n),
-        ciphertext: B64.encode(encrypt(&key, &n, &aad, plain)?),
+        ciphertext: B64.encode(encrypt(&key, &n, &aad, data)?),
         key_nonce: B64.encode(kn),
         key_ciphertext: B64.encode(encrypt(root, &kn, &wrap_aad, key.as_slice())?),
     })
 }
+fn envelope_aad(ctx:&Context,version:u8)->Result<Vec<u8>,String>{
+    let mut aad=ctx.aad()?;
+    match version {
+        1=>{},
+        2=>aad.extend_from_slice(b":nodecloak-large-snapshot-v2"),
+        _=>return Err("此登录快照需要更新 NodeCloak 后才能读取，本机数据已保留".into()),
+    }
+    Ok(aad)
+}
 pub fn open(root: &[u8; 32], ctx: &Context, e: &Envelope) -> Result<Zeroizing<Vec<u8>>, String> {
-    if e.version != 1
-        || e.ciphertext.len() > (MAX_PLAINTEXT + 16) * 4 / 3 + 8
+    let aad = envelope_aad(ctx,e.version)?;
+    let max=if e.version==1 {LEGACY_BYTES} else {SNAPSHOT_BYTES+FRAME_HEADER_BYTES};
+    if e.ciphertext.len() > (max + 16 + 2) / 3 * 4
         || e.key_ciphertext.len() > 80
     {
         return Err(ERROR.into());
     };
-    let aad = ctx.aad()?;
     let mut wa = b"nodecloak-data-key-v1:".to_vec();
     wa.extend(&aad);
     let key_bytes = decrypt(
@@ -192,12 +204,13 @@ pub fn open(root: &[u8; 32], ctx: &Context, e: &Envelope) -> Result<Zeroizing<Ve
         &B64.decode(&e.key_ciphertext).map_err(|_| ERROR)?,
     )?;
     let key: Key = Zeroizing::new(key_bytes.as_slice().try_into().map_err(|_| ERROR)?);
-    decrypt(
+    let data=decrypt(
         &key,
         &decode(&e.nonce)?,
         &aad,
         &B64.decode(&e.ciphertext).map_err(|_| ERROR)?,
-    )
+    )?;
+    if e.version==2 {super::session_payload::decode(&data)} else {Ok(data)}
 }
 pub struct DeviceKeys {
     pub private_key: Key,
@@ -435,6 +448,30 @@ mod tests {
         bad = a.clone();
         bad.key_ciphertext = b.key_ciphertext;
         assert!(open(&root, &context(), &bad).is_err());
+    }
+    #[test]
+    fn large_compressible_sessions_round_trip_with_a_versioned_envelope() {
+        let root=random_key().unwrap();let plain=vec![b'x';9<<20];
+        let ctx=Context{kind:"session",..context()};
+        let envelope=seal(&root,&ctx,&plain).expect("a normal session larger than 8 MiB must sync");
+        assert_eq!(envelope.version,2);assert!(envelope.ciphertext.len()<200000);
+        assert_eq!(open(&root,&ctx,&envelope).unwrap().as_slice(),plain);
+        let mut downgraded=envelope.clone();downgraded.version=1;
+        assert!(open(&root,&ctx,&downgraded).is_err());
+        assert!(open(&root,&Context{revision:8,..ctx},&envelope).is_err());
+    }
+    #[test]
+    fn incompressible_large_sessions_are_not_silently_truncated() {
+        let root=random_key().unwrap();let mut plain=vec![0;9<<20];getrandom::fill(&mut plain).unwrap();
+        let envelope=seal(&root,&context(),&plain).expect("incompressible sessions must also sync");
+        assert_eq!(envelope.version,2);
+        assert_eq!(open(&root,&context(),&envelope).unwrap().as_slice(),plain);
+    }
+    #[test]
+    fn small_writes_keep_legacy_format_and_oversize_input_is_explicit() {
+        let root=random_key().unwrap();let small=seal(&root,&context(),b"legacy-login").unwrap();
+        assert_eq!(small.version,1);assert_eq!(open(&root,&context(),&small).unwrap().as_slice(),b"legacy-login");
+        assert!(seal(&root,&context(),&vec![0;(64<<20)+1]).err().unwrap().contains("64 MiB"));
     }
     #[test]
     fn device_envelope_only_opens_on_target_device_and_account() {

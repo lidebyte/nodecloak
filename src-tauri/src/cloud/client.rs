@@ -28,6 +28,9 @@ pub fn api_error(status: u16, body: &str) -> String {
         .ok()
         .and_then(|v| v["error"].as_str().map(str::to_string))
         .unwrap_or_default();
+    if status==413 && error=="request_too_large" {
+        return "云端服务暂不支持此快照大小，请更新服务后重试；本机数据已保留".into();
+    }
     let known = [
         "authorization_not_found",
         "invalid_scope",
@@ -124,9 +127,11 @@ impl Client {
             return Err("无效云端接口".into());
         }
         tauri::async_runtime::block_on(async {
+            let transfer=data_transfer(&method,path);
             let mut request = self
                 .http
                 .request(method, format!("{}{path}", self.endpoint));
+            if transfer {request=request.timeout(Duration::from_secs(180));}
             if let Some(t) = token {
                 request = request.bearer_auth(t)
             };
@@ -140,7 +145,8 @@ impl Client {
             let status = response.status();
             let mut bytes = Vec::new();
             while let Some(chunk) = response.chunk().await.map_err(|_| "云端响应中断")? {
-                if bytes.len() + chunk.len() > 12 << 20 {
+                let limit=if transfer {super::session_limits::WIRE_BYTES} else {12<<20};
+                if bytes.len() + chunk.len() > limit {
                     return Err("云端数据超出限制".into());
                 };
                 bytes.extend_from_slice(&chunk)
@@ -155,9 +161,36 @@ impl Client {
         })
     }
 }
+fn data_transfer(method:&Method,path:&str)->bool {
+    let path=path.split('?').next().unwrap_or(path);
+    (method==Method::POST && (path=="/v1/vault/rotate" || path=="/v1/shares"))
+        || path.strip_prefix("/v1/objects/").is_some_and(|p|!p.is_empty()&&!p.contains('/'))
+        || path.starts_with("/v1/shares/")&&path.ends_with("/payload")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn metadata_lists_and_lease_requests_keep_the_short_api_budget(){
+        assert!(!data_transfer(&Method::GET,"/v1/shares"));
+        assert!(data_transfer(&Method::POST,"/v1/shares"));
+        assert!(!data_transfer(&Method::GET,"/v1/objects"));
+        assert!(!data_transfer(&Method::POST,"/v1/objects/example/lease"));
+    }
+    #[test]
+    fn encrypted_snapshot_responses_can_exceed_the_old_twelve_mib_limit() {
+        use std::{io::{Read,Write},net::TcpListener};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+        let server=std::thread::spawn(move||{
+            let (mut socket,_)=listener.accept().unwrap();let mut request=Vec::new();let mut byte=[0];
+            while !request.ends_with(b"\r\n\r\n") {socket.read_exact(&mut byte).unwrap();request.push(byte[0]);}
+            let body=format!("{{\"payload\":\"{}\"}}","x".repeat(13<<20));
+            let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+        });
+        let client=Client::new(&format!("http://{address}"),true).unwrap();
+        let result=client.call::<Value>(Method::GET,"/v1/objects/00000000-0000-4000-8000-000000000001?kind=session",None,None);
+        server.join().unwrap();assert_eq!(result.expect("large encrypted downloads must be readable")["payload"].as_str().unwrap().len(),13<<20);
+    }
     #[test]
     fn sharing_device_unavailable_error_keeps_actionable_code_without_response_secrets() {
         let error = api_error(

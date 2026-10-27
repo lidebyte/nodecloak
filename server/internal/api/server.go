@@ -1013,6 +1013,13 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, i identity) {
 		failure(w, 400, "invalid_object")
 		return
 	}
+	if kind == "session" {
+		release, ok := beginSnapshotTransfer(w, r, snapshotWireLimit)
+		if !ok {
+			return
+		}
+		defer release()
+	}
 	var o object
 	e := s.db.QueryRow(r.Context(), "SELECT id::text,kind,revision,epoch,deleted,payload,writer::text,generation,updated_at FROM objects WHERE account_id=$1 AND id=$2 AND kind=$3", i.Account, id, kind).Scan(&o.ID, &o.Kind, &o.Revision, &o.Epoch, &o.Deleted, &o.Payload, &o.Writer, &o.Generation, &o.UpdatedAt)
 	if errors.Is(e, pgx.ErrNoRows) {
@@ -1026,6 +1033,11 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, i identity) {
 	reply(w, 200, o)
 }
 func (s *Server) putObject(w http.ResponseWriter, r *http.Request, i identity) {
+	release, ok := beginSnapshotTransfer(w, r, snapshotWireLimit)
+	if !ok {
+		return
+	}
+	defer release()
 	var in struct {
 		Kind           string `json:"kind"`
 		Base           int64  `json:"baseRevision"`
@@ -1036,12 +1048,16 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, i identity) {
 		Generation     int64  `json:"generation"`
 		ConfigRevision *int64 `json:"configRevision"`
 	}
-	if !decode(w, r, &in, 12<<20) {
+	if !decode(w, r, &in, snapshotWireLimit) {
 		return
 	}
 	id := r.PathValue("id")
 	if !validID(id) || in.Kind != "config" && in.Kind != "session" || in.Base < 0 || in.Epoch < 1 || len(in.Payload) < 1 || in.Generation < 0 || in.Kind == "config" && in.Generation != 0 {
 		failure(w, 400, "invalid_object")
+		return
+	}
+	if in.Kind == "config" && int64(len(in.Payload)) > smallSnapshotWireLimit {
+		failure(w, 413, "request_too_large")
 		return
 	}
 	if in.ConfigRevision != nil && (in.Kind != "session" || *in.ConfigRevision < 1) {
@@ -1122,7 +1138,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, i identity) {
 }
 func (s *Server) lease(w http.ResponseWriter, r *http.Request, i identity) {
 	var in struct {
-		Takeover bool `json:"takeover"`
+		Takeover   bool `json:"takeover"`
 		NewSession bool `json:"newSession"`
 	}
 	if !decode(w, r, &in, 4096) {

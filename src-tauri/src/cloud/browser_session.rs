@@ -142,8 +142,8 @@ impl Snapshot {
         }
     }
     pub fn parse(v: Value) -> Result<Self, String> {
-        if serde_json::to_vec(&v).map_err(|_| "登录数据无效")?.len() > 8 << 20 {
-            return Err("登录数据超过 8 MiB，暂不支持同步".into());
+        if serde_json::to_vec(&v).map_err(|_| "登录数据无效")?.len() > super::session_limits::SNAPSHOT_BYTES {
+            return Err(super::session_limits::TOO_LARGE.into());
         };
         let mut s: Self = serde_json::from_value(v).map_err(|_| "登录数据格式无效")?;
         if ![1, 2].contains(&s.schema) || s.cookies.len() > 10000 || s.origins.len() > 500 {
@@ -457,10 +457,14 @@ impl Browser {
                 return Err("无法连接隔离浏览器".into());
             }
         };
+        socket.set_config(|config|{
+            config.max_message_size=Some(super::session_limits::BROWSER_BYTES);
+            config.max_frame_size=Some(super::session_limits::BROWSER_BYTES);
+        });
         if let MaybeTlsStream::Plain(s) = socket.get_mut() {
             s.set_read_timeout(Some(Duration::from_millis(100)))
                 .map_err(|_| "无法设置超时")?;
-            s.set_write_timeout(Some(Duration::from_secs(5)))
+            s.set_write_timeout(Some(Duration::from_secs(30)))
                 .map_err(|_| "无法设置超时")?;
         }
         let mut b = Self {
@@ -557,13 +561,13 @@ impl Browser {
     }
     fn wait_for(&mut self, id: u64, method: &str) -> Result<Value, String> {
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(40) {
+        while start.elapsed() < Duration::from_secs(120) {
             if let Some(v) = self.replies.remove(&id) {
                 return Self::result(v, method);
             }
             match self.socket.read() {
                 Ok(Message::Text(text)) => {
-                    if text.len() > 12 << 20 {
+                    if text.len() > super::session_limits::BROWSER_BYTES {
                         return Err("浏览器响应过大".into());
                     };
                     let v: Value = serde_json::from_str(&text).map_err(|_| "浏览器响应无效")?;
@@ -1350,6 +1354,15 @@ fn verify_cookies(expected: &[Cookie], actual: &[Cookie]) -> Result<(), String> 
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn snapshots_accept_more_than_eight_mib_and_reject_over_sixty_four_without_trimming() {
+        let value="x".repeat(9<<20);
+        let data=json!({"schema":1,"cookies":[],"origins":[{"origin":"https://large-fixture.invalid","state":{"local":[["login",value]],"databases":[]}}]});
+        let snapshot=Snapshot::parse(data).expect("large snapshots must be supported");
+        assert_eq!(snapshot.origins[0].state["local"][0][1].as_str().unwrap().len(),9<<20);
+        let data=json!({"schema":1,"cookies":[],"origins":[{"origin":"https://large-fixture.invalid","state":{"local":[["login","x".repeat(64<<20)]],"databases":[]}}]});
+        assert!(Snapshot::parse(data).err().unwrap().contains("64 MiB"));
+    }
     #[test]
     fn offline_firefox_stage_restores_extensions_and_metadata_after_commit() {
         let root=tempfile::tempdir().unwrap();

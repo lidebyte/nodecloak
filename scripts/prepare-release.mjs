@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "本机配置缺失时，可直接从云端恢复配置或停止同步，每个操作均有明确说明和确认。 / When local configuration is missing, restore it from the cloud or stop syncing with clear explanations and confirmation.",
-  "修复配置缺失被误显示为“已删除副本”或普通配置冲突的问题，并优先显示可识别的副本名称。 / Missing configurations are no longer mislabeled as deleted profiles or ordinary configuration conflicts, and profiles display their known names.",
-  "恢复配置时保留本机已有浏览器数据，登录状态在后续同步中单独核对，避免空数据覆盖云端登录状态。 / Configuration recovery preserves existing local browser data and checks sign-in data separately during the next sync, preventing empty local data from overwriting cloud sign-in state."
+  "登录数据同步上限从 8 MiB 提升至 64 MiB，支持包含较大网站存储的完整登录快照。 / Sign-in snapshots now support up to 64 MiB instead of 8 MiB, including larger website storage.",
+  "较大的登录快照自动压缩后加密同步，减少传输流量及云端空间占用，原有登录数据继续兼容。 / Larger sign-in snapshots are compressed before encryption to reduce transfer and cloud storage usage, while existing snapshots remain compatible.",
+  "Chrome、Edge 和 Firefox 均支持；接收大快照的其他设备也需要更新至 3.2.5 或更高版本。超限或同步失败时保留本机数据。 / Supported in Chrome, Edge and Firefox. Other devices receiving large snapshots must also update to 3.2.5 or later. Local data is preserved if a limit is exceeded or synchronization fails."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

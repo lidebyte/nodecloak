@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
 const INVALID: &str = "网站本地存储格式无效，保留本机数据";
-const LIMIT: usize = 8 << 20;
+const LIMIT: usize = super::session_limits::SNAPSHOT_BYTES;
 
 // Keep document-based handling for IndexedDB and partitioned namespaces. An
 // unknown bucket layout is deliberately conservative, never classified empty.
@@ -328,6 +328,13 @@ mod tests {
             read(dir.path(), &other).unwrap()["local"],
             json!([["keep", "existing"]])
         );
+    }
+    #[test]
+    fn native_local_storage_preserves_a_large_value() {
+        let dir=tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let value="x".repeat(9<<20);let state=json!({"local":[["login",value]],"databases":[]});
+        write(dir.path(),&key(),&state).expect("large local storage must be supported");
+        assert_eq!(read(dir.path(),&key()).unwrap(),state);
     }
     #[test]
     fn native_path_never_handles_partitioned_or_indexeddb_namespaces() {

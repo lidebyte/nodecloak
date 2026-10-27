@@ -5,8 +5,12 @@ mod session_local;
 pub mod client;
 pub mod commands;
 pub mod crypto;
+mod session_limits;
+mod session_payload;
 #[cfg(test)]
 mod interop;
+#[cfg(test)]
+mod session_capacity_checks;
 pub mod merge;
 pub mod model;
 pub mod recovery_export;

@@ -626,4 +626,39 @@ mod tests {
         assert_eq!(sync::fetch(&mut b,&missing_cloud,"config").unwrap().revision,before,"recovery never writes a cloud configuration");
         eprintln!("config lifecycle passed: initial sync, unchanged sync, independent merge, same-field local/cloud/both/skip, offline retry, deletion restore/accept/purge, missing registry protection");
     }
+    #[test]
+    #[ignore="Requires isolated Go/PostgreSQL harness, OS credential store and installed Firefox"]
+    fn desktop_two_device_large_session_sync(){
+        let dir=std::path::PathBuf::from(std::env::var("DESKTOP_INTEROP_DIR").unwrap());
+        let endpoint=std::fs::read_to_string(dir.join("endpoint")).unwrap();
+        let temp=tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let (r1,r2)=(temp.path().join("one"),temp.path().join("two"));
+        let namespaces=[format!("test-{}",uuid::Uuid::new_v4()),format!("test-{}",uuid::Uuid::new_v4())];
+        struct Cleanup{ns:[String;2],account:Option<String>,dir:std::path::PathBuf}
+        impl Drop for Cleanup{fn drop(&mut self){for ns in &self.ns{let _=vault::remove(&format!("{ns}:device"));let _=vault::remove(&format!("{ns}:session"));if let Some(a)=&self.account{let _=vault::remove(&format!("{ns}:{a}:root:1"));let _=vault::remove(&format!("{ns}:{a}:recovery-pending"));let _=vault::clear_staged(ns,a,1);}}let _=std::fs::write(self.dir.join("done"),b"finished");}}
+        let mut cleanup=Cleanup{ns:namespaces.clone(),account:None,dir:dir.clone()};
+        let mut a=Connection::test_connection(&r1,Client::new(&endpoint,true).unwrap(),&namespaces[0]).unwrap();
+        let mut b=Connection::test_connection(&r2,Client::new(&endpoint,true).unwrap(),&namespaces[1]).unwrap();
+        login(&mut a,&dir);let account=a.account_id().unwrap();cleanup.account=Some(account.clone());
+        let recovery=a.initialize().unwrap()["recoveryCode"].as_str().unwrap().to_owned();a.acknowledge_recovery().unwrap();
+        login(&mut b,&dir);b.recover(&recovery).unwrap();
+        let runtime=profiles::Runtime::default();
+        let draft:profiles::Draft=serde_json::from_value(json!({"name":"Large fixture","browser":"firefox","proxy":{"mode":"direct","host":"","port":0,"username":""},"preferences":profiles::Preferences::default()})).unwrap();
+        let p=profiles::create(&r1,draft,None).unwrap();sync::setup(&mut a,"upload",&[p.id.clone()],&[],false,&runtime).unwrap();
+        let cloud=a.disk.accounts[&account].bindings[&p.id].cloud_id.clone();
+        sync::setup(&mut b,"merge",&[],&[cloud.clone()],false,&runtime).unwrap();
+        let peer=profiles::load(&r2).unwrap().into_iter().find(|p|p.name=="Large fixture").unwrap();
+        let expected=super::super::session_capacity_checks::fixture();
+        super::super::browser_session::restore_profile("firefox",&profiles::path(&r1,&p).unwrap(),&expected).unwrap();
+        for c in [&mut a,&mut b]{c.disk.accounts.get_mut(&account).unwrap().session_sync=true;c.disk.save(&c.root).unwrap();}
+        sync::run(&mut a,&runtime).unwrap();let first=sync::fetch(&mut a,&cloud,"session").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&first.payload).unwrap()["version"],2);
+        assert!(first.payload.len()<expected.bytes().unwrap().len()/10);
+        sync::run(&mut b,&runtime).unwrap();
+        let actual=super::super::browser_session::export_profile("firefox",&profiles::path(&r2,&peer).unwrap()).unwrap();
+        assert_eq!(actual.bytes().unwrap().as_slice(),expected.bytes().unwrap().as_slice());
+        assert_eq!(sync::fetch(&mut b,&cloud,"session").unwrap().revision,first.revision,"receiving a large snapshot must not create another cloud write");
+        assert!(b.disk.accounts[&account].conflicts.is_empty());
+        eprintln!("Two devices: >8 MiB native snapshot, compressed encrypted v2 upload, full restore and unchanged remote revision passed");
+    }
 }
