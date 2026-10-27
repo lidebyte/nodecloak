@@ -388,7 +388,17 @@ impl Rdp {
                 if value.get("error").is_some() {
                     return Err("Firefox 拒绝原生配置请求，请更新浏览器后重试".into());
                 }
-                return Ok(value);
+                // Notifications share the actor with replies. In particular,
+                // startup tabListChanged must not consume listTabs/getProcess
+                // replies and shift every subsequent request by one packet.
+                let reply = match method {
+                    "listTabs" => value["tabs"].is_array(),
+                    "getProcess" => value["processDescriptor"].is_object(),
+                    "getTarget" => value["process"].is_object(),
+                    "evaluateJSAsync" => value["resultID"].is_string() && value.get("type").is_none(),
+                    _ => value.get("type").is_none(),
+                };
+                if reply { return Ok(value); }
             }
         }
         Err("Firefox 原生配置响应过多".into())
@@ -524,6 +534,42 @@ mod tests {
             packet(&mut std::io::Cursor::new(b"2:{}")).unwrap(),
             json!({})
         );
+    }
+    #[test]
+    fn native_replies_ignore_same_actor_window_and_console_notifications() {
+        fn send(socket:&mut TcpStream,value:Value) {
+            let bytes=serde_json::to_vec(&value).unwrap();
+            socket.write_all(format!("{}:",bytes.len()).as_bytes()).unwrap();
+            socket.write_all(&bytes).unwrap();
+        }
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket=TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let server=std::thread::spawn(move||{
+            let (mut peer,_)=listener.accept().unwrap();
+            for (method,actor,event,reply) in [
+                ("listTabs","root",json!({"type":"tabListChanged"}),json!({"tabs":[{}]})),
+                ("getProcess","root",json!({"type":"processListChanged"}),json!({"processDescriptor":{"actor":"parent"}})),
+                ("getTarget","parent",json!({"type":"resources-available-array","array":[]}),json!({"process":{"consoleActor":"console"}})),
+                ("evaluateJSAsync","console",json!({"type":"consoleAPICall"}),json!({"resultID":"result-1"})),
+            ] {
+                let request=packet(&mut peer).unwrap();assert_eq!(request["type"],method);
+                let mut event=event;event["from"]=json!(actor);send(&mut peer,event);
+                let mut reply=reply;reply["from"]=json!(actor);send(&mut peer,reply);
+                if method=="evaluateJSAsync" {
+                    send(&mut peer,json!({"from":actor,"type":"evaluationResult","resultID":"result-1","result":{"value":1}}));
+                }
+            }
+        });
+        let mut rdp=Rdp{socket};
+        let result=(||->Result<(),String>{
+            assert!(rdp.call("root","listTabs",json!({}))?["tabs"].is_array());
+            assert_eq!(rdp.call("root","getProcess",json!({"id":0}))?["processDescriptor"]["actor"],"parent");
+            assert_eq!(rdp.call("parent","getTarget",json!({}))?["process"]["consoleActor"],"console");
+            assert_eq!(rdp.evaluate("console","1")?["value"],1);
+            Ok(())
+        })();
+        drop(rdp);server.join().unwrap();result.unwrap();
     }
     #[test]
     fn interrupted_setup_restores_only_recorded_preferences() {
