@@ -24,3 +24,8 @@ Deploy the compatible server changes and updated `server/deploy/nginx-account.co
 All devices that need to receive a v2 snapshot must update to a client with v2 support. Small snapshots remain compatible with older clients. If an old server rejects a larger upload, the new client reports that the service must be updated and preserves local data.
 
 This implementation introduces no schema migration, plaintext server-side storage or new key requirements. Release publication and live deployment are separate from development verification.
+
+
+## Availability
+
+Shipped in [NodeCloak 3.2.5](https://github.com/nodecloak/nodecloak/releases/tag/v3.2.5). The compatible service/proxy was deployed before the desktop release. All devices receiving large snapshots need 3.2.5 or later. See the [rollout record](../superpowers/plans/2026-10-28-release-3.2.5.md) for verification evidence.
