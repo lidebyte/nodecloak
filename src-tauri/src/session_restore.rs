@@ -423,7 +423,7 @@ mod tests {
     use super::*;
     #[test]
     fn upgrade_only_firefox_state_is_fenced_and_valid_backups_follow_native_priority() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = root.path();
         std::fs::create_dir(profile.join("sessionstore-backups")).unwrap();
         std::fs::write(
@@ -450,7 +450,7 @@ mod tests {
     }
     #[test]
     fn a_later_blank_session_never_rotates_out_a_previous_unconfirmed_original() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = root.path();
         std::fs::write(
             profile.join("sessionstore.jsonlz4"),
@@ -487,7 +487,7 @@ mod tests {
     }
     #[test]
     fn only_existing_native_tab_history_triggers_resume() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         assert!(!chromium_available(root.path()).unwrap());
         let sessions = root.path().join("Default/Sessions");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -499,7 +499,7 @@ mod tests {
     }
     #[test]
     fn firefox_saved_tabs_stay_parked_during_temporary_setup_and_roll_back_on_failure() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = root.path();
         std::fs::write(
             profile.join("sessionstore.jsonlz4"),
@@ -538,7 +538,7 @@ mod tests {
     }
     #[test]
     fn firefox_original_snapshot_is_kept_as_backup_after_matching_native_save() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = root.path();
         std::fs::write(profile.join("sessionstore.jsonlz4"), b"mozLz40\0original").unwrap();
         let mut saved = FirefoxSession::park(profile).unwrap().unwrap();
@@ -579,7 +579,7 @@ mod tests {
             vec!["https://public.test/"]
         );
         assert!(normal_tabs(&json!({"targetInfos":[]}), "normal").is_none());
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         write_tabs(root.path(), &["https://public.test/".into()]).unwrap();
         let live_blank=normal_tabs(&json!({"targetInfos":[{"type":"page","browserContextId":"normal","url":"edge://newtab/"}]}),"normal").unwrap();
         write_tabs(root.path(), &live_blank).unwrap();
@@ -587,7 +587,7 @@ mod tests {
     }
     #[test]
     fn firefox_interrupted_setup_recovery_and_nonrestoring_launch_preserve_original_data() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let profile = root.path();
         std::fs::write(profile.join("sessionstore.jsonlz4"), b"mozLz40\0original").unwrap();
         let saved = FirefoxSession::park(profile).unwrap().unwrap();
