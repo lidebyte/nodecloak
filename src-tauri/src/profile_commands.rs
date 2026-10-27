@@ -188,7 +188,7 @@ fn launch_with_purpose(
         crate::session_restore::FirefoxSession::park(&path)?
     }else{None};
     let resume = !automation && destination=="startup" && p.browser!="firefox"
-        && if p.browser=="edge" && crate::regional::manual_needs_control_for(&p.browser,&p.preferences) { !crate::session_restore::read_tabs(&path)?.is_empty() }
+        && if crate::session_restore::uses_tab_urls(&p.browser) && crate::regional::manual_needs_control_for(&p.browser,&p.preferences) { !crate::session_restore::read_tabs(&path)?.is_empty() }
             else {crate::session_restore::chromium_available(&path)?};
     let port = tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
     let use_extension = !automation && crate::firefox_extension::eligible(&p.browser, &p.preferences);

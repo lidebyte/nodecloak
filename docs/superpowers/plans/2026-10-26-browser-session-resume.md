@@ -4,8 +4,8 @@ Ordinary profile Start restores previously open pages instead of always replacin
 
 Implemented behavior:
 
-- Controlled manual Chrome reopens the browser's last closed window after its settings controller is ready. It retains native history, recoverable form state and scroll. Cold restore was rejected because first website scripts could run before profile protection.
-- Controlled manual Edge restores its recorded normal-profile tab URLs through the protected navigation path. It uses ordinary browser cache policy; it does not currently restore form/scroll state. Native Edge reopen was rejected by the first-script regression, so that unsafe path is not shipped.
+- Controlled manual Windows Chrome reopens the browser's last closed window after its settings controller is ready. It retains native history, recoverable form state and scroll. Cold restore was rejected because first website scripts could run before profile protection.
+- Controlled manual Edge and macOS Chrome restore its recorded normal-profile tab URLs through the protected navigation path. It uses ordinary browser cache policy; it does not currently restore form/scroll state. Native Edge reopen was rejected by the first-script regression, so that unsafe path is not shipped.
 - Edge captures only the initial normal browser context and preserves that boundary across controller reconnection. Incognito/ambiguous contexts, prerenders and Workers are excluded. A live window containing only internal tabs clears old website URLs; browser shutdown keeps the last nonempty window snapshot.
 - Uncontrolled Chromium launches can use native startup restore. MCP never invokes the new restore path or captures manual tab state.
 - Firefox parks native session files before temporary extension/configuration startup, including upgrade backups. Native readback tries clean/recovery/previous/upgrade files in order, using Firefox decompression and optional decryption and checking its format version.
@@ -18,7 +18,7 @@ Implemented behavior:
 Limits:
 
 - Browser/site rules control cache freshness and which fields/session cookies survive. A closed process has no frozen JavaScript heap; this is not a promise of zero network requests or universal login persistence.
-- Controlled Chrome reopens the last native window. Edge restores pages into a window, with no native form/scroll snapshot. Firefox restores its saved windows.
+- Controlled Windows Chrome reopens the last native window. Edge and macOS Chrome restore pages into a window, with no native form/scroll snapshot. Firefox restores its saved windows.
 - The existing Firefox companion targets document/frame readback; Worker fingerprint marker behavior remains its existing baseline. Native Worker timezone is preserved.
 - Native integration checks ran on Windows. macOS/Linux use the same guarded platform code but were not tested on physical devices here.
 
@@ -36,3 +36,5 @@ Verification:
 - [x] Final system-region Firefox check preserved en-US Intl locale, fr-FR HTTP language, Asia/Singapore timezone, saved draft/scroll and session cookie; refreshed desktop binary built.
 
 Release review identified a slow-start Edge capture race: an initial blank helper could erase the prior URL snapshot before Resume arrived. Capture now remains disabled until a successful restoration or requested navigation, and retains that state across reconnect. The native regression explicitly delays Resume by three seconds and confirmed failure before the fix. The release pipeline runs the protected Chromium and both plain Firefox restart checks on all three build platforms.
+
+Cross-platform release checks found the native Reopen Closed Window accelerator unreliable on macOS Chrome. Controlled macOS Chrome therefore uses the same protected normal-context tab URL recovery as Edge; native form/scroll state is not promised on this path. The shared capture predicate is reused at launch, capture and restore. The native check asserts protected page recovery on both Mac Chromium browsers.

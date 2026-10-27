@@ -505,7 +505,7 @@ struct BrowserControl {
 impl BrowserControl {
     fn resume_previous(&mut self) -> Result<bool,String> {
         if self.firefox || self.plan.automation {return Ok(false);}
-        if self.diagnostic.as_ref().is_some_and(|(_,browser)|browser=="edge") {
+        if self.diagnostic.as_ref().is_some_and(|(_,browser)|crate::session_restore::uses_tab_urls(browser)) {
             let path=&self.diagnostic.as_ref().unwrap().0;
             let saved=crate::session_restore::read_tabs(path)?;
             for (index,url) in saved.iter().enumerate(){self.open(url,index>0).map_err(|e|e.to_string())?;}
@@ -559,7 +559,7 @@ impl BrowserControl {
     fn save_open_tabs(&mut self) -> Result<(),String> {
         self.session_checked=Instant::now();
         let Some((path,browser))=&self.diagnostic else{return Ok(())};
-        if !self.session_capture_ready || self.plan.automation || browser!="edge" {return Ok(())}
+        if !self.session_capture_ready || self.plan.automation || !crate::session_restore::uses_tab_urls(browser) {return Ok(())}
         let Some(normal)=&self.normal_context else{return Ok(())};
         let targets=self.protocol.call("Target.getTargets",json!({}),None)?;
         let Some(urls)=crate::session_restore::normal_tabs(&targets,normal) else{return Ok(())};

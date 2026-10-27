@@ -114,7 +114,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NODECLOAK_TEST_HEADLESS_BROWSERS=1 cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_chromium_after_protection -- --ignored --nocapture --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_chromium_after_protection -- --ignored --nocapture --test-threads=1
           cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_firefox_after_region_setup -- --ignored --nocapture --test-threads=1
           cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_firefox_system_settings_unchanged -- --ignored --nocapture --test-threads=1
       - name: Import Developer ID and validate notarization credentials

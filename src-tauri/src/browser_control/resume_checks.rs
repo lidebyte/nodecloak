@@ -38,7 +38,7 @@ fn native_session_resume_chromium_after_protection() {
         assert_eq!(first["main"]["timezone"], "Asia/Tokyo");
         assert_eq!(first["main"]["marker"], true);
         eprintln!("First fixture: {first}");
-        if engine == "edge" {
+        if crate::session_restore::uses_tab_urls(engine) {
             let deadline = Instant::now() + Duration::from_secs(6);
             while crate::session_restore::read_tabs(&path).unwrap().is_empty() {
                 assert!(
@@ -54,13 +54,9 @@ fn native_session_resume_chromium_after_protection() {
             .send(Request::ExitBrowser(tx))
             .unwrap();
         rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !platform::profile_process_ids(&path).unwrap().is_empty() && Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        platform::wait_profile_closed(&path, Duration::from_secs(15)).unwrap();
         runtime.1.stop(&p.id);
-        if engine == "edge" {
+        if crate::session_restore::uses_tab_urls(engine) {
             let saved = crate::session_restore::read_tabs(&path).unwrap();
             assert!(!saved.is_empty());
             platform::spawn_settings_browser(engine, &path, "direct", None).unwrap();
@@ -88,7 +84,7 @@ fn native_session_resume_chromium_after_protection() {
             restored["main"]["marker"], true,
             "restored page ran before fingerprint protection"
         );
-        if engine == "chrome" {
+        if !crate::session_restore::uses_tab_urls(engine) {
             assert_eq!(restored["main"]["draft"], "saved draft");
             assert_eq!(restored["main"]["scroll"], 700);
         }

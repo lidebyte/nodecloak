@@ -21,7 +21,7 @@ for(const [platform,name] of Object.entries(names)) {
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
   "云同步改为独立页面，集中展示同步状态、待处理事项和副本，并说明每个处理操作的结果。 / Cloud sync now has its own page with clear status, pending items, profiles and explanations of each resolution action.",
-  "重新启动浏览器副本时恢复上次打开的页面。Chrome 和 Firefox 同时恢复浏览器可保存的草稿、历史与滚动位置；Edge 恢复上次标签页。 / Restarted profiles reopen their previous pages. Chrome and Firefox also restore recoverable drafts, history and scroll positions; Edge restores its previous tabs.",
+  "重新启动浏览器副本时恢复上次打开的页面。Windows Chrome 和 Firefox 同时恢复浏览器可保存的草稿、历史与滚动位置；Edge 和 Mac Chrome 恢复上次标签页。 / Restarted profiles reopen their previous pages. Windows Chrome and Firefox also restore recoverable drafts, history and scroll positions; Edge and Mac Chrome restore their previous tabs.",
   "页面恢复沿用浏览器缓存和网站规则，部分页面仍会联网刷新。 / Restored pages follow browser cache and website rules; some pages still refresh over the network."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};

@@ -3,6 +3,10 @@ use serde_json::json;
 use std::path::Path;
 use std::path::PathBuf;
 
+pub(crate) fn uses_tab_urls(browser: &str) -> bool {
+    browser == "edge" || (cfg!(target_os = "macos") && browser == "chrome")
+}
+
 pub(crate) fn normal_tabs(targets: &serde_json::Value, normal: &str) -> Option<Vec<String>> {
     let pages = targets["targetInfos"]
         .as_array()?
