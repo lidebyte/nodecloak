@@ -110,6 +110,13 @@ jobs:
           }
           cargo test --manifest-path src-tauri/Cargo.toml --locked installed_firefox_mozilla_web_storage_roundtrip -- --ignored --nocapture --test-threads=1
           exit $LASTEXITCODE
+      - name: Verify saved browser pages after profile restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          NODECLOAK_TEST_HEADLESS_BROWSERS=1 cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_chromium_after_protection -- --ignored --nocapture --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_firefox_after_region_setup -- --ignored --nocapture --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml --locked native_session_resume_firefox_system_settings_unchanged -- --ignored --nocapture --test-threads=1
       - name: Import Developer ID and validate notarization credentials
         if: env.MACOS_NOTARIZE == 'true'
         run: node scripts/macos-signing.mjs prepare

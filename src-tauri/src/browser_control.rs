@@ -122,6 +122,7 @@ impl Runtime {
     }
 }
 enum Request {
+    Resume(mpsc::Sender<Result<bool,String>>),
     InvalidateDownloads(Option<String>),
     Automation(String,Value,crate::mcp::policy::Grant,Arc<AtomicBool>,mpsc::Sender<Result<Value,String>>),
     Open(String, bool, mpsc::Sender<Result<(), OpenError>>),
@@ -150,6 +151,12 @@ impl Drop for Control {
     }
 }
 impl Control {
+    pub(crate) fn resume_previous(&self) -> Result<bool,String> {
+        if self.automation {return Ok(false);}
+        let (tx,rx)=mpsc::channel();
+        self.sender.send(Request::Resume(tx)).map_err(|_|"区域控制连接已中断")?;
+        rx.recv_timeout(Duration::from_secs(20)).map_err(|_|"恢复上次浏览器页面超时".to_string())?
+    }
     /// Used only while retrying startup on about:blank; no user pages exist yet.
     pub(crate) fn quit_before_navigation(&self) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
@@ -484,6 +491,9 @@ struct BrowserControl {
     fingerprint: Option<crate::fingerprint::Settings>,
     fingerprint_sessions: HashSet<String>,
     internal_workers: HashSet<String>,
+    session_checked: Instant,
+    session_capture_ready: bool,
+    normal_context: Option<String>,
     automation_fatal:Option<String>,
     automation_dialogs:HashMap<String,Value>,
     automation_warnings:Vec<String>,
@@ -493,6 +503,68 @@ struct BrowserControl {
     download_checked:Instant,
 }
 impl BrowserControl {
+    fn resume_previous(&mut self) -> Result<bool,String> {
+        if self.firefox || self.plan.automation {return Ok(false);}
+        if self.diagnostic.as_ref().is_some_and(|(_,browser)|browser=="edge") {
+            let path=&self.diagnostic.as_ref().unwrap().0;
+            let saved=crate::session_restore::read_tabs(path)?;
+            for (index,url) in saved.iter().enumerate(){self.open(url,index>0).map_err(|e|e.to_string())?;}
+            return Ok(!saved.is_empty());
+        }
+        let bootstrap=self.primary.clone();
+        let existing=self.pages.clone();
+        // Native restore may replace an initial empty tab's WebContents before
+        // the new-target pause is installed (notably on Edge). Keep our helper
+        // non-empty so the browser restores into separate, fenced targets.
+        const HELPER:&str="data:text/html;charset=utf-8,%3Ctitle%3ENodeCloak%3C/title%3E";
+        self.open(HELPER,false).map_err(|e|e.to_string())?;
+        // Deliver the browser's own Reopen Closed Window command only after
+        // auto-attach and profile settings are ready. Cold startup restore can
+        // execute cached documents before we have attached to the browser.
+        let (modifiers,native)=if cfg!(target_os="macos") {(12,17)} else if cfg!(windows) {(10,84)} else {(10,28)};
+        let mut sent=HashSet::new();
+        for kind in ["rawKeyDown","keyUp"] {
+            self.protocol.next+=1;let id=self.protocol.next;sent.insert(id);
+            self.protocol.socket.send(Message::Text(json!({"id":id,"method":"Input.dispatchKeyEvent",
+                "sessionId":bootstrap,"params":{"type":kind,"key":"T","code":"KeyT","modifiers":modifiers,"windowsVirtualKeyCode":84,"nativeVirtualKeyCode":native}}).to_string().into()))
+                .map_err(|_|"无法请求恢复上次浏览器页面".to_string())?;
+        }
+        let deadline=Instant::now()+Duration::from_secs(8);
+        let mut saw_restored=false;
+        while Instant::now()<deadline {
+            self.drain()?;
+            let restored_pages:Vec<_>=self.pages.difference(&existing).cloned().collect();
+            saw_restored|=!restored_pages.is_empty();
+            if let Some(restored)=restored_pages.first().filter(|_|restored_pages.iter().all(|s|!self.protocol.document_pending(s))).cloned() {
+                self.primary=restored;
+                // Never close a real user page or a first-run prompt. The
+                // normal startup launcher creates exactly this blank helper.
+                if let Some(target)=self.targets.iter().find_map(|(id,session)|(session==&bootstrap).then(||id.clone())) {
+                    let info=self.protocol.call("Target.getTargetInfo",json!({"targetId":target}),None)?;
+                    if info["targetInfo"]["url"]==HELPER {
+                        self.protocol.call("Target.closeTarget",json!({"targetId":target}),None)?;
+                    }
+                }
+                if let Some((path,browser))=&self.diagnostic {recovery::log(path,browser,"session_restored",0,"native saved browser session reopened after profile settings");}
+                return Ok(true);
+            }
+            if let Some(event)=self.protocol.read()? {
+                if event["id"].as_u64().is_some_and(|id|sent.contains(&id)) {
+                    if event.get("error").is_some() {return Ok(false);}
+                } else {self.protocol.events.push_back(event);}
+            }
+        }
+        Ok(saw_restored)
+    }
+    fn save_open_tabs(&mut self) -> Result<(),String> {
+        self.session_checked=Instant::now();
+        let Some((path,browser))=&self.diagnostic else{return Ok(())};
+        if !self.session_capture_ready || self.plan.automation || browser!="edge" {return Ok(())}
+        let Some(normal)=&self.normal_context else{return Ok(())};
+        let targets=self.protocol.call("Target.getTargets",json!({}),None)?;
+        let Some(urls)=crate::session_restore::normal_tabs(&targets,normal) else{return Ok(())};
+        crate::session_restore::write_tabs(path,&urls)
+    }
     fn initialize(
         browser: &str,
         path: &Path,
@@ -530,6 +602,8 @@ impl BrowserControl {
             fingerprint,
             fingerprint_sessions: HashSet::new(),
             internal_workers: HashSet::new(),
+            session_checked: Instant::now(), session_capture_ready: false,
+            normal_context: None,
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
@@ -797,6 +871,7 @@ impl BrowserControl {
                 if self.sessions.insert(session.clone()) {
                     if self.primary.is_empty() && params["targetInfo"]["type"] == "page" {
                         self.primary = session.clone();
+                        if self.normal_context.is_none(){self.normal_context=params["targetInfo"]["browserContextId"].as_str().map(str::to_owned);}
                     }
                     // Documents initialize asynchronously; Worker commands can
                     // observe a normal detach at any point in this sequence.
@@ -874,6 +949,9 @@ impl BrowserControl {
         response: mpsc::Sender<Result<(), OpenError>>,
     ) -> Result<(), String> {
         let result = self.open(url, new_tab);
+        // The startup helper is not the user session. Capture starts only after
+        // restoration or the first requested navigation has completed.
+        if result.is_ok() { self.session_capture_ready = true; }
         let fatal = match &result {
             Err(OpenError::Control(message)) => Some(message.clone()),
             _ => None,
@@ -1056,8 +1134,16 @@ pub(crate) fn start_with_lookup(
         let run = loop {
           let result = (|| -> Result<(), String> {
             while !stop.load(Ordering::SeqCst) {
+                if state.session_checked.elapsed()>=Duration::from_secs(2) {
+                    if let Err(error)=state.save_open_tabs(){recovery::log(&path,&browser,"session_capture_failed",0,&error);}
+                }
                 if let Ok(request) = requests.try_recv() {
                     match request {
+                        Request::Resume(response)=>{
+                            let result=state.resume_previous();
+                            if matches!(result, Ok(true)) {state.session_capture_ready=true;}
+                            let _=response.send(result);
+                        }
                         Request::InvalidateDownloads(client)=>state.invalidate_downloads(client.as_deref())?,
                         Request::Automation(tool,args,grant,cancel,response)=>{
                             let mut result=state.automate(&tool,args,&grant,&cancel);
@@ -1146,6 +1232,7 @@ pub(crate) fn start_with_lookup(
 
 #[cfg(test)]
 mod tests {
+    include!("browser_control/resume_checks.rs");
     use super::*;
     use crate::{
         profiles::{self, Draft, Preferences},
@@ -1287,6 +1374,8 @@ mod tests {
                 fingerprint: None,
                 fingerprint_sessions: HashSet::new(),
                     internal_workers: HashSet::new(),
+                                    session_checked: Instant::now(), session_capture_ready: false,
+            normal_context: None,
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
@@ -1417,6 +1506,8 @@ mod tests {
             fingerprint: None,
             fingerprint_sessions: HashSet::new(),
             internal_workers: HashSet::new(),
+            session_checked: Instant::now(), session_capture_ready: false,
+            normal_context: None,
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
             automation_warnings:Vec::new(),
@@ -1766,10 +1857,13 @@ mod tests {
                         } else if route.starts_with("/separation") {
                             ("text/html", r#"<!doctype html><title>Manual settings test</title><script>
                             const main={webdriver:navigator.webdriver,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),cookie:document.cookie,route:location.pathname+location.search,documentId:crypto.randomUUID()};
+                            if(new URLSearchParams(location.search).has('locale-field'))main.locale=Intl.DateTimeFormat().resolvedOptions().locale;
                             if(new URLSearchParams(location.search).has('store')){document.cookie='nodecloak-fixture=kept; Max-Age=3600; SameSite=Lax';main.cookieAfterStore=document.cookie;}
                             const worker=new Promise(resolve=>{const w=new Worker('/separation-worker');w.onmessage=e=>{w.terminate();resolve(e.data)};w.onerror=e=>resolve({error:e.message});setTimeout(()=>resolve({error:'worker timeout'}),10000)});
                             const frame=new Promise(resolve=>{addEventListener('message',e=>{if(e.data.frame)resolve(e.data.frame)});const f=document.createElement('iframe');f.src=location.origin.replace('127.0.0.1','localhost')+'/separation-frame';document.documentElement.append(f);setTimeout(()=>resolve({error:'frame timeout'}),10000)});
-                            Promise.all([worker,frame]).then(([worker,frame])=>fetch('/report?data='+encodeURIComponent(JSON.stringify({main,worker,frame}))));
+                            const resumeFixture=new URLSearchParams(location.search).has('restore-session');
+                            if(resumeFixture){const draft=document.createElement('textarea');draft.id='saved-draft';document.documentElement.append(draft);const spacer=document.createElement('div');spacer.style.height='5000px';document.documentElement.append(spacer);if(location.hash!=='#saved'){document.cookie='nodecloak-session=restored; SameSite=Lax';draft.value='saved draft';draft.dispatchEvent(new Event('input',{bubbles:true}));scrollTo(0,700);history.replaceState({},'','#saved');}}
+                            Promise.all([worker,frame]).then(([worker,frame])=>setTimeout(()=>{if(resumeFixture){main.draft=document.getElementById('saved-draft').value;main.scroll=scrollY;}fetch('/report?data='+encodeURIComponent(JSON.stringify({main,worker,frame})));},resumeFixture?1200:0));
                             </script>"#.into())
                         } else if route.starts_with("/fingerprint-worker") {
                             ("application/javascript",r#"const c=new OffscreenCanvas(64,32);const x=c.getContext('2d');x.fillStyle='#735941';x.fillRect(0,0,64,32);x.font='14px serif';x.fillText('NodeCloak',2,19);const bytes=x.getImageData(0,0,64,32).data;let h=2166136261;for(const v of bytes)h=Math.imul(h^v,16777619);postMessage({marker:Boolean(globalThis[Symbol.for('nodecloak.readback.v1')]),first:h>>>0,font:x.measureText('NodeCloak').width});self.close();"#.into())

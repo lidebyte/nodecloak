@@ -2,6 +2,7 @@ import {describe,it,expect} from 'vitest';
 import {renderToStaticMarkup} from 'react-dom/server';
 import type {ComponentProps} from 'react';
 import {AccountButton,AccountDialog,CloudSettings} from './AccountWorkspace';
+import {SyncPreferences} from './SyncWorkspace';
 import {setLanguage} from './i18n';
 import type {CloudStatus} from './cloud';
 
@@ -33,7 +34,7 @@ describe('account and sync screens',()=>{
   expect(html).toContain('&lt;script&gt;unsafe&lt;/script&gt;');
   expect(html).not.toContain('<script>');
  });
- it('lets users configure sync preferences before setup while keeping sync blocked',()=>{
+ it('keeps the preferences shortcut compact and blocks sync before recovery is saved',()=>{
   const status={account,unlocked:true,setupComplete:true,recoverySaved:false};
   const html=renderToStaticMarkup(<CloudSettings cloud={controller(status)}/>);
   expect((html.match(/<input[^>]*disabled=""/g)||[])).toHaveLength(0);
@@ -45,7 +46,9 @@ describe('account and sync screens',()=>{
   expect(incomplete).toContain('请先在管理同步中选择副本');
   expect(incomplete).toMatch(/<button[^>]*disabled=""[^>]*>[\s\S]*?立即同步/);
   const working=renderToStaticMarkup(<CloudSettings cloud={{...controller({...status,recoverySaved:true}),busy:true}}/>);
-  expect((working.match(/<input[^>]*disabled=""/g)||[])).toHaveLength(3);
+  expect((working.match(/<input/g)||[])).toHaveLength(0);
+  const preferences=renderToStaticMarkup(<SyncPreferences cloud={{...controller({...status,recoverySaved:true}),busy:true}}/>);
+  expect((preferences.match(/<input[^>]*disabled=""/g)||[])).toHaveLength(3);
  });
  it('requires vault verification on an approved new device before presenting sync setup',()=>{
   const html=renderToStaticMarkup(<AccountDialog cloud={controller({account,initialized:true,unlocked:false,approvedNeedsVerification:true,fingerprint:'a'.repeat(64)})}/>);

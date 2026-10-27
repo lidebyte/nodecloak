@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "修复 Chrome / Edge 开启稳定指纹后，使用一段时间可能出现区域连接中断并关闭副本的问题。 / Fixes Chrome / Edge profile disconnections and unexpected closure during extended use with stable fingerprints enabled.",
-  "改善后台任务初始化和自动重连，保留原有稳定指纹与区域设置，并记录具体诊断。 / Improves background task initialization and automatic reconnection while retaining stable fingerprints, regional settings and detailed diagnostics.",
-  "修复列表底部副本的操作菜单超出窗口，无法看到删除按钮的问题；小窗口支持菜单内部滚动。 / Keeps profile action menus within the window so Delete remains accessible, with menu scrolling in smaller windows."
+  "云同步改为独立页面，集中展示同步状态、待处理事项和副本，并说明每个处理操作的结果。 / Cloud sync now has its own page with clear status, pending items, profiles and explanations of each resolution action.",
+  "重新启动浏览器副本时恢复上次打开的页面。Chrome 和 Firefox 同时恢复浏览器可保存的草稿、历史与滚动位置；Edge 恢复上次标签页。 / Restarted profiles reopen their previous pages. Chrome and Firefox also restore recoverable drafts, history and scroll positions; Edge restores its previous tabs.",
+  "页面恢复沿用浏览器缓存和网站规则，部分页面仍会联网刷新。 / Restored pages follow browser cache and website rules; some pages still refresh over the network."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

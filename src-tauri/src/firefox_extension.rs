@@ -285,6 +285,15 @@ fn bootstrap(
     result
 }
 
+#[cfg(test)]
+pub(crate) fn install_session_fixture(root:&Path,profile:&Path,settings:&crate::fingerprint::Settings)->Result<(),String>{
+    assert!(std::env::var_os("NODECLOAK_TEST_REUSE_FIREFOX_HOST").is_some(),"Opt in to the existing NodeCloak native host; this check never edits its registration");
+    assert!(root.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+    assert!(profile.starts_with(root));
+    crate::engine::atomic_write(&profile.join("nodecloak-fingerprint-extension.json"),&serde_json::to_vec(settings).unwrap())?;
+    bootstrap(profile,Some(&pinned_package(root)?),"direct",None)
+}
+
 fn wait_setup_exit(socket: TcpStream, profile: &Path, timeout: Duration) -> Result<(), String> {
     // Quit acknowledges shutdown start, not completion. Release the installation
     // transport before waiting for Firefox and its helpers to finish flushing.
@@ -418,10 +427,18 @@ fn guarded_launch_with_timeout<T>(
     spawn: impl FnOnce(&str) -> Result<T, String>,
     timeout: Duration,
 ) -> Result<T, String> {
+    guarded_launch_impl(profile,destination,expected_marker,spawn,timeout,false)
+}
+
+pub(crate) fn guarded_resume_launch<T>(profile:&Path, expected_marker:bool, spawn:impl FnOnce(&str)->Result<T,String>)->Result<T,String>{
+    guarded_launch_impl(profile,"about:blank",expected_marker,spawn,Duration::from_secs(25),true)
+}
+
+fn guarded_launch_impl<T>(profile:&Path,destination:&str,expected_marker:bool,spawn:impl FnOnce(&str)->Result<T,String>,timeout:Duration,resume:bool)->Result<T,String>{
     // Internal preferences and the existing file-based diagnostics cannot be
     // reached by redirecting an HTTP content principal. They have no HTTP(S)
     // document to protect; the installed companion still gates later web loads.
-    if reqwest::Url::parse(destination).is_ok_and(|url| matches!(url.scheme(), "about" | "file")) {
+    if !resume && reqwest::Url::parse(destination).is_ok_and(|url| matches!(url.scheme(), "about" | "file")) {
         return spawn(destination);
     }
     let stage = |event: &str, detail: &str| {
@@ -506,7 +523,7 @@ fn guarded_launch_with_timeout<T>(
             #[cfg(test)]
             eprintln!("Synthetic Firefox startup gate document requested");
             let script = format!(
-                r#"fetch({},{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{marker:!!globalThis[Symbol.for('nodecloak.readback.v1')],webdriver:navigator.webdriver}})}}).then(async r=>{{const v=await r.json();if(!r.ok)throw Error(v.error);location.replace(v.url)}}).catch(()=>document.getElementById('status').textContent='指纹扩展未就绪，请返回 NodeCloak 查看启动提示。');"#,
+                r#"fetch({},{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{marker:!!globalThis[Symbol.for('nodecloak.readback.v1')],webdriver:navigator.webdriver}})}}).then(async r=>{{const v=await r.json();if(!r.ok)throw Error(v.error);if(v.url)location.replace(v.url)}}).catch(()=>document.getElementById('status').textContent='指纹扩展未就绪，请返回 NodeCloak 查看启动提示。');"#,
                 serde_json::json!(ready_path)
             );
             let html = format!("<!doctype html><meta charset=utf-8><title>NodeCloak</title><p id=status>正在加载副本指纹…</p><script nonce=\"{token}\">{script}</script>");
@@ -553,7 +570,7 @@ fn guarded_launch_with_timeout<T>(
                     "Firefox 指纹扩展未就绪，或仍处于自动化启动状态；请重新启动副本".into(),
                 );
             }
-            let body = serde_json::to_vec(&serde_json::json!({"url":destination}))
+            let body = serde_json::to_vec(&if resume {serde_json::json!({"ready":true})}else{serde_json::json!({"url":destination})})
                 .map_err(|_| "启动页面地址无效")?;
             reply(&mut stream, 200, "application/json", &body, "")?;
             stage(

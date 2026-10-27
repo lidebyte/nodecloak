@@ -18,6 +18,7 @@ mod profile_diagnostics;
 mod profiles;
 mod proxy;
 mod regional;
+mod session_restore;
 mod terminal;
 pub mod mcp;
 #[cfg(windows)]

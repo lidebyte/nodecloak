@@ -35,12 +35,12 @@ it('keeps pending conflicts discoverable on the affected profile row before any 
  expect(action).not.toBeNull();await act(async()=>action!.click());expect(open).toHaveBeenCalledWith(target.id);
 });
 
-it('opens the sync modal at the requested conflict and explains the deletion choice',async()=>{
+it('opens the sync page at the requested conflict and explains the deletion choice',async()=>{
  const cloud=controller([conflict('one'),conflict('two')]);
  await act(async()=>root.render(<AccountDialog inline cloud={cloud} focusProfileId="two"/>));
  const target=host.querySelector<HTMLElement>('[data-sync-profile="two"]');
  expect(document.activeElement).toBe(target);
- expect(target?.textContent).toContain('请选择要保留的副本状态');
+ expect(target?.textContent).toContain('选择已删除的一方会同时删除另一方');
  expect(target?.textContent).not.toContain('保留本地会恢复云端副本');
 });
 
@@ -88,16 +88,16 @@ it.each([['local','保留本地'],['cloud','使用云端'],['both','保留两份
  const target=(await profiles.listProfiles())[0],actions:unknown[]=[];
  function Harness(){
   const [pending,setPending]=useState([conflict(target.id)]),[panel,setPanel]=useState<Controller['panel']>(null);
-  const cloud:Controller={...controller(pending),panel,setPanel,act:async action=>{actions.push(action);if(action.type==='resolve')setPending([]);return null;}};
-  return <><BrowserProfiles busy={false} onBusyChange={()=>{}} onSelect={()=>{}} syncConflicts={pending} onResolveSync={()=>setPanel('sync')}/><AccountDialog cloud={cloud} focusProfileId={target.id}/></>;
+  const cloud:Controller={...controller(pending),panel,setPanel,act:async <T,>(action:Parameters<Controller['act']>[0])=>{actions.push(action);if(action.type==='resolve')setPending([]);return (action.type==='preview'?{profiles:[],localProfiles:[]}: {}) as T;}};
+  return <><BrowserProfiles busy={false} onBusyChange={()=>{}} onSelect={()=>{}} syncConflicts={pending} onResolveSync={()=>setPanel('sync')}/>{panel==='sync'&&<AccountDialog inline cloud={cloud} focusProfileId={target.id}/>}</>;
  }
  await act(async()=>root.render(<Harness/>));
  await act(async()=>host.querySelector<HTMLButtonElement>(`[aria-label="处理同步冲突: ${target.name}"]`)!.click());
- expect(button('应用选择')?.disabled).toBe(true);
+ expect(button('应用选择')).toBeUndefined();
  expect(actions.some(action=>(action as {type:string}).type==='resolve')).toBe(false);
- await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="处理方式"]')!.click());
- const option=Array.from(document.querySelectorAll<HTMLButtonElement>('[role="option"]')).find(node=>node.textContent?.trim()===label)!;
- await act(async()=>option.click());await act(async()=>button('应用选择')!.click());
+ await act(async()=>button(label)!.click());
+ expect(actions.some(action=>(action as {type:string}).type==='resolve')).toBe(false);
+ await act(async()=>button(`确认${label}`)!.click());
  expect(actions).toContainEqual({type:'resolve',id:target.id,kind:'config',choice});
  expect(host.querySelector('[data-sync-profile]')).toBeNull();
  expect(host.textContent).not.toContain('存在待处理的同步冲突，本机数据已保留。');

@@ -12,7 +12,7 @@ vi.mock('./cloud',async original=>({...await original<object>(),cloudStatus:api.
 vi.mock('./browser-site-catalog',async original=>({...await original<object>(),useBrowserSiteCatalog:()=>({catalog:{revision:0,groups:[],announcements:[]}})}));
 vi.mock('./AppUpdates',()=>({default:()=>null}));
 let host:HTMLDivElement,root:Root;
-beforeEach(()=>{vi.useFakeTimers();localStorage.clear();localStorage.setItem(languageStorageKey,'zh');Object.assign(globalThis,{IS_REACT_ACT_ENVIRONMENT:true});vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:()=>{},removeEventListener:()=>{}}));HTMLDialogElement.prototype.showModal=function(){this.open=true;};HTMLDialogElement.prototype.close=function(){this.open=false;};host=document.createElement('div');document.body.append(host);root=createRoot(host);api.status.mockResolvedValue({account:{id:'test',name:'Test',email:'test@example.com',avatar:''},unlocked:true,recoverySaved:true,setupComplete:true,conflicts:[]});api.action.mockResolvedValue({status:{account:null},result:{profiles:[],localProfiles:[]}});});
+beforeEach(()=>{vi.clearAllMocks();vi.useFakeTimers();localStorage.clear();localStorage.setItem(languageStorageKey,'zh');Object.assign(globalThis,{IS_REACT_ACT_ENVIRONMENT:true});vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:()=>{},removeEventListener:()=>{}}));HTMLDialogElement.prototype.showModal=function(){this.open=true;};HTMLDialogElement.prototype.close=function(){this.open=false;};host=document.createElement('div');document.body.append(host);root=createRoot(host);api.status.mockResolvedValue({account:{id:'test',name:'Test',email:'test@example.com',avatar:''},unlocked:true,recoverySaved:true,setupComplete:true,conflicts:[]});api.action.mockResolvedValue({status:{account:null},result:{profiles:[],localProfiles:[]}});});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.useRealTimers();vi.restoreAllMocks();vi.unstubAllGlobals();});
 it('keeps overview launch conflicts visible and opens targeted recovery from the error',async()=>{
  const target=(await profiles.listProfiles())[0];
@@ -31,5 +31,22 @@ it('keeps overview launch conflicts visible and opens targeted recovery from the
  await act(async()=>vi.advanceTimersByTimeAsync(10000));
  expect(host.querySelector('.toast.error')).not.toBeNull();
  await act(async()=>error.querySelector<HTMLButtonElement>('button')!.click());
- expect(host.querySelector('dialog.account-dialog')?.hasAttribute('open')).toBe(true);
+ expect(host.querySelector('dialog.account-dialog')?.hasAttribute('open')).toBe(false);
+ expect(host.querySelector('section[aria-label="云端同步"]')).not.toBeNull();
+ expect(host.querySelector('.nav-item.active')?.textContent).toBe('云端同步');
+});
+it('opens sync from the sidebar and settings as a page without scanning the computer',async()=>{
+ api.action.mockResolvedValue({status:await api.status(),result:{profiles:[],localProfiles:[]}});
+ const scan=vi.spyOn(bridge,'scanEnvironment');
+ await act(async()=>root.render(<LanguageProvider><App/></LanguageProvider>));
+ expect(api.action).not.toHaveBeenCalledWith({type:'preview'});
+ const sync=Array.from(host.querySelectorAll<HTMLButtonElement>('.nav-item')).find(b=>b.textContent==='云端同步')!;
+ await act(async()=>sync.click());
+ expect(host.querySelector('section[aria-label="云端同步"]')).not.toBeNull();
+ expect(host.querySelector('dialog.account-dialog[open]')).toBeNull();expect(scan).not.toHaveBeenCalled();
+ await act(async()=>host.querySelector<HTMLButtonElement>('.sidebar-account')!.click());
+ await act(async()=>Array.from(host.querySelectorAll('button')).find(b=>b.textContent==='偏好设置')!.click());
+ await act(async()=>Array.from(host.querySelectorAll('button')).find(b=>b.textContent?.trim()==='管理同步')!.click());
+ expect(host.querySelector('.nav-item.active')?.textContent).toBe('云端同步');
+ expect(host.querySelector('dialog.account-dialog[open]')).toBeNull();
 });

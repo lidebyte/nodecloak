@@ -12,6 +12,7 @@ use std::{
 };
 
 const SCRIPT: &str = include_str!("firefox_region.js");
+const SESSION_SCRIPT: &str = include_str!("firefox_session.js");
 const BACKUP: &str = "nodecloak-firefox-region-debug-original.json";
 const DEBUG_PREFS: [(&str, bool); 4] = [
     ("devtools.debugger.remote-enabled", true),
@@ -86,6 +87,36 @@ pub(crate) fn launch(
     relay: Option<u16>,
     lookup_url: &str,
 ) -> Result<ResolvedRegion, String> {
+    launch_impl(profile, destination, p, mode, relay, lookup_url, None)
+}
+pub(crate) fn launch_resuming(
+    profile: &Path,
+    destination: &str,
+    p: &Preferences,
+    mode: &str,
+    relay: Option<u16>,
+    lookup_url: &str,
+    saved: &mut crate::session_restore::FirefoxSession,
+) -> Result<ResolvedRegion, String> {
+    launch_impl(
+        profile,
+        destination,
+        p,
+        mode,
+        relay,
+        lookup_url,
+        Some(saved),
+    )
+}
+fn launch_impl(
+    profile: &Path,
+    destination: &str,
+    p: &Preferences,
+    mode: &str,
+    relay: Option<u16>,
+    lookup_url: &str,
+    mut saved: Option<&mut crate::session_restore::FirefoxSession>,
+) -> Result<ResolvedRegion, String> {
     crate::platform::ensure_profile_closed(profile)?;
     recover(profile)?;
     if p.regional.location_mode != "system" && p.advanced.location != PermissionMode::Block {
@@ -122,121 +153,162 @@ pub(crate) fn launch(
         .fingerprint
         .as_ref()
         .is_some_and(|f| f.requires_injection());
-    let result = crate::firefox_extension::guarded_launch(
-        profile,
-        destination,
-        fingerprint,
-        |start_url| {
-            let reservation =
-                TcpListener::bind("127.0.0.1:0").map_err(|_| "无法分配 Firefox 配置端口")?;
-            let port = reservation
-                .local_addr()
-                .map_err(|_| "无法读取 Firefox 配置端口")?
-                .port();
-            drop(reservation);
-            crate::platform::spawn_firefox_region_setup(profile, mode, relay, port)?;
-            let mut rdp = Rdp::connect(port)?;
-            // Bind the parent target only after browser chrome has built a tab.
-            // A target captured during the startup placeholder can refer to a
-            // document which is replaced before its queued handoff runs.
-            let deadline = Instant::now() + Duration::from_secs(25);
-            loop {
-                let tabs = rdp.call("root", "listTabs", json!({}))?;
-                if tabs["tabs"].as_array().is_some_and(|v| !v.is_empty()) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err("Firefox 浏览器窗口尚未完成初始化，请关闭启动提示后重试".into());
-                }
-                std::thread::sleep(Duration::from_millis(50));
+    let mut deferred = None;
+    // A real HTTP gate is required even when the normal startup URL is blank:
+    // native session documents are released only after its protection readback.
+    let resuming = saved.is_some();
+    let spawn = |start_url: &str| {
+        let reservation =
+            TcpListener::bind("127.0.0.1:0").map_err(|_| "无法分配 Firefox 配置端口")?;
+        let port = reservation
+            .local_addr()
+            .map_err(|_| "无法读取 Firefox 配置端口")?
+            .port();
+        drop(reservation);
+        crate::platform::spawn_firefox_region_setup(profile, mode, relay, port)?;
+        let mut rdp = Rdp::connect(port)?;
+        // Bind the parent target only after browser chrome has built a tab.
+        // A target captured during the startup placeholder can refer to a
+        // document which is replaced before its queued handoff runs.
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            let tabs = rdp.call("root", "listTabs", json!({}))?;
+            if tabs["tabs"].as_array().is_some_and(|v| !v.is_empty()) {
+                break;
             }
-            let descriptor = rdp.call("root", "getProcess", json!({"id":0}))?["processDescriptor"]
-                ["actor"]
-                .as_str()
-                .ok_or("Firefox 未提供原生配置接口")?
-                .to_owned();
-            let target = rdp.call(&descriptor, "getTarget", json!({}))?;
-            let console = target["process"]["consoleActor"]
-                .as_str()
-                .ok_or("Firefox 未提供原生配置上下文")?
-                .to_owned();
-            let ip = if crate::regional::uses_ip(p) {
-                Some(rdp.lookup(&console, lookup_url)?)
-            } else {
-                None
-            };
-            let actual = crate::regional::resolve(p, ip)?;
-            let geo = actual.latitude.zip(actual.longitude).map(|(lat, lng)| {
-                use base64::Engine;
-                format!(
-                    "data:application/json;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(
-                        json!({"location":{"lat":lat,"lng":lng},"accuracy":actual.accuracy})
-                            .to_string()
-                    )
+            if Instant::now() >= deadline {
+                return Err("Firefox 浏览器窗口尚未完成初始化，请关闭启动提示后重试".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let descriptor = rdp.call("root", "getProcess", json!({"id":0}))?["processDescriptor"]
+            ["actor"]
+            .as_str()
+            .ok_or("Firefox 未提供原生配置接口")?
+            .to_owned();
+        let target = rdp.call(&descriptor, "getTarget", json!({}))?;
+        let console = target["process"]["consoleActor"]
+            .as_str()
+            .ok_or("Firefox 未提供原生配置上下文")?
+            .to_owned();
+        let ip = if crate::regional::uses_ip(p) {
+            Some(rdp.lookup(&console, lookup_url)?)
+        } else {
+            None
+        };
+        let actual = crate::regional::resolve(p, ip)?;
+        let geo = actual.latitude.zip(actual.longitude).map(|(lat, lng)| {
+            use base64::Engine;
+            format!(
+                "data:application/json;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(
+                    json!({"location":{"lat":lat,"lng":lng},"accuracy":actual.accuracy})
+                        .to_string()
                 )
-            });
-            let config = json!({"language":actual.language,"locale":actual.language.split(',').next().unwrap_or("en-US"),
+            )
+        });
+        let config = json!({"language":actual.language,"locale":actual.language.split(',').next().unwrap_or("en-US"),
             "timezone":actual.timezone,"geoUri":geo,"width":p.advanced.viewport_width,"height":p.advanced.viewport_height});
-            crate::browser_control::log_startup_endpoint(
-                profile,
-                "firefox",
-                "native_region_waiting_for_window",
-                "waiting for browser delayed startup and initial URI handling",
-            );
-            let deadline = Instant::now() + Duration::from_secs(25);
+        crate::browser_control::log_startup_endpoint(
+            profile,
+            "firefox",
+            "native_region_waiting_for_window",
+            "waiting for browser delayed startup and initial URI handling",
+        );
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            let status = rdp.evaluate(
+                &console,
+                &if required(p) {
+                    format!("{SCRIPT};nodecloakConfigureRegion({config})")
+                } else {
+                    format!("{SCRIPT};nodecloakRegionWindow()?'configured':'pending'")
+                },
+            )?;
+            if status == "configured" {
+                break;
+            }
+            if status != "pending" || Instant::now() >= deadline {
+                return Err("Firefox 浏览器窗口尚未完成初始化，请关闭启动提示后重试".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        crate::browser_control::log_startup_endpoint(
+            profile,
+            "firefox",
+            "native_region_configured",
+            "native regional configuration applied after initial URI handling",
+        );
+        // Firefox writes prefs.js itself while running. Restore only user.js
+        // here, and restore runtime values through its own preference service.
+        crate::firefox::restore_user_preferences(profile, &changes)?;
+        let restore = before
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    if value["user"].is_null() {
+                        &value["runtime"]
+                    } else {
+                        &value["user"]
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(session) = saved.as_deref() {
+            rdp.evaluate(&console,&format!("{{const win=nodecloakRegionWindow();const sandbox=Cu.Sandbox(win,{{sandboxPrototype:win,wantXrays:false}});Cu.evalInSandbox({},sandbox);win[Symbol.for('nodecloak.saved-session-sandbox')]=sandbox;sandbox.nodecloakPrepareSavedSession({},{},{})}}",json!(SESSION_SCRIPT),json!(session.sources()?),json!(session.receipt()),json!(session.token())))?;
+            let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                let status = rdp.evaluate(
-                    &console,
-                    &format!("{SCRIPT};nodecloakConfigureRegion({config})"),
-                )?;
-                if status == "configured" {
+                let status=rdp.evaluate(&console,"nodecloakRegionWindow()[Symbol.for('nodecloak.saved-session-sandbox')].nodecloakSavedSessionStatus()")?;
+                if status == "ready" {
                     break;
                 }
                 if status != "pending" || Instant::now() >= deadline {
-                    return Err("Firefox 浏览器窗口尚未完成初始化，请关闭启动提示后重试".into());
+                    return Err("无法读取上次 Firefox 会话，原始数据已保留".into());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            crate::browser_control::log_startup_endpoint(
-                profile,
-                "firefox",
-                "native_region_configured",
-                "native regional configuration applied after initial URI handling",
-            );
-            // Firefox writes prefs.js itself while running. Restore only user.js
-            // here, and restore runtime values through its own preference service.
-            crate::firefox::restore_user_preferences(profile, &changes)?;
-            let restore = before
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        key,
-                        if value["user"].is_null() {
-                            &value["runtime"]
-                        } else {
-                            &value["user"]
-                        },
-                    )
-                })
-                .collect::<Vec<_>>();
+            rdp.evaluate(&console,&format!("nodecloakRegionWindow()[Symbol.for('nodecloak.saved-session-sandbox')].nodecloakSessionReadinessPage({},nodecloakRegionWindow())",json!(start_url)))?;
+            deferred = Some((rdp, console, restore));
+        } else {
             let finish = format!(
                 "{SCRIPT};nodecloakFinishRegion({}, {})",
                 json!(start_url),
                 json!(restore)
             );
             rdp.finish(&console, &finish)?;
-            crate::browser_control::log_startup_endpoint(
-                profile,
-                "firefox",
-                "native_region_handoff",
-                "temporary debugger closed; browser startup page handoff queued",
-            );
-            #[cfg(test)]
-            eprintln!("Synthetic Firefox native configuration handed off; original debugger preferences restored");
-            Ok(actual)
-        },
-    );
+        }
+        crate::browser_control::log_startup_endpoint(
+            profile,
+            "firefox",
+            "native_region_handoff",
+            "temporary debugger closed; browser startup page handoff queued",
+        );
+        #[cfg(test)]
+        eprintln!("Synthetic Firefox native configuration handed off; original debugger preferences restored");
+        Ok(actual)
+    };
+    let result = if resuming {
+        crate::firefox_extension::guarded_resume_launch(profile, fingerprint, spawn)
+    } else {
+        crate::firefox_extension::guarded_launch(profile, destination, fingerprint, spawn)
+    };
+    let result=result.and_then(|actual|{
+        if let Some((mut rdp,console,restore))=deferred.take(){
+            // The HTTP gate acknowledged native region and companion settings.
+            // Keep this non-WebDriver configuration context alive until native
+            // restoration has persisted; close its socket before returning.
+            rdp.evaluate(&console,"nodecloakRegionWindow()[Symbol.for('nodecloak.saved-session-sandbox')].nodecloakRestoreSavedSession()")?;
+            let session=saved.as_deref_mut().ok_or("缺少会话恢复快照")?;
+            let deadline=Instant::now()+Duration::from_secs(15);
+            while !session.commit()? {
+                if Instant::now()>=deadline{return Err("Firefox 会话恢复未完成，原始会话快照已保留".into());}
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            rdp.finish(&console,&format!("{SCRIPT};nodecloakFinishRegion('about:blank',{},true)",json!(restore)))?;
+        }
+        Ok(actual)
+    });
     if let Err(error) = &result {
         // This process belongs to this new setup attempt; no destination has
         // been released on a failed lookup/configuration. Do not leave a local

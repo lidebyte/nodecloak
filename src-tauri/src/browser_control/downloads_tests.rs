@@ -107,7 +107,7 @@ impl Fixture {
             fingerprint: None,
             fingerprint_sessions: HashSet::new(),
             internal_workers: HashSet::new(),
-            automation_fatal: None,
+            session_checked: Instant::now(),session_capture_ready:false, normal_context:None,            automation_fatal: None,
             automation_dialogs: HashMap::new(),
             automation_warnings: vec![],
             automation_cleanup: vec![],

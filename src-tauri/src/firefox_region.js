@@ -140,7 +140,7 @@ function nodecloakQueryRegion(url, key) {
   return 'pending';
 }
 
-function nodecloakFinishRegion(url, restore) {
+function nodecloakFinishRegion(url, restore, resumeSession = false) {
   // Close listeners before loading content. Closing may also close this RDP
   // connection, so the independent web startup gate confirms successful handoff.
   const api = ChromeUtils.importESModule(
@@ -162,7 +162,7 @@ function nodecloakFinishRegion(url, restore) {
       else if (typeof value === 'boolean') Services.prefs.setBoolPref(name, value);
       else throw Error('INVALID_RESTORE');
     }
-    browser.loadURI(uri, {triggeringPrincipal:principal});
+    if(!resumeSession) browser.loadURI(uri, {triggeringPrincipal:principal});
     win.focus();
     browser.focus();
   });

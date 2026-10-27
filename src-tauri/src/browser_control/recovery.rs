@@ -248,6 +248,10 @@ impl BrowserControl {
                 self.download_lease.is_some(),
                 self.plan,
             )?;
+            // Reattachment may see only a remaining Incognito window. Never
+            // redefine the capture boundary from whichever target arrives first.
+            next.normal_context=self.normal_context.clone();
+            next.session_capture_ready=self.session_capture_ready;
             next.configure()?;
             next.drain()?;
             // Missing events during disconnection make download state uncertain.

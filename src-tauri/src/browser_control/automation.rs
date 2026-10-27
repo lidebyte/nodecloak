@@ -1023,7 +1023,7 @@ mod tree_tests {
                 permission:PermissionMode::Ask,primary:"live-session".into(),sessions:HashSet::new(),
                 targets:HashMap::from([("live".into(),"live-session".into()),("closing-page".into(),"closing-page-session".into()),("closing-frame".into(),"closing-frame-session".into()),("live-frame".into(),"live-frame-session".into())]),
                 workers:HashSet::new(),pages:HashSet::new(),advanced:Default::default(),fingerprint:None,
-                fingerprint_sessions:HashSet::new(),internal_workers:HashSet::new(),
+                fingerprint_sessions:HashSet::new(),internal_workers:HashSet::new(),session_checked:Instant::now(),session_capture_ready:false,normal_context:None,
                 automation_fatal:None,automation_dialogs:HashMap::new(),automation_warnings:Vec::new(),automation_cleanup:Vec::new(),
                 download_lease:None,download_subscribed:false,download_checked:Instant::now(),
             };

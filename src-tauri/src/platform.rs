@@ -770,7 +770,10 @@ pub fn spawn_browser_with_proxy(
     mode: &str,
     relay: Option<u16>,
 ) -> Result<(), String> {
-    spawn_browser_impl(browser, profile, url, mode, relay, None, false, None)
+    spawn_browser_impl(browser, profile, url, mode, relay, None, false, None, false)
+}
+pub(crate) fn spawn_resuming_browser(browser:&str, profile:&Path, mode:&str, relay:Option<u16>)->Result<(),String>{
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, None, false, None, true)
 }
 pub fn spawn_controlled_browser(
     browser: &str,
@@ -787,7 +790,7 @@ pub fn spawn_controlled_browser(
     if marker.exists() {
         std::fs::remove_file(&marker).map_err(|_| "无法清理旧的浏览器控制标记")?;
     }
-    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(0), false, None)
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(0), false, None, false)
 }
 pub fn spawn_settings_browser(browser: &str, profile: &Path, mode: &str, relay: Option<u16>) -> Result<(), String> {
     if browser == "firefox" {
@@ -802,13 +805,13 @@ pub fn spawn_settings_browser(browser: &str, profile: &Path, mode: &str, relay: 
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").map_err(|_| "无法分配本地浏览器配置端口")?;
     let port = reservation.local_addr().map_err(|_| "无法读取本地配置端口")?.port();
     drop(reservation);
-    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(port), false, None)
+    spawn_browser_impl(browser, profile, "about:blank", mode, relay, Some(port), false, None, false)
 }
 pub(crate) fn spawn_firefox_addon_setup(profile: &Path, mode: &str, relay: Option<u16>) -> Result<(), String> {
-    spawn_browser_impl("firefox", profile, "about:blank", mode, relay, None, true, None)
+    spawn_browser_impl("firefox", profile, "about:blank", mode, relay, None, true, None, false)
 }
 pub(crate) fn spawn_firefox_region_setup(profile: &Path, mode: &str, relay: Option<u16>, port: u16) -> Result<(), String> {
-    spawn_browser_impl("firefox", profile, "about:blank", mode, relay, None, false, Some(port))
+    spawn_browser_impl("firefox", profile, "about:blank", mode, relay, None, false, Some(port), false)
 }
 
 fn manual_endpoint_marker(line: &str, expected_port: u16) -> Option<String> {
@@ -852,6 +855,7 @@ fn spawn_browser_impl(
     debug_port: Option<u16>,
     marionette: bool,
     rdp_port: Option<u16>,
+    resume: bool,
 ) -> Result<(), String> {
     let exe = browser_path(browser)?;
     let mut cmd = command(exe.to_str().ok_or("浏览器路径格式无效")?);
@@ -953,8 +957,8 @@ fn spawn_browser_impl(
             .env_remove("XRE_PROFILE_LOCAL_PATH")
             .env_remove("XRE_RESTARTED_BY_PROFILE_MANAGER")
             .args(["--no-remote", "--profile"])
-            .arg(profile)
-            .args(["--new-window", url]);
+            .arg(profile);
+        if !resume {cmd.args(["--new-window",url]);}
     } else {
         if let Some(port) = relay {
             cmd.arg(format!("--proxy-server=http://127.0.0.1:{port}"))
@@ -967,8 +971,8 @@ fn spawn_browser_impl(
                 "--profile-directory=Default",
                 "--no-first-run",
                 "--no-default-browser-check",
-                url,
             ]);
+        if resume {cmd.arg("--restore-last-session");} else {cmd.arg(url);}
     }
     let manual_endpoint = debug_port.filter(|port| *port > 0 && browser != "firefox");
     let mut child = cmd.stdin(Stdio::null())

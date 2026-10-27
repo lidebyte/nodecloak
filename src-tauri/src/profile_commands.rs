@@ -182,6 +182,14 @@ fn launch_with_purpose(
     crate::cloud::session_sync::before_launch(root, id)?;
     let p = profiles::get(root, id, false)?;
     runtime.1.stop(id);
+    if p.browser=="firefox" {crate::session_restore::FirefoxSession::recover(&path)?;}
+    let restore_firefox = !automation && destination=="startup";
+    let mut firefox_session=if p.browser=="firefox" {
+        crate::session_restore::FirefoxSession::park(&path)?
+    }else{None};
+    let resume = !automation && destination=="startup" && p.browser!="firefox"
+        && if p.browser=="edge" && crate::regional::manual_needs_control_for(&p.browser,&p.preferences) { !crate::session_restore::read_tabs(&path)?.is_empty() }
+            else {crate::session_restore::chromium_available(&path)?};
     let port = tauri::async_runtime::block_on(profiles::prepare_relay(root, &p, runtime, false))?;
     let use_extension = !automation && crate::firefox_extension::eligible(&p.browser, &p.preferences);
     if p.browser == "firefox" {
@@ -252,9 +260,11 @@ fn launch_with_purpose(
                     resolved = actual;
                     continue;
                 }
+                let restored = resume && control.resume_previous()?;
                 runtime.1.insert(id.to_owned(), control)?;
                 profiles::mark_started(root, id, port, runtime.proxy_endpoint(id)?)?;
                 profiles::remember_region(root, id, actual)?;
+                if restored {return Ok(());}
                 return match runtime
                     .1
                     .open(id, destination_url(root, &p, destination)?, false)
@@ -274,6 +284,11 @@ fn launch_with_purpose(
             runtime.1.stop(id);
             runtime.0.lock().map_err(|_| "代理管理器不可用")?.remove(id);
         }
+        if result.is_ok() || keep_browser {
+            if let Some(saved)=firefox_session.as_mut(){
+                if let Err(error)=saved.finish_without_restore(){crate::browser_control::log_startup_endpoint(&path,&p.browser,"session_backup_pending",&error);}
+            }
+        }
         return result;
     }
     profiles::apply_preferences(root, &p)?;
@@ -282,19 +297,28 @@ fn launch_with_purpose(
     }
     let url = destination_url(root, &p, destination)?;
     profiles::mark_started(root, id, port, runtime.proxy_endpoint(id)?)?;
-    let use_native_region = p.browser == "firefox" && crate::firefox_region::required(&p.preferences);
-    let result = if use_native_region {
+    let use_native_region = p.browser == "firefox" && (crate::firefox_region::required(&p.preferences)||(restore_firefox&&firefox_session.is_some()));
+    let result = if let Some(saved)=firefox_session.as_mut().filter(|_|restore_firefox) {
+        crate::firefox_region::launch_resuming(&path,&url,&p.preferences,&p.proxy.mode,port,lookup_url,saved)
+            .and_then(|region|profiles::remember_region(root,id,region))
+    }else if use_native_region {
         crate::firefox_region::launch(&path, &url, &p.preferences, &p.proxy.mode, port, lookup_url)
             .and_then(|region| profiles::remember_region(root, id, region))
     } else if use_extension {
         crate::firefox_extension::launch(&path, &url, &p.proxy.mode, port)
     } else {
-        platform::spawn_browser_with_proxy(&p.browser, &path, &url, &p.proxy.mode, port)
+        if resume {platform::spawn_resuming_browser(&p.browser,&path,&p.proxy.mode,port)}
+        else {platform::spawn_browser_with_proxy(&p.browser, &path, &url, &p.proxy.mode, port)}
     };
     if let Err(error) = result {
         if use_extension || use_native_region { let _ = platform::close_profile(&path); }
         runtime.0.lock().map_err(|_| "代理管理器不可用")?.remove(id);
         return Err(error);
+    }
+    if !restore_firefox {
+        if let Some(saved)=firefox_session.as_mut(){
+            if let Err(error)=saved.finish_without_restore(){crate::browser_control::log_startup_endpoint(&path,&p.browser,"session_backup_pending",&error);}
+        }
     }
     Ok(())
 }
