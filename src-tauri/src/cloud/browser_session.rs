@@ -1547,7 +1547,10 @@ mod tests {
         let mut browser = Browser::launch("firefox", &stage.path).unwrap();
         browser.site(&SiteKey{origin:"https://large.example".into(),partition_key:None}).unwrap();
         browser.eval("(()=>{localStorage.setItem('large-cache','x'.repeat(1048577));return true;})()").unwrap();
-        assert_eq!(browser.codec("__ncSessionCodec.exportOrigin()").unwrap_err(), "网站存储超过同步容量限制，本机数据已保留");
+        let state = browser.codec("__ncSessionCodec.exportOrigin()").unwrap();
+        assert_eq!(state["local"][0][0], "large-cache");
+        assert_eq!(state["local"][0][1].as_str().unwrap().len(), 1048577);
+        assert_eq!(browser.codec("__ncSessionCodec.pack('x'.repeat((64<<20)+1))").unwrap_err(), "网站存储超过同步容量限制，本机数据已保留");
         browser.close().unwrap();
     }
     #[test]
