@@ -14,6 +14,14 @@ on:
         description: Rebuild only macOS Intel after other platforms pass
         type: boolean
         default: false
+      macos_arm64_only:
+        description: Rebuild only macOS ARM on the standard macOS 26 runner
+        type: boolean
+        default: false
+      source_ref:
+        description: Existing release tag or commit to check out for a manual rebuild
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -24,13 +32,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.macos_intel_only && '[{"os":"macos-15-intel","platform":"macos-x64","target":"x86_64-apple-darwin"}]' || '[{"os":"windows-latest","platform":"windows-x64","target":"x86_64-pc-windows-msvc"},{"os":"macos-15","platform":"macos-arm64","target":"aarch64-apple-darwin"},{"os":"macos-15-intel","platform":"macos-x64","target":"x86_64-apple-darwin"}]') }}
+        include: ${{ fromJSON(inputs.macos_arm64_only && '[{"os":"macos-26","platform":"macos-arm64","target":"aarch64-apple-darwin"}]' || (inputs.macos_intel_only && '[{"os":"macos-15-intel","platform":"macos-x64","target":"x86_64-apple-darwin"}]' || '[{"os":"windows-latest","platform":"windows-x64","target":"x86_64-pc-windows-msvc"},{"os":"macos-15","platform":"macos-arm64","target":"aarch64-apple-darwin"},{"os":"macos-15-intel","platform":"macos-x64","target":"x86_64-apple-darwin"}]')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       MACOS_NOTARIZE: ${{ startsWith(matrix.platform, 'macos-') && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.notarize_macos)) && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -164,12 +174,23 @@ jobs:
         run: node --test scripts/windows-shortcut-checks.mjs
       - name: Collect third-party notices
         run: node scripts/collect-release-notices.mjs ${{ matrix.platform }} ${{ matrix.target }}
+      - name: Record checked-out build source
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          const source=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+          fs.writeFileSync('build-provenance.json',JSON.stringify({source,workflowSource:process.env.GITHUB_SHA,run:process.env.GITHUB_RUN_ID,version:JSON.parse(fs.readFileSync('package.json','utf8')).version},null,2));
+          console.log(`Packages built from ${source}`);
+          NODE
       - uses: actions/upload-artifact@v4
         with:
           name: nodecloak-${{ matrix.platform }}
           path: |
             release-assets/*
             release-notices/**
+            build-provenance.json
           if-no-files-found: error
       - name: Save macOS notarization receipt
         if: env.MACOS_NOTARIZE == 'true'
