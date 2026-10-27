@@ -53,6 +53,44 @@ it('does not offer a login-state overwrite when the cloud object is missing',asy
  cloud.status.conflicts=[issue('session',['cloud_object_missing'])];await render();
  expect(host.textContent).toContain('云端记录缺失');expect(host.textContent).not.toContain('保留本机登录状态');
 });
+it('offers a confirmed cloud configuration recovery for a missing local record',async()=>{
+ cloud.status.conflicts=[{...issue('config',['local_config_missing']),name:'已删除副本'}];
+ cloud.act=vi.fn(async action=>action.type==='preview'?{localProfiles:[],profiles:[{id:'remote',name:'Travel browser',browser:'edge',deleted:false,revision:2}]} as never:{} as never);
+ await render();
+ const card=host.querySelector('.sync-issue')!;
+ expect(card.querySelector('h3')?.textContent).toBe('Travel browser');
+ expect(card.textContent).not.toContain('两台设备对配置有不同修改');
+ expect(card.querySelectorAll('button')).toHaveLength(2);
+ await click('从云端恢复配置');
+ expect(cloud.act).not.toHaveBeenCalledWith(expect.objectContaining({type:'resolve'}));
+ expect(card.querySelector('.sync-confirm')?.textContent).toContain('不会清空本机已有的浏览器数据');
+ await click('确认从云端恢复配置');
+ expect(cloud.act).toHaveBeenCalledWith({type:'resolve',id:'one',kind:'config',choice:'cloud'});
+});
+it('lets a missing record stop syncing without deleting either copy',async()=>{
+ cloud.status.conflicts=[issue('config',['local_config_missing'])];await render();
+ const stop=host.querySelector<HTMLButtonElement>('.sync-issue button[data-action="detach"]');expect(stop).not.toBeNull();
+ await act(async()=>stop!.click());
+ expect(host.querySelector('.sync-issue .sync-confirm')?.textContent).toContain('不删除云端副本或本机浏览器数据');
+ expect(host.querySelectorAll('.sync-confirm')).toHaveLength(1);
+ await click('确认停止同步');expect(cloud.act).toHaveBeenCalledWith({type:'detach',id:'one',removeLocal:false});
+});
+it('preserves missing-record recovery on failure and translates its consequences',async()=>{
+ setLanguage('en');cloud.status.conflicts=[{...issue('config',['local_config_missing']),name:'Travel browser'}];
+ cloud.act=vi.fn(async action=>action.type==='preview'?{localProfiles:[],profiles:[{id:'remote',name:'Travel browser',browser:'edge',deleted:false,revision:2}]} as never:null);
+ await render();await click('Restore cloud configuration');await click('Confirm configuration recovery');
+ expect(host.querySelector('.sync-confirm')).not.toBeNull();
+ expect(host.querySelector('.sync-confirm')?.textContent).toContain('without clearing existing local browser data');
+ expect(host.textContent).not.toMatch(/[\u4e00-\u9fff]/);
+});
+it('does not recover a missing configuration from a deleted or outdated cloud preview',async()=>{
+ cloud.status.conflicts=[issue('config',['local_config_missing'])];
+ for(const remote of [{deleted:true,revision:2},{deleted:false,revision:1}]){
+  cloud.act=vi.fn(async action=>action.type==='preview'?{localProfiles:[],profiles:[{id:'remote',name:'Travel browser',browser:'edge',...remote}]} as never:{} as never);
+  await render();await click('重新检查');
+  expect(Array.from(host.querySelectorAll('.sync-issue button')).find(b=>b.textContent==='从云端恢复配置')).toBeUndefined();
+ }
+});
 it('preserves the saved session preference when editing profile selection',async()=>{
  cloud.status={...cloud.status,sessionSync:false,conflicts:[]};await render();await click('选择同步副本');
  expect(document.activeElement).toBe(host.querySelector('.sync-selection'));

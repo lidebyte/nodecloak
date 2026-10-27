@@ -592,9 +592,38 @@ mod tests {
         std::fs::write(&file,serde_json::to_vec(&registry).unwrap()).unwrap();
         sync::run(&mut b,&runtime).unwrap();
         assert!(b.disk.accounts[&account].conflicts.iter().any(|x|x.local_id==missing_peer.id&&x.fields==["local_config_missing"]));
+        assert_eq!(b.disk.accounts[&account].conflicts.iter().find(|x|x.local_id==missing_peer.id).unwrap().name,"Original",
+            "a missing registry entry must retain its known cloud name instead of claiming deletion");
         assert!(sync::resolve(&mut b,&missing_peer.id,"local",&runtime).is_err());
         let after=sync::fetch(&mut b,&missing_cloud,"config").unwrap();assert_eq!(after.revision,before);assert!(!after.deleted);
         assert_eq!(std::fs::read(&missing_marker).unwrap(),b"preserved");
+        // Old session bookkeeping cannot turn an empty recovered directory into
+        // a user edit that overwrites the cloud login data on the next sync.
+        let mut checkpoint=after.clone();checkpoint.kind="session".into();
+        let binding=b.disk.accounts.get_mut(&account).unwrap().bindings.get_mut(&missing_peer.id).unwrap();
+        binding.session_baseline=Some(checkpoint.clone());binding.session_hash=Some("old-local-session".into());
+        binding.file_stamp=Some("old-local-files".into());binding.session_dirty=true;binding.generation=17;
+        b.disk.save(&r2).unwrap();
+        // A failed materialization must already have durably fenced the old
+        // comparison state, before any recovered registry can become visible.
+        let settings=profiles::path(&r2,&missing_peer).unwrap().join("nodecloak-runtime-settings.json");
+        let previous_settings=std::fs::read(&settings).unwrap();
+        std::fs::remove_file(&settings).unwrap();std::fs::create_dir(&settings).unwrap();
+        assert!(sync::resolve(&mut b,&missing_peer.id,"cloud",&runtime).is_err());
+        let disk=Disk::load(&r2).unwrap();let durable=&disk.accounts[&account].bindings[&missing_peer.id];
+        assert!(durable.session_baseline.is_none(),"session comparisons must be durably reset before materializing recovered config");
+        assert_eq!(durable.session_checkpoint.as_ref().unwrap().revision,checkpoint.revision);
+        assert!(profiles::get(&r2,&missing_peer.id,false).is_err());
+        assert_eq!(std::fs::read(&missing_marker).unwrap(),b"preserved");
+        std::fs::remove_dir(&settings).unwrap();std::fs::write(&settings,previous_settings).unwrap();
+        sync::resolve(&mut b,&missing_peer.id,"cloud",&runtime).unwrap();
+        let recovered=profiles::get(&r2,&missing_peer.id,false).unwrap();assert_eq!(recovered.name,"Original");
+        assert_eq!(std::fs::read(&missing_marker).unwrap(),b"preserved");
+        let binding=&b.disk.accounts[&account].bindings[&missing_peer.id];
+        assert!(binding.session_baseline.is_none());assert_eq!(binding.session_checkpoint.as_ref().unwrap().revision,checkpoint.revision);
+        assert!(binding.session_hash.is_none()&&binding.file_stamp.is_none()&&!binding.session_dirty);assert_eq!(binding.generation,0);
+        assert!(!b.disk.accounts[&account].conflicts.iter().any(|x|x.local_id==missing_peer.id));
+        assert_eq!(sync::fetch(&mut b,&missing_cloud,"config").unwrap().revision,before,"recovery never writes a cloud configuration");
         eprintln!("config lifecycle passed: initial sync, unchanged sync, independent merge, same-field local/cloud/both/skip, offline retry, deletion restore/accept/purge, missing registry protection");
     }
 }

@@ -446,22 +446,11 @@ pub fn setup(
                     }
                 } else {
                     let doc = document(c, &o)?;
+                    let mut b = c.disk.accounts[&account].bindings[&local].clone();
+                    stage_config_restore(c, &account, &local, &mut b)?;
                     apply(c, &local, &doc, runtime)?;
-                    let b = c
-                        .disk
-                        .accounts
-                        .get_mut(&account)
-                        .unwrap()
-                        .bindings
-                        .get_mut(&local)
-                        .unwrap();
                     b.baseline = Some(o);
-                    b.session_checkpoint =
-                        b.session_baseline.take().or(b.session_checkpoint.take());
-                    b.session_hash = None;
-                    b.file_stamp = None;
-                    b.session_dirty = false;
-                    b.generation = 0;
+                    c.disk.accounts.get_mut(&account).unwrap().bindings.insert(local.clone(), b);
                 }
                 c.disk.save(&c.root)?;
             } else {
@@ -520,7 +509,6 @@ pub(super) fn config_profile(
     let p = profiles::load(&c.root)?.into_iter().find(|p| p.id == id);
     let lv = p.as_ref().map(Document::export).transpose()?.as_ref().map(value).transpose()?;
     let bv = b.baseline.as_ref().map(|o| document(c, o)).transpose()?.as_ref().map(value).transpose()?;
-    let name = p.as_ref().map(|p| p.name.as_str()).unwrap_or("已删除副本");
     let mut ro = remote.map(|o| fetch(c, &o.id, "config")).transpose()?;
     c.disk.accounts.get_mut(&account).unwrap().conflicts.retain(|x| x.local_id != id || x.kind == "session");
     for attempt in 0..3 {
@@ -529,6 +517,8 @@ pub(super) fn config_profile(
             return Err("CANCELLED".into());
         }
         let rv = ro.as_ref().map(|o| document(c, o)).transpose()?.as_ref().map(value).transpose()?;
+        let name = lv.as_ref().or(rv.as_ref()).or(bv.as_ref())
+            .and_then(|v| v["name"].as_str()).unwrap_or("待恢复副本");
         match decide(bv.as_ref(), lv.as_ref(), rv.as_ref()) {
             Decision::Conflict(fields) => {
                 conflict(&account, c, id, &b, name, "config", fields, ro.as_ref().map(|o|o.revision).unwrap_or(0));
@@ -664,6 +654,22 @@ pub(crate) fn run_selected(
     c.disk.save(&c.root)?;
     super::session_sync::prune_cache(c)
 }
+fn stage_config_restore(c: &mut Connection, account: &str, local: &str, b: &mut Binding) -> Result<(), String> {
+    // Keep the authenticated high-water mark, but no longer assume the recovered
+    // directory is the old local session. Empty local data can pull the cloud
+    // session; differing nonempty data requires a separate explicit choice.
+    b.session_checkpoint = b.session_baseline.take().or(b.session_checkpoint.take());
+    b.session_hash = None;
+    b.file_stamp = None;
+    b.session_dirty = false;
+    b.pending_session = None;
+    b.generation = 0;
+    // This must be durable before apply() can recreate profiles.json. If apply
+    // or the final baseline save fails, a restart still cannot publish an empty
+    // recreated directory as an edit against the previous session baseline.
+    c.disk.accounts.get_mut(account).unwrap().bindings.insert(local.into(), b.clone());
+    c.disk.save(&c.root)
+}
 pub fn resolve(
     c: &mut Connection,
     id: &str,
@@ -704,6 +710,9 @@ pub fn resolve(
             )?);
         }
         "cloud" => {
+            if local.is_none() && !remote_doc.deleted {
+                stage_config_restore(c, &account, id, &mut binding)?;
+            }
             apply(c, id, &remote_doc, runtime)?;
             binding.baseline = Some(remote);
         }

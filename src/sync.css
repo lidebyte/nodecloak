@@ -1,4 +1,5 @@
 .sync-workspace{display:grid;gap:24px;max-width:1120px;padding-bottom:28px}
+.sync-recovery-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:18px}.sync-recovery-actions>.cloud-hint{flex-basis:100%;margin:0}.sync-recovery-details{margin-top:18px;color:var(--muted);font-size:11px;line-height:1.8}.sync-recovery-details summary{cursor:pointer;width:fit-content}.sync-recovery-details p{overflow-wrap:anywhere;margin:6px 0;font-family:var(--font-mono,monospace)}
 .sync-overview{display:flex;align-items:center;gap:22px;background:var(--surface-soft);border:1px solid var(--border);border-radius:20px;padding:28px}
 .sync-status-icon{display:grid;place-items:center;width:58px;height:58px;border:1px solid var(--border);border-radius:17px;background:var(--surface);color:var(--text-secondary);flex:none}
 .sync-overview.attention .sync-status-icon{color:var(--amber)}
