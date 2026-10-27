@@ -328,6 +328,10 @@ fn destination_url(root: &Path, p: &Profile, destination: &str) -> Result<String
     }
     Ok(match destination {
         "startup" => p.preferences.startup_url.clone(),
+        // Native configuration fixtures request their new page explicitly;
+        // ordinary Start now intentionally restores the previous session.
+        #[cfg(test)]
+        "__fixture_startup" => p.preferences.startup_url.clone(),
         "claude" => "https://claude.ai".into(),
         "verify" => format!(
             "https://claudedone.com/check/?profile={}&browser={}",

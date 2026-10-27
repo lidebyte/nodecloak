@@ -2112,7 +2112,7 @@ mod tests {
             draft.preferences.startup_url = fixture.url(&route);
             draft.preferences.fingerprint.as_mut().unwrap().enabled = enabled;
             profiles::update(&canonical, &p.id, draft.clone()).unwrap();
-            crate::profile_commands::launch(&canonical, &p.id, "startup", &runtime).unwrap();
+            crate::profile_commands::launch(&canonical, &p.id, "__fixture_startup", &runtime).unwrap();
             let report = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
             assert_eq!(report["main"]["route"],route,"stale document report: {report}");
             if run==0 { assert_eq!(report["main"]["cookieAfterStore"],"nodecloak-fixture=kept","synthetic cookie write failed: {report}"); }
@@ -2158,7 +2158,7 @@ mod tests {
             }
             draft.preferences.startup_url = fixture.url(if ip {"/ip-native"} else {"/custom-native"});
             profiles::update(&canonical, &p.id, draft.clone()).unwrap();
-            crate::profile_commands::launch_with_lookup(&canonical, &p.id, "startup", &runtime, &fixture.url("/region")).unwrap();
+            crate::profile_commands::launch_with_lookup(&canonical, &p.id, "__fixture_startup", &runtime, &fixture.url("/region")).unwrap();
             let _ = platform::focus_profile(&path);
             let report = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
             println!("Firefox synthetic native region ip={ip}: {report}");
@@ -2224,7 +2224,7 @@ mod tests {
         draft.preferences.advanced.viewport_height = 0;
         draft.preferences.startup_url = fixture.url("/separation?read");
         profiles::update(&canonical,&p.id,draft.clone()).unwrap();
-        crate::profile_commands::launch(&canonical,&p.id,"startup",&runtime).unwrap();
+        crate::profile_commands::launch(&canonical,&p.id,"__fixture_startup",&runtime).unwrap();
         let reset = fixture.reports.recv_timeout(Duration::from_secs(25)).unwrap();
         assert_eq!(reset["main"]["webdriver"],false);
         assert_eq!(reset["main"]["cookie"],"nodecloak-fixture=kept");
