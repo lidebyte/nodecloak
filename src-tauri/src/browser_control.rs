@@ -493,6 +493,7 @@ struct BrowserControl {
     internal_workers: HashSet<String>,
     session_checked: Instant,
     session_capture_ready: bool,
+    restore_queue: VecDeque<(String, bool)>,
     normal_context: Option<String>,
     automation_fatal:Option<String>,
     automation_dialogs:HashMap<String,Value>,
@@ -508,8 +509,11 @@ impl BrowserControl {
         if self.diagnostic.as_ref().is_some_and(|(_,browser)|crate::session_restore::uses_tab_urls(browser)) {
             let path=&self.diagnostic.as_ref().unwrap().0;
             let saved=crate::session_restore::read_tabs(path)?;
-            for (index,url) in saved.iter().enumerate(){self.open(url,index>0).map_err(|e|e.to_string())?;}
-            return Ok(!saved.is_empty());
+            // Acknowledge a bounded, local queue before any network wait. A
+            // slow saved page must not exhaust the startup caller's deadline.
+            self.restore_queue = saved.into_iter().enumerate().map(|(index,url)|(url,index>0)).collect();
+            self.session_capture_ready = false;
+            return Ok(!self.restore_queue.is_empty());
         }
         let bootstrap=self.primary.clone();
         let existing=self.pages.clone();
@@ -556,10 +560,32 @@ impl BrowserControl {
         }
         Ok(saw_restored)
     }
+    fn restore_next_tab(&mut self) -> Result<(),String> {
+        let Some((url,new_tab))=self.restore_queue.pop_front() else {return Ok(())};
+        match self.open(&url,new_tab) {
+            Ok(())=>{},
+            Err(OpenError::Navigation(message))=>{
+                if let Some((path,browser))=&self.diagnostic {
+                    // Persist only a network error code, never a saved URL.
+                    let code=message.split(|c:char| !(c.is_ascii_alphanumeric() || matches!(c,':'|'_'))).find(|value| value.starts_with("net::ERR_") && value.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b':'|b'_'))).unwrap_or("saved page navigation unavailable");
+                    recovery::log(path,browser,"session_page_unavailable",0,code);
+                }
+            },
+            Err(OpenError::Control(message))=>{
+                // Do not replay an operation whose effect is uncertain. Keep
+                // the original full snapshot for a later explicit restart.
+                self.restore_queue.clear();
+                self.session_capture_ready=false;
+                return Err(message);
+            }
+        }
+        if self.restore_queue.is_empty(){self.session_capture_ready=true;}
+        Ok(())
+    }
     fn save_open_tabs(&mut self) -> Result<(),String> {
         self.session_checked=Instant::now();
         let Some((path,browser))=&self.diagnostic else{return Ok(())};
-        if !self.session_capture_ready || self.plan.automation || !crate::session_restore::uses_tab_urls(browser) {return Ok(())}
+        if !self.restore_queue.is_empty() || !self.session_capture_ready || self.plan.automation || !crate::session_restore::uses_tab_urls(browser) {return Ok(())}
         let Some(normal)=&self.normal_context else{return Ok(())};
         let targets=self.protocol.call("Target.getTargets",json!({}),None)?;
         let Some(urls)=crate::session_restore::normal_tabs(&targets,normal) else{return Ok(())};
@@ -602,7 +628,7 @@ impl BrowserControl {
             fingerprint,
             fingerprint_sessions: HashSet::new(),
             internal_workers: HashSet::new(),
-            session_checked: Instant::now(), session_capture_ready: false,
+            session_checked: Instant::now(), session_capture_ready: false, restore_queue: VecDeque::new(),
             normal_context: None,
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
@@ -951,7 +977,7 @@ impl BrowserControl {
         let result = self.open(url, new_tab);
         // The startup helper is not the user session. Capture starts only after
         // restoration or the first requested navigation has completed.
-        if result.is_ok() { self.session_capture_ready = true; }
+        if !matches!(&result, Err(OpenError::Control(_))) { self.session_capture_ready = true; }
         let fatal = match &result {
             Err(OpenError::Control(message)) => Some(message.clone()),
             _ => None,
@@ -1141,7 +1167,7 @@ pub(crate) fn start_with_lookup(
                     match request {
                         Request::Resume(response)=>{
                             let result=state.resume_previous();
-                            if matches!(result, Ok(true)) {state.session_capture_ready=true;}
+                            if matches!(result, Ok(true)) && state.restore_queue.is_empty() {state.session_capture_ready=true;}
                             let _=response.send(result);
                         }
                         Request::InvalidateDownloads(client)=>state.invalidate_downloads(client.as_deref())?,
@@ -1186,6 +1212,7 @@ pub(crate) fn start_with_lookup(
                         }
                     }
                 }
+                state.restore_next_tab()?;
                 state.drain()?;
                 if state.plan.automation { state.cleanup_closed_dialogs(); }
                 if state.download_lease.is_some() && state.download_checked.elapsed() >= Duration::from_secs(1) {
@@ -1374,7 +1401,7 @@ mod tests {
                 fingerprint: None,
                 fingerprint_sessions: HashSet::new(),
                     internal_workers: HashSet::new(),
-                                    session_checked: Instant::now(), session_capture_ready: false,
+                                    session_checked: Instant::now(), session_capture_ready: false, restore_queue: VecDeque::new(),
             normal_context: None,
             automation_fatal:None,
             automation_dialogs:HashMap::new(),
@@ -1457,11 +1484,28 @@ mod tests {
             .handle_open("https://example.invalid/", false, tx)
             .is_ok());
         assert!(rx.recv().unwrap().is_err());
+        assert!(state.session_capture_ready);
         let (tx, rx) = mpsc::channel();
         assert!(state
             .handle_open("https://example.invalid/retry", false, tx)
             .is_ok());
         assert!(rx.recv().unwrap().is_ok());
+        drop(state);
+        server.join().unwrap();
+    }
+    #[test]
+    fn saved_page_network_failure_keeps_remaining_recovery_and_capture_fenced() {
+        let (mut state, server) = navigation_fixture(true);
+        state.restore_queue = VecDeque::from([
+            ("https://example.invalid/".into(), false),
+            ("https://example.invalid/retry".into(), false),
+        ]);
+        assert!(state.restore_next_tab().is_ok());
+        assert_eq!(state.restore_queue.len(), 1);
+        assert!(!state.session_capture_ready);
+        assert!(state.restore_next_tab().is_ok());
+        assert!(state.restore_queue.is_empty());
+        assert!(state.session_capture_ready);
         drop(state);
         server.join().unwrap();
     }
@@ -1506,7 +1550,7 @@ mod tests {
             fingerprint: None,
             fingerprint_sessions: HashSet::new(),
             internal_workers: HashSet::new(),
-            session_checked: Instant::now(), session_capture_ready: false,
+            session_checked: Instant::now(), session_capture_ready: false, restore_queue: VecDeque::new(),
             normal_context: None,
             automation_fatal:None,
             automation_dialogs:HashMap::new(),

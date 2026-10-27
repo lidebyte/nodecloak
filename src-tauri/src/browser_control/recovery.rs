@@ -261,6 +261,7 @@ impl BrowserControl {
                 next.download_lease = self.download_lease.take();
                 next.invalidate_downloads(None)?;
             }
+            next.restore_queue=std::mem::take(&mut self.restore_queue);
             *self = next;
         }
         // A reconnect can miss expiry/revoke events, so always enforce the lease

@@ -57,8 +57,13 @@ fn native_session_resume_chromium_after_protection() {
         platform::wait_profile_closed(&path, Duration::from_secs(15)).unwrap();
         runtime.1.stop(&p.id);
         if crate::session_restore::uses_tab_urls(engine) {
-            let saved = crate::session_restore::read_tabs(&path).unwrap();
+            let mut saved = crate::session_restore::read_tabs(&path).unwrap();
             assert!(!saved.is_empty());
+            let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+            let offline = format!("http://{}/offline", closed.local_addr().unwrap());
+            drop(closed);
+            saved.insert(0, offline);
+            crate::session_restore::write_tabs(&path, &saved).unwrap();
             platform::spawn_settings_browser(engine, &path, "direct", None).unwrap();
             let (control, _) = start_with_lookup(
                 engine.into(), path.clone(), p.preferences.clone(),
@@ -70,6 +75,7 @@ fn native_session_resume_chromium_after_protection() {
             assert_eq!(crate::session_restore::read_tabs(&path).unwrap(), saved);
             assert!(control.resume_previous().unwrap());
             runtime.1.insert(p.id.clone(), control).unwrap();
+            assert!(runtime.1.ready(&p.id));
         } else {
             crate::profile_commands::launch_with_lookup(root.path(), &p.id, "startup", &runtime, "")
                 .unwrap();
@@ -79,6 +85,11 @@ fn native_session_resume_chromium_after_protection() {
             .recv_timeout(Duration::from_secs(20))
             .expect("last page was not restored");
         eprintln!("Restored fixture: {restored}");
+        if crate::session_restore::uses_tab_urls(engine) {
+            let log=std::fs::read_to_string(path.join("nodecloak-control.jsonl")).unwrap();
+            assert!(log.contains("session_page_unavailable"));
+            assert!(log.contains("net::ERR_CONNECTION_REFUSED"));
+        }
         assert_eq!(restored["main"]["timezone"], "Asia/Tokyo");
         assert_eq!(
             restored["main"]["marker"], true,
