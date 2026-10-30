@@ -24,4 +24,4 @@
 
 ## Delivery
 
-Changes are on `codex/sync-launch-read-failure`; application version remains 3.2.5. No package publication, cloud-object changes or production deployment is part of this fix verification.
+Initial isolated verification was performed on `codex/sync-launch-read-failure` at version 3.2.5. The fix is now included in published 3.2.6, product source `58c3f676011e4a274f52ec67d7e311f4850b84e6`; see `2026-10-30-release-3.2.6.md` for the completed rollout. No customer cloud objects were modified during verification or release.
