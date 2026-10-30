@@ -269,7 +269,7 @@ fn launch_with_purpose(
                     .1
                     .open(id, destination_url(root, &p, destination)?, false)
                 {
-                    Err(crate::browser_control::OpenError::Navigation(message)) => {
+                    Err(crate::browser_control::OpenError::Navigation(message) | crate::browser_control::OpenError::Preparation(message)) => {
                         keep_browser = true;
                         Err(message)
                     }

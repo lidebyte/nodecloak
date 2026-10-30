@@ -291,6 +291,73 @@ fn rejected_popup_protection_never_resumes_first_document() {
 }
 
 #[test]
+fn new_tab_navigation_waits_for_its_own_region_acknowledgements() {
+ for established in [false,true] {
+  for restoring in [false,true] {
+    for reject in [false, true] {
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let address=listener.local_addr().unwrap();
+        let server=std::thread::spawn(move || {
+            let (stream,_)=listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut socket=tungstenite::accept(stream).unwrap();
+            let mut timezone=None;
+            let mut acknowledged=false;
+            let mut navigated=false;
+            let mut premature=false;
+            let mut closed=false;
+            while let Ok(Message::Text(text))=socket.read() {
+                let command:Value=serde_json::from_str(&text).unwrap();
+                let method=command["method"].as_str().unwrap();
+                if method=="Target.createTarget" {
+                    socket.send(Message::Text(json!({"method":"Target.attachedToTarget","params":{"sessionId":"new-page","targetInfo":{"targetId":"new-target","type":"page"},"waitingForDebugger":true}}).to_string().into())).unwrap();
+                    socket.send(Message::Text(json!({"id":command["id"],"result":{"targetId":"new-target"}}).to_string().into())).unwrap();
+                    continue;
+                }
+                if method=="Emulation.setTimezoneOverride" { timezone=Some(command["id"].clone()); continue; }
+                if method=="Debugger.enable" {
+                    let id=timezone.take().expect("timezone request must precede first-script barrier");
+                    let reply=if reject {json!({"id":id,"error":{"code":-32602,"message":"fixture timezone rejection"}})} else {json!({"id":id,"result":{}})};
+                    socket.send(Message::Text(reply.to_string().into())).unwrap();
+                    acknowledged=true;
+                }
+                if method=="Page.navigate" { navigated=true; premature=!acknowledged; }
+                closed|=method=="Target.closeTarget" || method=="Browser.close";
+                let result=if method=="Debugger.setInstrumentationBreakpoint" {json!({"breakpointId":"fixture-first-script"})} else {json!({})};
+                if socket.send(Message::Text(json!({"id":command["id"],"result":result}).to_string().into())).is_err(){break;}
+                if method=="Page.navigate" {break;}
+            }
+            (premature,navigated,closed)
+        });
+        let socket=recovery::connect_socket(&format!("ws://{address}")).unwrap();
+        let mut state=BrowserControl {
+            diagnostic:None,plan:ControlPlan{profile_settings:true,automation:false},
+            protocol:Protocol{worker_setups:HashMap::new(),document_setups:HashMap::new(),barrier_owner:None,socket,next:0,events:VecDeque::new(),last_error:None,navigation:None,reconnect_endpoint:None},
+            firefox:false,region:regional::ResolvedRegion{timezone:Some("Asia/Tokyo".into()),..regional::initial(&Preferences::default()).unwrap()},
+            permission:PermissionMode::Ask,primary:"main".into(),sessions:HashSet::new(),targets:HashMap::new(),workers:HashSet::new(),pages:HashSet::new(),advanced:Default::default(),fingerprint:None,fingerprint_sessions:HashSet::new(),internal_workers:HashSet::new(),session_checked:Instant::now(),session_capture_ready:false,restore_queue:VecDeque::new(),normal_context:None,automation_fatal:None,automation_dialogs:HashMap::new(),automation_warnings:Vec::new(),automation_cleanup:Vec::new(),download_lease:None,download_subscribed:false,download_checked:Instant::now(),
+        };
+        state.session_capture_ready=established;
+        let result=if restoring {
+            state.restore_queue.push_back(("https://fixture.invalid/restored".into(),true));
+            state.restore_next_tab().map_err(OpenError::Control)
+        } else {
+            let (tx,rx)=mpsc::channel();
+            state.handle_open("https://fixture.invalid/restored",true,tx).unwrap();
+            rx.recv().unwrap()
+        };
+        assert_eq!(state.session_capture_ready,!reject || (!restoring && established),"failed initialization must preserve an established session and retain unfinished restoration");
+        drop(state);
+        let (premature,navigated,closed)=server.join().unwrap();
+        assert!(!premature,"navigation started before this page's timezone was acknowledged");
+        assert_eq!(navigated,!reject);
+        assert_eq!(result.is_ok(),restoring || !reject);
+        assert!(!closed,"a rejected page must not close other browser pages");
+    }
+  }
+ }
+}
+
+#[test]
 fn delayed_popup_keeps_its_pause_without_blocking_other_tabs_then_initializes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

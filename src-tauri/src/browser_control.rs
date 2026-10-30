@@ -59,12 +59,13 @@ pub struct Runtime(Mutex<HashMap<String, Control>>);
 #[derive(Debug, Clone)]
 pub enum OpenError {
     Navigation(String),
+    Preparation(String),
     Control(String),
 }
 impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Navigation(s) | Self::Control(s) => f.write_str(s),
+            Self::Navigation(s) | Self::Preparation(s) | Self::Control(s) => f.write_str(s),
         }
     }
 }
@@ -564,6 +565,14 @@ impl BrowserControl {
         let Some((url,new_tab))=self.restore_queue.pop_front() else {return Ok(())};
         match self.open(&url,new_tab) {
             Ok(())=>{},
+            Err(OpenError::Preparation(message))=>{
+                // No destination was loaded. Retain the original saved URLs
+                // instead of recording the still-blank initialization tab.
+                self.restore_queue.clear();
+                self.session_capture_ready=false;
+                if let Some((path,browser))=&self.diagnostic {recovery::log(path,browser,"session_restore_pending",0,&message);}
+                return Ok(());
+            },
             Err(OpenError::Navigation(message))=>{
                 if let Some((path,browser))=&self.diagnostic {
                     // Persist only a network error code, never a saved URL.
@@ -977,7 +986,10 @@ impl BrowserControl {
         let result = self.open(url, new_tab);
         // The startup helper is not the user session. Capture starts only after
         // restoration or the first requested navigation has completed.
-        if !matches!(&result, Err(OpenError::Control(_))) { self.session_capture_ready = true; }
+        match &result {
+            Err(OpenError::Preparation(_) | OpenError::Control(_))=>{},
+            _=>self.session_capture_ready=true,
+        }
         let fatal = match &result {
             Err(OpenError::Control(message)) => Some(message.clone()),
             _ => None,
@@ -1055,6 +1067,22 @@ impl BrowserControl {
             {
                 self.protocol
                     .call("Target.activateTarget", json!({"targetId":target}), None)?;
+            }
+            // Attachment only identifies the target. Its renderer overrides
+            // and first-script barrier can still be pending, especially when
+            // Edge allocates a new renderer for a restored page. Activation
+            // must precede this wait so background targets can initialize.
+            let preparation_started=Instant::now();
+            while self.protocol.document_pending(&session) {
+                self.drain()?;
+                if let Some(error)=self.protocol.document_setups.get(&session).and_then(|setup|setup.error.clone()) {
+                    return Err(OpenError::Preparation(error));
+                }
+                if !self.protocol.document_pending(&session) {break;}
+                if preparation_started.elapsed()>=Duration::from_secs(15) {
+                    return Err(OpenError::Preparation("新标签页的区域设置未就绪".into()));
+                }
+                if let Some(event)=self.protocol.read()? {self.protocol.events.push_back(event);}
             }
             // Page.navigate can wait for a newly auto-attached frame or worker.
             // Pump those targets while waiting; a plain synchronous call deadlocks.
