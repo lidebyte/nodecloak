@@ -164,13 +164,13 @@ fn stamp_path(
         return Ok(());
     };
     profiles::guard_tree(path)?;
-    let m = std::fs::metadata(path).map_err(|_| "无法读取登录数据状态")?;
+    let m = std::fs::metadata(path).map_err(|e| browser_session::profile_io_error(relative, "read_file_metadata", &e))?;
     if m.is_dir() {
         let mut paths = std::fs::read_dir(path)
-            .map_err(|_| "无法读取登录数据状态")?
+            .map_err(|e| browser_session::profile_io_error(relative, "read_directory", &e))?
             .map(|e| e.map(|v| v.path()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "无法读取登录数据状态")?;
+            .map_err(|e| browser_session::profile_io_error(relative, "read_directory_entry", &e))?;
         paths.sort();
         for p in paths {
             stamp_path(&p, &relative.join(p.file_name().unwrap()), h, count)?;
@@ -184,7 +184,7 @@ fn stamp_path(
         h.update(m.len().to_le_bytes());
         h.update(
             m.modified()
-                .map_err(|_| "无法读取登录数据时间")?
+                .map_err(|e| browser_session::profile_io_error(relative, "read_modified_time", &e))?
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
@@ -349,7 +349,15 @@ fn reconcile(
         conflict(c,&p.id,b,&p.name,"login_state_changed",remote_rev)?;
         return Ok(if allow_local_launch {SessionPreparation::LocalOnly} else {SessionPreparation::Complete});
     }
-    let file_stamp = stamp(&p.browser, &path)?;
+    let file_stamp = match stamp(&p.browser, &path) {
+        Ok(stamp) => stamp,
+        Err(error) => {
+            crate::browser_control::log_capture_failure(&path, &p.browser, 1, &error);
+            return local_launch_snapshot(Err(error), allow_local_launch, p.received_share.is_none(),
+                &mut c.disk.accounts.get_mut(&account).unwrap().last_error)
+                .map(|_| SessionPreparation::LocalOnly);
+        }
+    };
     let changed = b.file_stamp.as_ref() != Some(&file_stamp) || b.session_dirty || reset_pending;
     if !changed && remote_rev == base_rev {
         c.disk
@@ -826,6 +834,14 @@ mod launch_tests {
         profiles::Profile,
         Credentials,
         std::thread::JoinHandle<()>,
+    ) { fixture_for("firefox", deleted_config) }
+
+    fn fixture_for(browser: &str, deleted_config: bool) -> (
+        tempfile::TempDir,
+        Connection,
+        profiles::Profile,
+        Credentials,
+        std::thread::JoinHandle<()>,
     ) {
         let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -855,7 +871,7 @@ mod launch_tests {
             expires_at: chrono::Utc::now().timestamp() + 900,
         })
         .unwrap();
-        let p = profiles::create(dir.path(), serde_json::from_value(json!({"name":"Owner original","browser":"firefox","proxy":{"mode":"system","host":"","port":0,"username":""}})).unwrap(), None).unwrap();
+        let p = profiles::create(dir.path(), serde_json::from_value(json!({"name":"Owner original","browser":browser,"proxy":{"mode":"system","host":"","port":0,"username":""}})).unwrap(), None).unwrap();
         let path = profiles::path(dir.path(), &p).unwrap();
         let partition = path.join("storage/default/https+++example.invalid^userContextId=2");
         std::fs::create_dir_all(&partition).unwrap();
@@ -920,6 +936,60 @@ mod launch_tests {
         (dir, c, p, credentials, server)
     }
 
+    #[test]
+    #[cfg(windows)]
+    fn locked_auxiliary_directory_preserves_owner_launch_and_both_session_revisions() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for browser in ["chrome", "edge", "firefox"] {
+          for during_stamp in [false, true] {
+            let (dir, mut c, p, _credentials, server) = fixture_for(browser, false);
+            let path = profiles::path(dir.path(), &p).unwrap();
+            // Remove the unrelated unsupported-container fixture for Firefox.
+            std::fs::remove_dir_all(path.join("storage")).unwrap();
+            let locked = path.join(if during_stamp {
+                if browser == "firefox" { "storage/default" } else { "Default/IndexedDB" }
+            } else { "private-auxiliary-data" });
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::write(path.join("cookie-sentinel"), b"local-login-unchanged").unwrap();
+            let handle = std::fs::OpenOptions::new().read(true).share_mode(0)
+                .custom_flags(0x02000000).open(&locked).unwrap();
+            assert_eq!(std::fs::read_dir(&locked).err().unwrap().raw_os_error(), Some(32));
+            let account = c.account_id().unwrap();
+            let binding = c.disk.accounts.get_mut(&account).unwrap().bindings.get_mut(&p.id).unwrap();
+            let checkpoint = Object {id:binding.cloud_id.clone(),kind:"session".into(),revision:5,epoch:1,deleted:false,payload:String::new(),writer:c.device.id.clone(),generation:1,updated_at:chrono::Utc::now().to_rfc3339()};
+            let mut pending = checkpoint.clone(); pending.revision = 7;
+            binding.session_baseline = Some(checkpoint.clone());
+            binding.session_checkpoint = Some(checkpoint);
+            binding.pending_session = Some(pending);
+            binding.session_hash = Some("previous-local-hash".into());
+            binding.file_stamp = Some("previous-file-stamp".into());
+            let result = prepare_launch(&mut c, &p.id);
+            server.join().unwrap();
+            assert!(result.is_ok(), "{browser}: local launch blocked: {result:?}");
+            let disk = super::super::model::Disk::load(dir.path()).unwrap();
+            let state = &disk.accounts[&account];
+            let binding = &state.bindings[&p.id];
+            assert_eq!(binding.generation, 0);
+            assert!(binding.session_dirty);
+            assert_eq!(binding.session_baseline.as_ref().unwrap().revision, 5);
+            assert_eq!(binding.session_checkpoint.as_ref().unwrap().revision, 5);
+            assert_eq!(binding.pending_session.as_ref().unwrap().revision, 7);
+            assert_eq!(binding.session_hash.as_deref(), Some("previous-local-hash"));
+            assert_eq!(binding.file_stamp.as_deref(), Some("previous-file-stamp"));
+            let error = state.last_error.as_deref().unwrap();
+            assert!(error.contains("operation=read_directory") && error.contains("os_code=Some(32)"), "{error}");
+            let diagnostic = std::fs::read_to_string(path.join("nodecloak-control.jsonl")).unwrap();
+            assert!(diagnostic.contains("session_capture_failed") && diagnostic.contains("os_code=Some(32)"));
+            assert!(!diagnostic.contains("private-auxiliary-data") && !diagnostic.contains("local-login-unchanged"));
+            let mut binding = binding.clone();
+            assert!(one(&mut c, &p, &mut binding, None).unwrap_err().contains("os_code=Some(32)"));
+            let mut received = p.clone(); received.received_share = Some(uuid::Uuid::new_v4().to_string());
+            assert!(reconcile(&mut c, &received, &mut binding, None, true).err().unwrap().contains("os_code=Some(32)"));
+            assert_eq!(std::fs::read(path.join("cookie-sentinel")).unwrap(), b"local-login-unchanged");
+            drop(handle);
+          }
+        }
+    }
     #[test]
     fn owner_can_launch_with_unsupported_storage_without_publishing_or_replacing_sessions() {
         let (dir, mut c, p, _credentials, server) = fixture(false);
@@ -1054,6 +1124,8 @@ mod launch_tests {
             "隔离网站存储被浏览器阻止，本机数据已保留",
             "浏览器登录数据操作 Storage.getCookies 超时",
             "隔离浏览器连接中断（操作 Page.navigate，I/O kind=ConnectionReset, os_code=Some(10054)）",
+            "登录同步暂时无法读取本机浏览器数据（operation=read_directory, area=browser_files, kind=Uncategorized, os_code=Some(32)；本机数据已保留）",
+            "登录同步暂时无法读取本机浏览器数据（operation=copy_file, area=cookies, kind=PermissionDenied, os_code=Some(5)；本机数据已保留）",
         ] {
             let mut error = None;
             assert!(matches!(local_launch_snapshot(Err(message.into()), true, true, &mut error), Ok(None)));
@@ -1064,7 +1136,7 @@ mod launch_tests {
                 assert!(error.is_none());
             }
         }
-        for message in ["云端配置已变化", "lease_held", "无法读取网站存储", "登录快照无效", "浏览器拒绝登录数据操作 Storage.getCookies（code=invalid argument）"] {
+        for message in ["云端配置已变化", "lease_held", "无法读取网站存储", "登录快照无效", "配置路径包含链接，已停止操作", "配置路径包含重解析点，已停止操作", "云端响应：登录同步暂时无法读取本机浏览器数据", "浏览器拒绝登录数据操作 Storage.getCookies（code=invalid argument）"] {
             let mut error = None;
             assert_eq!(local_launch_snapshot(Err(message.into()), true, true, &mut error).err().as_deref(), Some(message));
             assert!(error.is_none());

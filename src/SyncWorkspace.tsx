@@ -61,7 +61,7 @@ export default function SyncWorkspace({cloud,focusProfileId}:{cloud:Controller;f
  const waiting=s.waiting||[],bindings=s.bindings||[];
  const pending=new Set([...waiting.map(c=>c.localId),...bindings.filter(b=>b.configPending||b.sessionPending).map(b=>b.localId)]).size;
  const title=needsSetup?'选择要同步的副本':issues.length?'有副本需要你处理':s.lastError?'同步暂未完成':pending?'等待同步':!s.autoSync?'自动同步已暂停':!s.lastSync?'可以开始同步':'同步已完成';
- const description=needsSetup?'选择本机要上传的副本，以及要接收的云端副本。':issues.length?'本机数据已保留。请逐个选择要保留的内容，其他副本可继续同步。':s.lastError?'请检查网络后重试，当前本机数据会保留。':pending?s.autoSync?'将自动重试，无需选择保留哪一份。':'点击“立即同步”重试，或开启自动同步。':!s.autoSync?'你仍可点击“立即同步”，手动同步已关联的副本。':'在不同设备上接着使用，登录状态会在副本关闭后同步。';
+ const description=needsSetup?'选择本机要上传的副本，以及要接收的云端副本。':issues.length?'本机数据已保留。请逐个选择要保留的内容，其他副本可继续同步。':s.lastError?'请查看下方具体原因后重试，本机数据会保留。':pending?s.autoSync?'将自动重试，无需选择保留哪一份。':'点击“立即同步”重试，或开启自动同步。':!s.autoSync?'你仍可点击“立即同步”，手动同步已关联的副本。':'在不同设备上接着使用，登录状态会在副本关闭后同步。';
  return <div className="sync-workspace" ref={root}>
   <section className={`sync-overview ${issues.length||s.lastError?'attention':''}`} aria-label={t('同步状态')}>
    <span className="sync-status-icon">{busy?<LoaderCircle className="spin" size={26}/>:issues.length||s.lastError?<CircleAlert size={26}/>:pending?<Clock3 size={26}/>:<Cloud size={26}/>}</span>

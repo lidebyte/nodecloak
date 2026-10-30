@@ -1633,5 +1633,7 @@
   "确认保留本机登录状态": "Confirm local sign-in data",
   "确认使用云端登录状态": "Confirm cloud sign-in data",
   "确认停止同步": "Confirm stopping sync",
-  "确认接管此副本的登录数据": "Confirm sign-in data takeover"
+  "确认接管此副本的登录数据": "Confirm sign-in data takeover",
+  "请查看下方具体原因后重试，本机数据会保留。": "Review the specific error below and retry. Local data will be kept.",
+  "登录同步暂时无法读取本机浏览器数据（{0}；本机数据已保留）": "Sign-in sync temporarily cannot read local browser data ({0}; local data has been preserved)"
 }

@@ -20,9 +20,9 @@ for(const [platform,name] of Object.entries(names)) {
 }
 // User-facing notices only: no admin features, server internals or build/deployment details.
 const releaseNotes=[
-  "登录数据同步上限从 8 MiB 提升至 64 MiB，支持包含较大网站存储的完整登录快照。 / Sign-in snapshots now support up to 64 MiB instead of 8 MiB, including larger website storage.",
-  "较大的登录快照自动压缩后加密同步，减少传输流量及云端空间占用，原有登录数据继续兼容。 / Larger sign-in snapshots are compressed before encryption to reduce transfer and cloud storage usage, while existing snapshots remain compatible.",
-  "Chrome、Edge 和 Firefox 均支持；接收大快照的其他设备也需要更新至 3.2.5 或更高版本。超限或同步失败时保留本机数据。 / Supported in Chrome, Edge and Firefox. Other devices receiving large snapshots must also update to 3.2.5 or later. Local data is preserved if a limit is exceeded or synchronization fails."
+  "修复开启登录同步后，部分本机副本因数据读取失败而无法启动的问题；读取失败时保留数据并允许打开本人副本。 / Fixed owned local profiles failing to open when sign-in sync cannot read browser data. Local data is preserved and the profile can still open.",
+  "减少浏览器临时文件占用造成的同步失败；遇到短暂读取错误时自动重试。 / Reduced sync failures caused by browser temporary files and added a retry for transient read errors.",
+  "完善启动日志和同步提示，显示具体读取操作与系统错误码；同步失败时不会上传不完整的登录数据。 / Improved launch logs and sync messages with the failing operation and system error code. Incomplete sign-in data is never uploaded after a failed capture."
 ];
 const manifest={version,notes:releaseNotes.map(note=>`- ${note}`).join('\n'),pub_date:new Date().toISOString(),platforms};
 fs.writeFileSync(path.join(directory,'latest.json'),JSON.stringify(manifest,null,2)+'\n');

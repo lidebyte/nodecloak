@@ -237,11 +237,31 @@ impl Snapshot {
         ))
     }
 }
+const PROFILE_IO_ERROR: &str = "登录同步暂时无法读取本机浏览器数据";
+pub(super) fn profile_io_error(relative: &Path, operation: &'static str, error: &std::io::Error) -> String {
+    // Directory names can contain website origins, extension ids and credentials.
+    // Keep fixed storage categories and OS codes; never persist a path or error body.
+    let area = if relative.as_os_str().is_empty() { "profile" }
+        else if relative.starts_with("Default/IndexedDB") { "indexed_db" }
+        else if relative.starts_with("Default/Local Storage") { "local_storage" }
+        else if relative.starts_with("storage") { "website_storage" }
+        else if relative.starts_with("Default/Network") || relative.starts_with("Default/Cookies")
+            || relative.starts_with("cookies.sqlite") { "cookies" }
+        else { "browser_files" };
+    format!("{PROFILE_IO_ERROR}（operation={operation}, area={area}, kind={:?}, os_code={:?}；本机数据已保留）", error.kind(), error.raw_os_error())
+}
+fn retryable_profile_io(error: &str) -> bool {
+    error.starts_with(PROFILE_IO_ERROR) && ["os_code=Some(32)", "os_code=Some(33)",
+        "kind=NotFound", "kind=Interrupted", "kind=WouldBlock"].iter().any(|code| error.contains(code))
+}
 fn copy_tree(src: &Path, dst: &Path, budget: &mut u64) -> Result<(), String> {
+    copy_tree_inner(src, dst, Path::new(""), false, budget)
+}
+fn copy_tree_inner(src: &Path, dst: &Path, relative: &Path, chromium: bool, budget: &mut u64) -> Result<(), String> {
     profiles::guard_tree(src)?;
-    std::fs::create_dir_all(dst).map_err(|_| "无法创建临时副本")?;
-    for entry in std::fs::read_dir(src).map_err(|_| "无法读取浏览器副本")? {
-        let e = entry.map_err(|_| "无法读取浏览器副本")?;
+    std::fs::create_dir_all(dst).map_err(|e| profile_io_error(relative, "create_temporary_directory", &e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| profile_io_error(relative, "read_directory", &e))? {
+        let e = entry.map_err(|e| profile_io_error(relative, "read_directory_entry", &e))?;
         let name = e.file_name();
         let n = name.to_string_lossy();
         if matches!(
@@ -264,18 +284,25 @@ fn copy_tree(src: &Path, dst: &Path, budget: &mut u64) -> Result<(), String> {
         {
             continue;
         }
+        // Regenerable Chromium metrics/GPU caches must not block login capture.
+        // Scope these names to browser-owned locations, not arbitrary website data.
+        if chromium && (relative.as_os_str().is_empty() || relative == Path::new("Default"))
+            && matches!(n.as_ref(), "BrowserMetrics" | "DawnGraphiteCache" | "DawnWebGPUCache") {
+            continue;
+        }
         let from = e.path();
         profiles::guard_tree(&from)?;
+        let child = relative.join(&name);
         let to = dst.join(name);
-        let meta = std::fs::symlink_metadata(&from).map_err(|_| "无法读取副本文件")?;
+        let meta = std::fs::symlink_metadata(&from).map_err(|e| profile_io_error(&child, "read_file_metadata", &e))?;
         if meta.is_dir() {
-            copy_tree(&from, &to, budget)?
+            copy_tree_inner(&from, &to, &child, chromium, budget)?
         } else if meta.is_file() {
             *budget = budget.checked_add(meta.len()).ok_or("副本过大")?;
             if *budget > 2 << 30 {
                 return Err("副本数据超过 2 GiB，请先清理缓存再同步".into());
             };
-            std::fs::copy(from, to).map_err(|_| "无法复制浏览器副本")?;
+            std::fs::copy(from, to).map_err(|e| profile_io_error(&child, "copy_file", &e))?;
         } else {
             return Err("副本包含不支持的文件".into());
         }
@@ -380,7 +407,7 @@ pub(super) fn capture_transport_failure(error: &str) -> bool {
         || error.starts_with("浏览器登录数据操作 ") && error.ends_with(" 超时")
 }
 pub(super) fn capture_local_launch_failure(error: &str) -> bool {
-    capture_transport_failure(error) || error == FIREFOX_WEB_CONTEXT_ERROR
+    capture_transport_failure(error) || error.starts_with(PROFILE_IO_ERROR) || error == FIREFOX_WEB_CONTEXT_ERROR
         || error == "浏览器拒绝登录数据操作 browsingContext.navigate"
         || error.starts_with("浏览器拒绝登录数据操作 browsingContext.navigate（")
         || error == "无法进入隔离网站存储" || error.starts_with("无法进入隔离网站存储（")
@@ -1009,17 +1036,18 @@ impl Stage {
         profiles::guard_tree(profile)?;
         platform::ensure_profile_closed(profile)?;
         let parent = profile.parent().ok_or("副本目录无效")?;
-        std::fs::create_dir_all(parent).map_err(|_| "无法创建副本目录")?;
+        std::fs::create_dir_all(parent).map_err(|e| profile_io_error(Path::new(""), "create_temporary_parent", &e))?;
         let temp = tempfile::Builder::new()
             .prefix(".nodecloak-sync-")
             .tempdir_in(parent)
-            .map_err(|_| "无法创建临时副本")?;
+            .map_err(|e| profile_io_error(Path::new(""), "create_temporary_directory", &e))?;
         let path = temp.path().join("profile");
-        if profile.exists() {
-            copy_tree(profile, &path, &mut 0)?
-        } else {
-            std::fs::create_dir(&path).map_err(|_| "无法创建临时副本")?
-        };
+        match std::fs::symlink_metadata(profile) {
+            Ok(_) => copy_tree_inner(profile, &path, Path::new(""), browser != "firefox", &mut 0)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
+                std::fs::create_dir(&path).map_err(|e| profile_io_error(Path::new(""), "create_temporary_directory", &e))?,
+            Err(e) => return Err(profile_io_error(Path::new(""), "read_profile_metadata", &e)),
+        }
         let mut firefox_prefs = Vec::new();
         let mut firefox_extensions = None;
         if browser == "firefox" {
@@ -1183,7 +1211,8 @@ fn capture_with_retry(
             Ok(snapshot) => return Ok(snapshot),
             Err(error) => {
                 failed(attempt, &error);
-                if attempt == 2 || !capture_transport_failure(&error) { return Err(error); }
+                if attempt == 2 || !(capture_transport_failure(&error) || retryable_profile_io(&error)) { return Err(error); }
+                if retryable_profile_io(&error) { std::thread::sleep(Duration::from_millis(150)); }
             }
         }
     }
@@ -1354,6 +1383,77 @@ fn verify_cookies(expected: &[Cookie], actual: &[Cookie]) -> Result<(), String> 
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn staging_reports_io_operation_and_code_without_profile_paths_or_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let source = canonical.join("private-user-and-site.invalid");
+        std::fs::write(&source, b"private-login-token").unwrap();
+        let error = copy_tree(&source, &canonical.join("staged"), &mut 0).unwrap_err();
+        assert!(error.contains("operation=read_directory"), "{error}");
+        assert!(error.contains("kind=") && error.contains("os_code="), "{error}");
+        assert!(!error.contains("private-user") && !error.contains("private-login"));
+        assert_eq!(std::fs::read(source).unwrap(), b"private-login-token");
+        let error = profile_io_error(Path::new("Default/IndexedDB/https_private-site-token_0"), "copy_file",
+            &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private-OS-error-body"));
+        assert!(error.contains("area=indexed_db") && error.contains("kind=PermissionDenied"));
+        assert!(!error.contains("private-site") && !error.contains("private-OS"));
+    }
+    #[test]
+    fn staging_omits_only_chromium_regenerable_caches_at_browser_locations() {
+        for browser in ["chrome", "edge", "firefox"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().canonicalize().unwrap().join("profile");
+            for parent in ["", "Default", "Default/IndexedDB/private-store"] {
+                for name in ["BrowserMetrics", "DawnGraphiteCache", "DawnWebGPUCache"] {
+                    let directory = source.join(parent).join(name);
+                    std::fs::create_dir_all(&directory).unwrap();
+                    std::fs::write(directory.join("sentinel"), b"keep-real-data").unwrap();
+                }
+            }
+            std::fs::write(source.join("cookie-sentinel"), b"keep-login").unwrap();
+            #[cfg(windows)]
+            let _cache_locks = {
+                use std::os::windows::fs::OpenOptionsExt;
+                let mut locks = Vec::new();
+                if browser != "firefox" {
+                    for parent in ["", "Default"] {
+                        for name in ["BrowserMetrics", "DawnGraphiteCache", "DawnWebGPUCache"] {
+                            let directory = source.join(parent).join(name);
+                            locks.push(std::fs::OpenOptions::new().read(true).share_mode(0)
+                                .custom_flags(0x02000000).open(&directory).unwrap());
+                            assert_eq!(std::fs::read_dir(directory).err().unwrap().raw_os_error(), Some(32));
+                        }
+                    }
+                }
+                locks
+            };
+            let stage = Stage::new(browser, &source).unwrap();
+            for name in ["BrowserMetrics", "DawnGraphiteCache", "DawnWebGPUCache"] {
+                for parent in ["", "Default"] {
+                    assert_eq!(stage.path.join(parent).join(name).exists(), browser == "firefox", "{browser}: {parent}/{name}");
+                    assert!(source.join(parent).join(name).join("sentinel").exists());
+                }
+                assert_eq!(std::fs::read(stage.path.join("Default/IndexedDB/private-store").join(name).join("sentinel")).unwrap(), b"keep-real-data");
+            }
+            assert_eq!(std::fs::read(stage.path.join("cookie-sentinel")).unwrap(), b"keep-login");
+        }
+    }
+    #[test]
+    fn staging_retries_transient_sharing_failure_once_but_not_access_denied() {
+        for (code, expected_calls) in [(32, 2), (5, 1)] {
+            let error = format!("登录同步暂时无法读取本机浏览器数据（operation=read_directory, area=browser_files, kind=PermissionDenied, os_code=Some({code})；本机数据已保留）");
+            let mut calls = 0;
+            let mut failures = Vec::new();
+            let result = capture_with_retry(|| {
+                calls += 1;
+                if calls == 1 { Err(error.clone()) } else { Ok(Snapshot::empty()) }
+            }, |attempt, message| failures.push((attempt, message.to_owned())));
+            assert_eq!(calls, expected_calls);
+            assert_eq!(result.is_ok(), expected_calls == 2);
+            assert_eq!(failures, [(1, error)]);
+        }
+    }
     #[test]
     fn snapshots_accept_more_than_eight_mib_and_reject_over_sixty_four_without_trimming() {
         let value="x".repeat(9<<20);
